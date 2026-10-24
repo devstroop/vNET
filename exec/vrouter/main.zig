@@ -438,12 +438,11 @@ fn upCommand(init: std.process.Init, args: []const []const u8) !void {
             status.value.status.?.pid,
         });
         return;
-    } else |err| switch (err) {
-        error.FileNotFound, error.ConnectionRefused, error.Timeout => {},
-        else => {
+    } else |err| {
+        if (!daemonUnavailable(err) and err != error.Timeout) {
             try printErr(io, gpa, "cannot reach {s}: {s}\n", .{ path, @errorName(err) });
             std.process.exit(1);
-        },
+        }
     }
 
     const state_dir = stateDir(init);
@@ -676,18 +675,17 @@ fn doctorCommand(init: std.process.Init, args: []const []const u8) !void {
                 info.uptime_ms,
                 info.ports,
             });
-        } else |err| switch (err) {
-            error.FileNotFound, error.ConnectionRefused => {
+        } else |err| {
+            if (daemonUnavailable(err)) {
                 if (locked) {
                     try printErr(io, gpa, "fail: daemon lock is held but {s} is not responding\n", .{path});
                     std.process.exit(1);
                 }
                 try print(io, gpa, "ok: daemon not running (stale socket)\n", .{});
-            },
-            else => {
+            } else {
                 try printErr(io, gpa, "fail: daemon {s}: {s}\n", .{ path, @errorName(err) });
                 std.process.exit(1);
-            },
+            }
         }
     } else |err| switch (err) {
         error.FileNotFound => {
@@ -1018,12 +1016,11 @@ fn natCommand(init: std.process.Init, args: []const []const u8) !void {
             std.process.exit(1);
         }
         daemon_running = true;
-    } else |err| switch (err) {
-        error.FileNotFound, error.ConnectionRefused => {},
-        else => {
+    } else |err| {
+        if (!daemonUnavailable(err)) {
             try printErr(io, gpa, "cannot reach {s}: {s}\n", .{ control_path, @errorName(err) });
             std.process.exit(1);
-        },
+        }
     }
 
     vrouter.config_write.saveNat(io, gpa, cfg.path, source, parsed.config.nat) catch |err| {
@@ -1289,6 +1286,13 @@ fn controlCall(
     return client.callOp(op, state_filter, limit);
 }
 
+fn daemonUnavailable(err: anyerror) bool {
+    return err == error.FileNotFound or
+        err == error.ConnectionRefused or
+        err == error.ConnectionResetByPeer or
+        err == error.BrokenPipe;
+}
+
 fn queryStatus(
     io: std.Io,
     gpa: std.mem.Allocator,
@@ -1370,12 +1374,11 @@ fn downCommand(init: std.process.Init, args: []const []const u8) !void {
             });
             std.process.exit(1);
         }
-    } else |err| switch (err) {
-        error.FileNotFound, error.ConnectionRefused => {},
-        else => {
+    } else |err| {
+        if (!daemonUnavailable(err)) {
             try printErr(io, gpa, "cannot check daemon at {s}: {s}\n", .{ path, @errorName(err) });
             std.process.exit(1);
-        },
+        }
     }
 
     var host = openHost(init, &parsed) catch |err| {
