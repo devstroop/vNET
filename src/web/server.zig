@@ -611,9 +611,9 @@ test "url decoding" {
 
 test "form values" {
     var buf: [64]u8 = undefined;
-    try std.testing.expectEqualStrings("s3cret", formValue(&buf, "x=1&password=s3cret", "password").?);
-    try std.testing.expect(formValue(&buf, "password=", "password").?.len == 0);
-    try std.testing.expect(formValue(&buf, "other=1", "password") == null);
+    try std.testing.expectEqualStrings("form-value", formValue(&buf, "x=1&field=form-value", "field").?);
+    try std.testing.expect(formValue(&buf, "field=", "field").?.len == 0);
+    try std.testing.expect(formValue(&buf, "other=1", "field") == null);
 }
 
 test "loopback detection" {
