@@ -8,6 +8,19 @@ All notable changes to vRouter are documented here. The format follows
 
 ### Added
 
+- **IPv6 core (ADR-013):** dual-stack forwarding between L2 ports, SVIs and
+  TUN ports; NDP neighbor discovery with a bounded pending queue; ICMPv6 echo,
+  errors and packet-too-big; IPv6 static/connected routes; and software repair
+  of forwarded TCP/UDP checksums.
+- IPv6 configuration: `interfaces.<name>.addresses` for additional IPv4/IPv6
+  CIDRs, IPv6 routes with family-checked next hops, firewall `family` and
+  `proto: "icmpv6"`, and `firewall.rate_limit.ndp`. IPv6-enabled interfaces
+  require MTU >= 1280.
+- `vrouter iface set|del` and `vrouter route add|del` accept IPv6 values and
+  journal AF_INET6 host mutations; `vrouter firewall test` accepts IPv6
+  addresses and `icmpv6`.
+- `scripts/test_ipv6.sh` netns test for IPv6 ping and TCP forwarding.
+
 - R7 Linux control socket: line-delimited JSON over
   `/run/vrouter/control.sock` (mode `0660`, peer-uid check), live read-only
   `status`, `nat.list` and `conntrack.list`, and the `vrouter up`, `vrouter doctor`,

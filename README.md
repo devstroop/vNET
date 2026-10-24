@@ -1,9 +1,9 @@
 # vRouter
 
-Headless virtual router implemented in Zig 0.16.x.
+A programmable virtual router implemented in Zig 0.16.x.
 
-vRouter attaches network interfaces, forwards Ethernet and IPv4 traffic, and
-provides NAT, DHCP, DNS, and journal-backed host configuration. It runs as a
+vRouter attaches network interfaces, forwards Ethernet, IPv4 and IPv6 traffic,
+and provides NAT, DHCP, DNS, and journal-backed host configuration. It runs as a
 daemon with a command-line interface and exposes a C ABI for embedded hosts.
 
 > **Renamed:** vRouter was previously vNAT. The 0.1.0 release changes binary,
@@ -12,10 +12,11 @@ daemon with a command-line interface and exposes a C ABI for embedded hosts.
 ## Capabilities
 
 - AF_PACKET L2 ports and TUN/TAP L3 ports
-- ARP handling, IPv4 forwarding, ICMP errors, and TTL processing
-- Userspace connection tracking and garbage collection
+- ARP and NDP handling, IPv4/IPv6 forwarding, ICMP/ICMPv6 errors, and
+  TTL/hop-limit processing
+- Userspace IPv4 connection tracking and garbage collection
 - Source NAT, destination NAT, port forwarding, and hairpin handling
-- DHCPv4 server and client with lease persistence
+- DHCPv4 server and client with lease persistence (DHCPv6 in v1.1)
 - DNS forwarding with cache, TCP fallback, and split zones
 - Atomic, journaled route/address/link changes with rollback
 - Cross-compilation for Linux and Android targets
@@ -39,6 +40,7 @@ zig build test
 bash scripts/test_netns.sh
 bash scripts/test_route.sh
 bash scripts/test_tun.sh
+bash scripts/test_ipv6.sh
 bash scripts/test_journal.sh
 bash scripts/nat_matrix.sh
 bash scripts/test_dhcp.sh
@@ -103,10 +105,12 @@ Contributor rules: `AGENTS.md`.
 ## Implementation Status
 
 - R0-R4: complete
-- R5-R6: in progress (VLAN bridging and firewall core wired)
+- R5-R6: complete (VLAN bridging and firewall core wired)
 - R7: Linux control socket and C ABI foundation complete; Android
   JNI/VpnService host and proxy NAT pending
-- R8-R9: planned
+- R8: planned
+- R9: IPv6 core complete (ADR-013); hardening, fuzzing and release work
+  remaining
 - R10 (post-v1): optional local web admin via HTMX and the Unix-socket API
   (ADR-011)
 

@@ -13,11 +13,14 @@
     "lan-br": { "ports": ["lan", "usb-lan"] }
   },
   "interfaces": {
-    "wan0": { "port": "wan", "address": "dhcp" },
-    "lan0": { "bridge": "lan-br", "address": "10.10.0.1/24" }
+    "wan0": { "port": "wan", "address": "dhcp",
+              "addresses": ["2001:db8:1::2/64"] },
+    "lan0": { "bridge": "lan-br", "address": "10.10.0.1/24",
+              "addresses": ["2001:db8:10::1/64"] }
   },
   "routes": [
-    { "dst": "0.0.0.0/0", "via": "192.168.1.1", "dev": "wan0" }
+    { "dst": "0.0.0.0/0", "via": "192.168.1.1", "dev": "wan0" },
+    { "dst": "2001:db8:20::/48", "via": "2001:db8:1::1", "dev": "wan0" }
   ],
   "nat": {
     "masquerade": [ { "out": "wan0" } ],
@@ -41,6 +44,11 @@
   "firewall": {
     "default_in": "drop",
     "default_forward": "accept",
-    "default_out": "accept"
+    "default_out": "accept",
+    "rate_limit": { "icmp": 100, "arp": 512, "dhcp": 100, "ndp": 256 },
+    "rules": [
+      { "action": "accept", "family": "ipv6", "proto": "icmpv6",
+        "src": "2001:db8:10::/64" }
+    ]
   }
 }

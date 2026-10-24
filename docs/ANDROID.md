@@ -141,6 +141,8 @@ should link with `-pthread`.
 
 - Cannot serve tethered clients.
 - Cannot use raw L2; no bridging.
+- IPv6 routing/DNS is not wired into Mode A in v1.0 (ADR-013); do not add
+  `::/0` to the VPN until the host path is implemented.
 - Throughput bound by userspace proxy + fd copies.
 - Some apps bypass VPN (e.g. certain system components, always-on conflicts).
 - Cellular carriers may block inbound; port forwarding is unreliable.
@@ -160,6 +162,8 @@ should link with `-pthread`.
 - Create TUN/TAP.
 - Netlink: addresses, routes, neighbors, link state.
 - `iptables`/`ip6tables` or `nft`; `tc`; `ip rule`.
+- The userspace IPv6 core (forwarding/NDP) is Linux v1.0 scope, but Android
+  host routing/DNS integration is v1.1. Do not assume tethered IPv6 works.
 - Possibly network namespaces (kernel-dependent).
 - Intercept tethered clients.
 

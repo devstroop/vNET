@@ -72,13 +72,15 @@ vrouter/
 │   │   └── stp.zig              optional 802.1D
 │   ├── l3/
 │   │   ├── ipv4.zig             header, checksum, TTL (R2)
-│   │   ├── ipv6.zig             header, extension parsing
-│   │   ├── fib.zig              LPM (flat R2, trie R3)
+│   │   ├── ipv6.zig             header, extension parsing, checksums
+│   │   ├── fib.zig              IPv4 LPM (flat R2, trie R3)
+│   │   ├── fib6.zig             IPv6 LPM (parallel to fib.zig)
 │   │   ├── rib.zig              route sources + policy rules
 │   │   ├── arp.zig              cache + request/reply (R2)
-│   │   ├── ndp.zig              neighbor cache (v1.1 RA)
-│   │   ├── icmp.zig             errors + echo (R2)
-│   │   ├── forward.zig          IPv4 forwarding, L2 + TUN ingress (R2)
+│   │   ├── ndp.zig              NS/NA + neighbor cache (RA v1.1)
+│   │   ├── icmp.zig             IPv4 errors + echo (R2)
+│   │   ├── icmpv6.zig           ICMPv6 errors + echo
+│   │   ├── forward.zig          IPv4/IPv6 forwarding, L2 + TUN ingress
 │   │   └── mtu.zig              MSS clamp, PMTU errors
 │   ├── nat/
 │   │   ├── conntrack.zig        5-tuple table, timeouts, GC, port allocator (R3)
@@ -116,6 +118,7 @@ vrouter/
     ├── build_android.sh
     ├── test_netns.sh
     ├── test_route.sh
+    ├── test_ipv6.sh
     ├── test_journal.sh
     ├── test_offload.sh
     ├── nat_matrix.sh
@@ -249,7 +252,8 @@ pub const Fib = struct {
 };
 ```
 
-- IPv4/IPv6 compressed trie; O(prefix bits).
+- IPv4 and IPv6 use separate LPM tables (`fib.zig`, `fib6.zig`) with O(prefix
+  bits) lookup; route and next-hop families must match.
 - Policy rules: ordered `(from, iif, mark) → table`.
 - Connected routes generated from interface addresses; removed on port loss.
 
@@ -427,6 +431,7 @@ no throughput or latency claim is made before R9.
 | Pipeline | In-memory ports with golden packet vectors |
 | Topology | Linux netns + veth + TUN (`scripts/test_netns.sh`) |
 | Forwarding | Two-host netns ping + TCP (`scripts/test_route.sh`) |
+| IPv6 | NDP, ping6 and TCP repair (`scripts/test_ipv6.sh`) |
 | TUN | Kernel TUN peer ↔ veth host, ICMP + TCP (`scripts/test_tun.sh`) |
 | Journal | iface/route mutations + `vrouter down` (`scripts/test_journal.sh`) |
 | NAT/conntrack | SNAT UDP/ICMP/TCP, DNAT/hairpin (`scripts/nat_matrix.sh`) |
