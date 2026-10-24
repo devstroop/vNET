@@ -27,6 +27,8 @@ jobs:
       - run: test "$(zig version)" = "0.16.0"
       - run: zig build test
       - run: zig build
+      - run: zig build web
+      - run: zig build web-test
       - run: for f in examples/*.json; do ./zig-out/bin/vrouter validate "$f"; done
 
   fuzz:
