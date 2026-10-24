@@ -44,7 +44,7 @@ pub const Host = struct {
     }
 
     pub fn ifaceSet(self: *Host, dev: []const u8, cidr: []const u8) !Change {
-        const prefix = types.Prefix4.parse(cidr) catch return error.InvalidArgument;
+        const prefix = types.IpPrefix.parse(cidr) catch return error.InvalidArgument;
         _ = try iface_mod.ifindex(dev);
 
         const contents = try self.readContents();
@@ -52,7 +52,7 @@ pub const Host = struct {
         if (try journal.ownsAddress(self.gpa, contents, dev, prefix)) return .noop;
 
         try self.store.append(self.io, .{ .addr_add = .{ .dev = dev, .prefix = prefix } });
-        netlink.addAddress(self.io, dev, prefix) catch |err| {
+        addAddress(self.io, dev, prefix) catch |err| {
             try self.store.removeLast(self.io);
             return err;
         };
@@ -60,7 +60,7 @@ pub const Host = struct {
     }
 
     pub fn ifaceDel(self: *Host, dev: []const u8, cidr: []const u8) !Change {
-        const prefix = types.Prefix4.parse(cidr) catch return error.InvalidArgument;
+        const prefix = types.IpPrefix.parse(cidr) catch return error.InvalidArgument;
         _ = try iface_mod.ifindex(dev);
 
         const contents = try self.readContents();
@@ -68,7 +68,7 @@ pub const Host = struct {
         if (!try journal.ownsAddress(self.gpa, contents, dev, prefix)) return error.NotManaged;
 
         try self.store.append(self.io, .{ .addr_del = .{ .dev = dev, .prefix = prefix } });
-        netlink.deleteAddress(self.io, dev, prefix) catch |err| {
+        deleteAddress(self.io, dev, prefix) catch |err| {
             self.store.removeLast(self.io) catch {};
             return if (err == error.NotFound) .noop else err;
         };
@@ -182,13 +182,7 @@ pub const Host = struct {
         if (try journal.ownsRoute(self.gpa, contents, route)) return .noop;
 
         try self.store.append(self.io, .{ .route_add = route });
-        netlink.addRoute(self.io, .{
-            .prefix = route.prefix,
-            .via = route.via,
-            .ifindex = ifindex,
-            .metric = route.metric,
-            .table = route.table,
-        }) catch |err| {
+        addRoute(self.io, route, ifindex) catch |err| {
             try self.store.removeLast(self.io);
             return err;
         };
@@ -211,13 +205,7 @@ pub const Host = struct {
         if (!try journal.ownsRoute(self.gpa, contents, route)) return error.NotManaged;
 
         try self.store.append(self.io, .{ .route_del = route });
-        netlink.deleteRoute(self.io, .{
-            .prefix = route.prefix,
-            .via = route.via,
-            .ifindex = ifindex,
-            .metric = route.metric,
-            .table = route.table,
-        }) catch |err| {
+        deleteRoute(self.io, route, ifindex) catch |err| {
             self.store.removeLast(self.io) catch {};
             return if (err == error.NotFound) .noop else err;
         };
@@ -277,14 +265,14 @@ pub const Host = struct {
                     error.NotFound => return,
                     else => return err,
                 };
-                netlink.deleteAddress(self.io, address.dev, address.prefix) catch |err| switch (err) {
+                deleteAddress(self.io, address.dev, address.prefix) catch |err| switch (err) {
                     error.NotFound => {},
                     else => return err,
                 };
             },
             .addr_del => |address| {
                 _ = try iface_mod.ifindex(address.dev);
-                netlink.addAddress(self.io, address.dev, address.prefix) catch |err| switch (err) {
+                addAddress(self.io, address.dev, address.prefix) catch |err| switch (err) {
                     error.Busy => {},
                     else => return err,
                 };
@@ -329,14 +317,14 @@ pub const Host = struct {
                     error.NotFound => return,
                     else => return err,
                 };
-                netlink.deleteRoute(self.io, routeSpec(route, ifindex)) catch |err| switch (err) {
+                deleteRoute(self.io, route, ifindex) catch |err| switch (err) {
                     error.NotFound => {},
                     else => return err,
                 };
             },
             .route_del => |route| {
                 const ifindex = try iface_mod.ifindex(route.dev);
-                netlink.addRoute(self.io, routeSpec(route, ifindex)) catch |err| switch (err) {
+                addRoute(self.io, route, ifindex) catch |err| switch (err) {
                     error.Busy => {},
                     else => return err,
                 };
@@ -365,11 +353,14 @@ fn parseRoute(
     metric: u32,
     table: u32,
 ) !journal.Route {
-    const prefix = types.Prefix4.parse(dst) catch return error.InvalidArgument;
-    const next_hop: ?types.Ipv4 = if (via) |text|
-        types.Ipv4.parse(text) catch return error.InvalidArgument
+    const prefix = types.IpPrefix.parse(dst) catch return error.InvalidArgument;
+    const next_hop: ?types.IpAddr = if (via) |text|
+        types.IpAddr.parse(text) catch return error.InvalidArgument
     else
         null;
+    if (next_hop) |hop| {
+        if (hop.family() != prefix.family()) return error.InvalidArgument;
+    }
     if (dev.len == 0) return error.InvalidArgument;
     return .{
         .prefix = prefix,
@@ -380,17 +371,89 @@ fn parseRoute(
     };
 }
 
-fn routeSpec(route: journal.Route, ifindex: u32) netlink.RouteSpec {
-    return .{
-        .prefix = route.prefix,
-        .via = route.via,
-        .ifindex = ifindex,
-        .metric = route.metric,
-        .table = route.table,
+fn addAddress(io: std.Io, dev: []const u8, prefix: types.IpPrefix) PortError!void {
+    return switch (prefix) {
+        .ipv4 => |p| netlink.addAddress(io, dev, p),
+        .ipv6 => |p| netlink.addAddress6(io, dev, p),
+    };
+}
+
+fn deleteAddress(io: std.Io, dev: []const u8, prefix: types.IpPrefix) PortError!void {
+    return switch (prefix) {
+        .ipv4 => |p| netlink.deleteAddress(io, dev, p),
+        .ipv6 => |p| netlink.deleteAddress6(io, dev, p),
+    };
+}
+
+fn addRoute(io: std.Io, route: journal.Route, ifindex: u32) PortError!void {
+    return switch (route.prefix) {
+        .ipv4 => |p| netlink.addRoute(io, .{
+            .prefix = p,
+            .via = if (route.via) |hop| switch (hop) {
+                .ipv4 => |v| v,
+                .ipv6 => return error.InvalidArgument,
+            } else null,
+            .ifindex = ifindex,
+            .metric = route.metric,
+            .table = route.table,
+        }),
+        .ipv6 => |p| netlink.addRoute6(io, .{
+            .prefix = p,
+            .via = if (route.via) |hop| switch (hop) {
+                .ipv6 => |v| v,
+                .ipv4 => return error.InvalidArgument,
+            } else null,
+            .ifindex = ifindex,
+            .metric = route.metric,
+            .table = route.table,
+        }),
+    };
+}
+
+fn deleteRoute(io: std.Io, route: journal.Route, ifindex: u32) PortError!void {
+    return switch (route.prefix) {
+        .ipv4 => |p| netlink.deleteRoute(io, .{
+            .prefix = p,
+            .via = if (route.via) |hop| switch (hop) {
+                .ipv4 => |v| v,
+                .ipv6 => return error.InvalidArgument,
+            } else null,
+            .ifindex = ifindex,
+            .metric = route.metric,
+            .table = route.table,
+        }),
+        .ipv6 => |p| netlink.deleteRoute6(io, .{
+            .prefix = p,
+            .via = if (route.via) |hop| switch (hop) {
+                .ipv6 => |v| v,
+                .ipv4 => return error.InvalidArgument,
+            } else null,
+            .ifindex = ifindex,
+            .metric = route.metric,
+            .table = route.table,
+        }),
     };
 }
 
 const testing = std.testing;
+
+test "parseRoute accepts IPv6 and rejects mixed families" {
+    const route = try parseRoute("2001:db8:2::/48", "2001:db8::1", "ra", 10, 100);
+    try testing.expect(route.prefix.eql(try types.IpPrefix.parse("2001:db8:2::/48")));
+    try testing.expect(route.via.?.eql(try types.IpAddr.parse("2001:db8::1")));
+    try testing.expectEqualStrings("ra", route.dev);
+    try testing.expectEqual(@as(u32, 10), route.metric);
+    try testing.expectEqual(@as(u32, 100), route.table);
+
+    try testing.expectError(
+        error.InvalidArgument,
+        parseRoute("2001:db8:2::/48", "10.0.0.1", "ra", 0, 0),
+    );
+    try testing.expectError(
+        error.InvalidArgument,
+        parseRoute("10.2.0.0/16", "2001:db8::1", "ra", 0, 0),
+    );
+}
 
 test "down keeps the journal when a record cannot be parsed" {
     var tmp = testing.tmpDir(.{});

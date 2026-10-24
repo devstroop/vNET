@@ -14,7 +14,7 @@ const max_bytes = 1024 * 1024;
 
 pub const Address = struct {
     dev: []const u8,
-    prefix: types.Prefix4,
+    prefix: types.IpPrefix,
 };
 
 pub const Link = struct {
@@ -23,8 +23,8 @@ pub const Link = struct {
 };
 
 pub const Route = struct {
-    prefix: types.Prefix4,
-    via: ?types.Ipv4,
+    prefix: types.IpPrefix,
+    via: ?types.IpAddr,
     dev: []const u8,
     metric: u32 = 0,
     table: u32 = 0,
@@ -94,7 +94,7 @@ pub fn toOp(wire: Wire) Error!Op {
     if (std.mem.eql(u8, wire.op, "addr_add") or std.mem.eql(u8, wire.op, "addr_del")) {
         const dev = wire.dev orelse return error.InvalidJournal;
         const cidr = wire.cidr orelse return error.InvalidJournal;
-        const prefix = types.Prefix4.parse(cidr) catch return error.InvalidJournal;
+        const prefix = types.IpPrefix.parse(cidr) catch return error.InvalidJournal;
         const address = Address{ .dev = dev, .prefix = prefix };
         return if (std.mem.eql(u8, wire.op, "addr_add"))
             .{ .addr_add = address }
@@ -146,11 +146,14 @@ pub fn toOp(wire: Wire) Error!Op {
 
     if (std.mem.eql(u8, wire.op, "route_add") or std.mem.eql(u8, wire.op, "route_del")) {
         const dst = wire.dst orelse return error.InvalidJournal;
-        const prefix = types.Prefix4.parse(dst) catch return error.InvalidJournal;
-        const via: ?types.Ipv4 = if (wire.via) |via_text|
-            types.Ipv4.parse(via_text) catch return error.InvalidJournal
+        const prefix = types.IpPrefix.parse(dst) catch return error.InvalidJournal;
+        const via: ?types.IpAddr = if (wire.via) |via_text|
+            types.IpAddr.parse(via_text) catch return error.InvalidJournal
         else
             null;
+        if (via) |next_hop| {
+            if (next_hop.family() != prefix.family()) return error.InvalidJournal;
+        }
         const route = Route{
             .prefix = prefix,
             .via = via,
@@ -395,7 +398,7 @@ pub fn ownsAddress(
     gpa: std.mem.Allocator,
     contents: []const u8,
     dev: []const u8,
-    prefix: types.Prefix4,
+    prefix: types.IpPrefix,
 ) !bool {
     var owned = false;
     var it = std.mem.splitScalar(u8, contents, '\n');
@@ -440,10 +443,18 @@ pub fn ownsRoute(
     return owned;
 }
 
-fn matchesAddress(address: Address, dev: []const u8, prefix: types.Prefix4) bool {
-    return std.mem.eql(u8, address.dev, dev) and
-        address.prefix.len == prefix.len and
-        address.prefix.addr.eql(prefix.addr);
+fn matchesAddress(address: Address, dev: []const u8, prefix: types.IpPrefix) bool {
+    if (!std.mem.eql(u8, address.dev, dev)) return false;
+    return switch (address.prefix) {
+        .ipv4 => |a| switch (prefix) {
+            .ipv4 => |b| a.len == b.len and a.addr.eql(b.addr),
+            .ipv6 => false,
+        },
+        .ipv6 => |a| switch (prefix) {
+            .ipv4 => false,
+            .ipv6 => |b| a.len == b.len and a.addr.eql(b.addr),
+        },
+    };
 }
 
 fn matchesRoute(a: Route, b: Route) bool {
@@ -454,7 +465,7 @@ fn matchesRoute(a: Route, b: Route) bool {
         a.table == b.table;
 }
 
-fn optionalIpEql(a: ?types.Ipv4, b: ?types.Ipv4) bool {
+fn optionalIpEql(a: ?types.IpAddr, b: ?types.IpAddr) bool {
     if (a == null or b == null) return a == null and b == null;
     return a.?.eql(b.?);
 }
@@ -487,20 +498,20 @@ fn ensureStateDir(io: std.Io, state_dir: []const u8) !void {
 
 const testing = std.testing;
 
-fn testPrefix(comptime s: []const u8) types.Prefix4 {
-    return types.Prefix4.parse(s) catch unreachable;
+fn testIpPrefix(comptime s: []const u8) types.IpPrefix {
+    return types.IpPrefix.parse(s) catch unreachable;
 }
 
-fn testIp(comptime s: []const u8) types.Ipv4 {
-    return types.Ipv4.parse(s) catch unreachable;
+fn testIpAddr(comptime s: []const u8) types.IpAddr {
+    return types.IpAddr.parse(s) catch unreachable;
 }
 
 test "journal line round trip" {
     var buf: [512]u8 = undefined;
 
     const ops = [_]Op{
-        .{ .addr_add = .{ .dev = "ra", .prefix = testPrefix("10.0.1.1/24") } },
-        .{ .addr_del = .{ .dev = "ra", .prefix = testPrefix("10.0.1.1/24") } },
+        .{ .addr_add = .{ .dev = "ra", .prefix = testIpPrefix("10.0.1.1/24") } },
+        .{ .addr_del = .{ .dev = "ra", .prefix = testIpPrefix("10.0.1.1/24") } },
         .{ .link = .{ .dev = "ra", .up = true } },
         .{ .link_add = .{ .dev = "vrouterbr0", .kind = .bridge, .stp = true, .vlan_filtering = true } },
         .{ .link_add = .{ .dev = "vrouterp0", .kind = .veth, .peer = "vrouterb0" } },
@@ -508,14 +519,14 @@ test "journal line round trip" {
         .{ .link_master = .{ .dev = "eth1", .master = null } },
         .{ .bridge_vlan = .{ .dev = "eth1", .vid = 10, .pvid = true, .untagged = true } },
         .{ .route_add = .{
-            .prefix = testPrefix("10.2.0.0/16"),
-            .via = testIp("10.0.1.254"),
+            .prefix = testIpPrefix("10.2.0.0/16"),
+            .via = testIpAddr("10.0.1.254"),
             .dev = "ra",
             .metric = 50,
             .table = 100,
         } },
         .{ .route_del = .{
-            .prefix = testPrefix("10.2.0.0/16"),
+            .prefix = testIpPrefix("10.2.0.0/16"),
             .via = null,
             .dev = "ra",
         } },
@@ -578,6 +589,40 @@ test "journal line round trip" {
     }
 }
 
+test "journal IPv6 round trip and ownership" {
+    var buf: [512]u8 = undefined;
+    const addr = Op{ .addr_add = .{
+        .dev = "ra",
+        .prefix = testIpPrefix("2001:db8::1/64"),
+    } };
+    var parsed_addr = try parseLine(testing.allocator, try writeLine(&buf, addr));
+    defer parsed_addr.deinit();
+    const addr_back = try toOp(parsed_addr.value);
+    try testing.expect(addr.addr_add.prefix.eql(addr_back.addr_add.prefix));
+
+    const route = Route{
+        .prefix = testIpPrefix("2001:db8:2::/48"),
+        .via = testIpAddr("2001:db8::1"),
+        .dev = "ra",
+        .metric = 0,
+        .table = 0,
+    };
+    var route_buf: [512]u8 = undefined;
+    var parsed_route = try parseLine(testing.allocator, try writeLine(&route_buf, .{ .route_add = route }));
+    defer parsed_route.deinit();
+    const route_back = try toOp(parsed_route.value);
+    try testing.expect(route.prefix.eql(route_back.route_add.prefix));
+    try testing.expect(route.via.?.eql(route_back.route_add.via.?));
+    try testing.expectEqualStrings(route.dev, route_back.route_add.dev);
+    try testing.expectEqual(route.metric, route_back.route_add.metric);
+    try testing.expectEqual(route.table, route_back.route_add.table);
+
+    const contents =
+        "{\"op\":\"addr_add\",\"dev\":\"ra\",\"cidr\":\"2001:db8::1/64\"}\n";
+    try testing.expect(try ownsAddress(testing.allocator, contents, "ra", testIpPrefix("2001:db8::1/64")));
+    try testing.expect(!(try ownsAddress(testing.allocator, contents, "ra", testIpPrefix("2001:db8::2/64"))));
+}
+
 test "journal rejects malformed lines" {
     try testing.expectError(error.InvalidJournal, parseLine(testing.allocator, "{}"));
     try testing.expectError(error.InvalidJournal, parseLine(testing.allocator, "not json"));
@@ -593,14 +638,14 @@ test "journal ownership ledger" {
         "{\"op\":\"addr_add\",\"dev\":\"rb\",\"cidr\":\"10.0.2.1/24\"}\n" ++
         "{\"op\":\"addr_del\",\"dev\":\"ra\",\"cidr\":\"10.0.1.1/24\"}\n";
 
-    try testing.expect(!(try ownsAddress(testing.allocator, contents, "ra", testPrefix("10.0.1.1/24"))));
-    try testing.expect(!(try ownsAddress(testing.allocator, contents, "ra", testPrefix("10.0.1.2/24"))));
-    try testing.expect(try ownsAddress(testing.allocator, contents, "rb", testPrefix("10.0.2.1/24")));
-    try testing.expect(!(try ownsAddress(testing.allocator, contents, "rc", testPrefix("10.0.3.1/24"))));
+    try testing.expect(!(try ownsAddress(testing.allocator, contents, "ra", testIpPrefix("10.0.1.1/24"))));
+    try testing.expect(!(try ownsAddress(testing.allocator, contents, "ra", testIpPrefix("10.0.1.2/24"))));
+    try testing.expect(try ownsAddress(testing.allocator, contents, "rb", testIpPrefix("10.0.2.1/24")));
+    try testing.expect(!(try ownsAddress(testing.allocator, contents, "rc", testIpPrefix("10.0.3.1/24"))));
 
     const route = Route{
-        .prefix = testPrefix("10.9.0.0/16"),
-        .via = testIp("10.0.1.254"),
+        .prefix = testIpPrefix("10.9.0.0/16"),
+        .via = testIpAddr("10.0.1.254"),
         .dev = "ra",
         .metric = 5,
         .table = 0,
@@ -622,7 +667,7 @@ test "journal store append read clear" {
 
     try store.append(testing.io, .{ .addr_add = .{
         .dev = "ra",
-        .prefix = testPrefix("10.0.1.1/24"),
+        .prefix = testIpPrefix("10.0.1.1/24"),
     } });
     try store.append(testing.io, .{ .link = .{ .dev = "ra", .up = false } });
 
@@ -634,7 +679,7 @@ test "journal store append read clear" {
 
     try store.append(testing.io, .{ .addr_del = .{
         .dev = "ra",
-        .prefix = testPrefix("10.0.1.1/24"),
+        .prefix = testIpPrefix("10.0.1.1/24"),
     } });
     try store.removeLast(testing.io);
     const after_remove = (try store.contents(testing.io)).?;
@@ -655,7 +700,7 @@ test "journal store checkpoint truncates later records" {
 
     try store.append(testing.io, .{ .addr_add = .{
         .dev = "ra",
-        .prefix = testPrefix("10.0.1.1/24"),
+        .prefix = testIpPrefix("10.0.1.1/24"),
     } });
     try store.append(testing.io, .{ .link = .{ .dev = "ra", .up = true } });
 

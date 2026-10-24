@@ -83,6 +83,7 @@ const IFF_LOWER_UP: u32 = 0x10000;
 const IF_OPER_UP: u8 = 6;
 
 const AF_INET: u8 = 2;
+const AF_INET6: u8 = 10;
 const AF_BRIDGE: u8 = 7;
 
 const NLMSG_HDR_LEN = 16;
@@ -537,6 +538,14 @@ pub const RouteSpec = struct {
     table: u32 = 0,
 };
 
+pub const Route6Spec = struct {
+    prefix: types.Prefix6,
+    via: ?types.Ipv6 = null,
+    ifindex: u32,
+    metric: u32 = 0,
+    table: u32 = 0,
+};
+
 pub const Control = struct {
     fd: sys.fd_t,
     seq: u32 = 1,
@@ -623,18 +632,19 @@ fn buildAddrMessage(
     flags: u16,
     seq: u32,
     ifindex: u32,
-    prefix: types.Prefix4,
+    family: u8,
+    prefix_len: u8,
+    address: []const u8,
 ) []u8 {
     @memset(buf[0 .. NLMSG_HDR_LEN + @sizeOf(IfAddrMsg)], 0);
     const off0 = NLMSG_HDR_LEN;
-    buf[off0] = AF_INET;
-    buf[off0 + 1] = prefix.len;
+    buf[off0] = family;
+    buf[off0 + 1] = prefix_len;
     writeU32(buf, off0 + 4, ifindex);
 
     var off: usize = NLMSG_HDR_LEN + @sizeOf(IfAddrMsg);
-    const addr = prefix.addr.toBytes();
-    putAttr(buf, &off, IFA_LOCAL, &addr);
-    putAttr(buf, &off, IFA_ADDRESS, &addr);
+    putAttr(buf, &off, IFA_LOCAL, address);
+    putAttr(buf, &off, IFA_ADDRESS, address);
 
     writeU32(buf, 0, @intCast(off));
     writeU16(buf, 4, typ);
@@ -651,34 +661,85 @@ fn buildRouteMessage(
     seq: u32,
     spec: RouteSpec,
 ) []u8 {
+    const dst = spec.prefix.network().toBytes();
+    const gw: ?[4]u8 = if (spec.via) |via| via.toBytes() else null;
+    return buildRouteMessageRaw(
+        buf,
+        typ,
+        flags,
+        seq,
+        AF_INET,
+        spec.prefix.len,
+        spec.ifindex,
+        spec.metric,
+        spec.table,
+        &dst,
+        if (gw) |g| &g else null,
+    );
+}
+
+fn buildRoute6Message(
+    buf: []u8,
+    typ: u16,
+    flags: u16,
+    seq: u32,
+    spec: Route6Spec,
+) []u8 {
+    const dst = spec.prefix.network().toBytes();
+    var gw: ?[16]u8 = null;
+    if (spec.via) |via| gw = via.toBytes();
+    return buildRouteMessageRaw(
+        buf,
+        typ,
+        flags,
+        seq,
+        AF_INET6,
+        spec.prefix.len,
+        spec.ifindex,
+        spec.metric,
+        spec.table,
+        &dst,
+        if (gw) |g| &g else null,
+    );
+}
+
+fn buildRouteMessageRaw(
+    buf: []u8,
+    typ: u16,
+    flags: u16,
+    seq: u32,
+    family: u8,
+    prefix_len: u8,
+    ifindex: u32,
+    metric: u32,
+    table_in: u32,
+    dst: []const u8,
+    gateway: ?[]const u8,
+) []u8 {
     @memset(buf[0 .. NLMSG_HDR_LEN + @sizeOf(RtMsg)], 0);
-    const table: u32 = if (spec.table == 0) RT_TABLE_MAIN else spec.table;
+    const table: u32 = if (table_in == 0) RT_TABLE_MAIN else table_in;
     const table_byte: u8 = if (table <= 255) @intCast(table) else 0;
 
     const off0 = NLMSG_HDR_LEN;
-    buf[off0] = AF_INET;
-    buf[off0 + 1] = spec.prefix.len;
+    buf[off0] = family;
+    buf[off0 + 1] = prefix_len;
     buf[off0 + 4] = table_byte;
     buf[off0 + 5] = RTPROT_STATIC;
-    buf[off0 + 6] = if (spec.via == null) RT_SCOPE_LINK else RT_SCOPE_UNIVERSE;
+    buf[off0 + 6] = if (gateway == null) RT_SCOPE_LINK else RT_SCOPE_UNIVERSE;
     buf[off0 + 7] = RTN_UNICAST;
 
     var off: usize = NLMSG_HDR_LEN + @sizeOf(RtMsg);
-    const dst = spec.prefix.network().toBytes();
-    putAttr(buf, &off, RTA_DST, &dst);
-    if (spec.via) |via| {
-        const gw = via.toBytes();
-        putAttr(buf, &off, RTA_GATEWAY, &gw);
-    }
+    putAttr(buf, &off, RTA_DST, dst);
+    if (gateway) |gw| putAttr(buf, &off, RTA_GATEWAY, gw);
 
     var oif: [4]u8 = undefined;
-    std.mem.writeInt(u32, &oif, spec.ifindex, native_endian);
+    std.mem.writeInt(u32, &oif, ifindex, native_endian);
     putAttr(buf, &off, RTA_OIF, &oif);
 
-    if (spec.metric != 0) {
-        var metric: [4]u8 = undefined;
-        std.mem.writeInt(u32, &metric, spec.metric, native_endian);
-        putAttr(buf, &off, RTA_PRIORITY, &metric);
+    if (metric != 0) {
+        var metric_attr: [4]u8 = undefined;
+        std.mem.writeInt(u32, &metric_attr, metric, native_endian);
+        putAttr(buf, &off, RTA_PRIORITY, &metric_attr);
     }
     if (table > 255) {
         var table_attr: [4]u8 = undefined;
@@ -701,13 +762,37 @@ pub fn addAddress(io: std.Io, dev: []const u8, prefix: types.Prefix4) PortError!
 
     var buf: [256]u8 = undefined;
     const seq = control.nextSeq();
+    const address = prefix.addr.toBytes();
     const msg = buildAddrMessage(
         &buf,
         RTM_NEWADDR,
         NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_EXCL,
         seq,
         ifindex,
-        prefix,
+        AF_INET,
+        prefix.len,
+        &address,
+    );
+    return control.transact(io, msg, seq);
+}
+
+pub fn addAddress6(io: std.Io, dev: []const u8, prefix: types.Prefix6) PortError!void {
+    const ifindex = try iface_mod.ifindex(dev);
+    var control = try Control.open();
+    defer control.close();
+
+    var buf: [256]u8 = undefined;
+    const seq = control.nextSeq();
+    const address = prefix.addr.toBytes();
+    const msg = buildAddrMessage(
+        &buf,
+        RTM_NEWADDR,
+        NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_EXCL,
+        seq,
+        ifindex,
+        AF_INET6,
+        prefix.len,
+        &address,
     );
     return control.transact(io, msg, seq);
 }
@@ -719,13 +804,69 @@ pub fn deleteAddress(io: std.Io, dev: []const u8, prefix: types.Prefix4) PortErr
 
     var buf: [256]u8 = undefined;
     const seq = control.nextSeq();
+    const address = prefix.addr.toBytes();
     const msg = buildAddrMessage(
         &buf,
         RTM_DELADDR,
         NLM_F_REQUEST | NLM_F_ACK,
         seq,
         ifindex,
-        prefix,
+        AF_INET,
+        prefix.len,
+        &address,
+    );
+    return control.transact(io, msg, seq);
+}
+
+pub fn deleteAddress6(io: std.Io, dev: []const u8, prefix: types.Prefix6) PortError!void {
+    const ifindex = try iface_mod.ifindex(dev);
+    var control = try Control.open();
+    defer control.close();
+
+    var buf: [256]u8 = undefined;
+    const seq = control.nextSeq();
+    const address = prefix.addr.toBytes();
+    const msg = buildAddrMessage(
+        &buf,
+        RTM_DELADDR,
+        NLM_F_REQUEST | NLM_F_ACK,
+        seq,
+        ifindex,
+        AF_INET6,
+        prefix.len,
+        &address,
+    );
+    return control.transact(io, msg, seq);
+}
+
+pub fn addRoute6(io: std.Io, spec: Route6Spec) PortError!void {
+    var control = try Control.open();
+    defer control.close();
+
+    var buf: [512]u8 = undefined;
+    const seq = control.nextSeq();
+    const msg = buildRoute6Message(
+        &buf,
+        RTM_NEWROUTE,
+        NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_EXCL,
+        seq,
+        spec,
+    );
+    return control.transact(io, msg, seq);
+}
+
+pub fn deleteRoute6(io: std.Io, spec: Route6Spec) PortError!void {
+    var control = try Control.open();
+    defer control.close();
+
+    var buf: [512]u8 = undefined;
+    const seq = control.nextSeq();
+    const msg = buildRoute6Message(
+        &buf,
+        RTM_DELROUTE,
+        NLM_F_REQUEST | NLM_F_ACK,
+        seq,
+        spec,
     );
     return control.transact(io, msg, seq);
 }
@@ -1107,7 +1248,17 @@ test "parses RTM_DELNEIGH" {
 test "builds RTM_NEWADDR message" {
     var buf: [256]u8 = undefined;
     const prefix = try types.Prefix4.parse("10.0.1.1/24");
-    const msg = buildAddrMessage(&buf, RTM_NEWADDR, NLM_F_REQUEST | NLM_F_ACK, 7, 42, prefix);
+    const address = prefix.addr.toBytes();
+    const msg = buildAddrMessage(
+        &buf,
+        RTM_NEWADDR,
+        NLM_F_REQUEST | NLM_F_ACK,
+        7,
+        42,
+        AF_INET,
+        prefix.len,
+        &address,
+    );
 
     try std.testing.expectEqual(@as(u16, RTM_NEWADDR), readU16(msg, 4).?);
     try std.testing.expectEqual(@as(u32, 7), readU32(msg, 8).?);
@@ -1118,6 +1269,60 @@ test "builds RTM_NEWADDR message" {
 
     const first = getAttr(msg[NLMSG_HDR_LEN + 8 ..], IFA_LOCAL).?;
     try std.testing.expectEqualSlices(u8, &.{ 10, 0, 1, 1 }, first);
+}
+
+test "builds RTM_NEWADDR message for IPv6" {
+    var buf: [256]u8 = undefined;
+    const prefix = try types.Prefix6.parse("2001:db8::1/64");
+    const address = prefix.addr.toBytes();
+    const msg = buildAddrMessage(
+        &buf,
+        RTM_NEWADDR,
+        NLM_F_REQUEST | NLM_F_ACK,
+        8,
+        43,
+        AF_INET6,
+        prefix.len,
+        &address,
+    );
+
+    try std.testing.expectEqual(@as(u16, RTM_NEWADDR), readU16(msg, 4).?);
+    try std.testing.expectEqual(@as(u32, 8), readU32(msg, 8).?);
+    try std.testing.expectEqual(AF_INET6, msg[NLMSG_HDR_LEN]);
+    try std.testing.expectEqual(@as(u8, 64), msg[NLMSG_HDR_LEN + 1]);
+    try std.testing.expectEqual(@as(u32, 43), readU32(msg, NLMSG_HDR_LEN + 4).?);
+
+    const first = getAttr(msg[NLMSG_HDR_LEN + 8 ..], IFA_LOCAL).?;
+    try std.testing.expectEqualSlices(u8, &.{ 0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 }, first);
+}
+
+test "builds RTM_NEWROUTE message for IPv6" {
+    var buf: [512]u8 = undefined;
+    const spec = Route6Spec{
+        .prefix = try types.Prefix6.parse("2001:db8:2::/48"),
+        .via = try types.Ipv6.parse("2001:db8::1"),
+        .ifindex = 6,
+        .metric = 60,
+    };
+    const msg = buildRoute6Message(&buf, RTM_NEWROUTE, NLM_F_REQUEST | NLM_F_ACK, 10, spec);
+
+    try std.testing.expectEqual(@as(u16, RTM_NEWROUTE), readU16(msg, 4).?);
+    try std.testing.expectEqual(@as(u32, 10), readU32(msg, 8).?);
+    try std.testing.expectEqual(AF_INET6, msg[NLMSG_HDR_LEN]);
+    try std.testing.expectEqual(@as(u8, 48), msg[NLMSG_HDR_LEN + 1]);
+    try std.testing.expectEqual(@as(u8, 254), msg[NLMSG_HDR_LEN + 4]);
+    try std.testing.expectEqual(RTPROT_STATIC, msg[NLMSG_HDR_LEN + 5]);
+    try std.testing.expectEqual(RT_SCOPE_UNIVERSE, msg[NLMSG_HDR_LEN + 6]);
+
+    const attrs = msg[NLMSG_HDR_LEN + 12 ..];
+    const dst = getAttr(attrs, RTA_DST).?;
+    try std.testing.expectEqual(@as(usize, 16), dst.len);
+    try std.testing.expectEqualSlices(u8, &.{ 0x20, 0x01, 0x0d, 0xb8, 0, 0x02 }, dst[0..6]);
+    const gateway = getAttr(attrs, RTA_GATEWAY).?;
+    try std.testing.expectEqual(@as(usize, 16), gateway.len);
+    try std.testing.expectEqualSlices(u8, &.{ 0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 }, gateway);
+    try std.testing.expectEqual(@as(u32, 6), std.mem.readInt(u32, getAttr(attrs, RTA_OIF).?[0..4], native_endian));
+    try std.testing.expectEqual(@as(u32, 60), std.mem.readInt(u32, getAttr(attrs, RTA_PRIORITY).?[0..4], native_endian));
 }
 
 test "builds RTM_NEWROUTE message" {
