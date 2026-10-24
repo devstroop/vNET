@@ -5,9 +5,9 @@ const protocol = @import("protocol.zig");
 const transport = @import("transport.zig");
 const unix = @import("unix.zig");
 
-const max_request_bytes = 4096;
+const max_request_bytes = 64 * 1024;
 const max_response_bytes = 128 * 1024;
-const response_timeout_ms = 2_000;
+const response_timeout_ms = 5_000;
 
 pub const Client = struct {
     io: std.Io,

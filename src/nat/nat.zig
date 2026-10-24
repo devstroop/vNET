@@ -1,6 +1,6 @@
-//! IPv4 NAT packet rewriting. Checksums are recomputed from scratch: NAT
-//! mutations are rare per flow and correctness matters more than the
-//! incremental RFC 1624 optimization (which can land later).
+//! IPv4 NAT packet rewriting with RFC 1624 incremental transport checksums.
+//! Callers repair offloaded checksums once before the first rewrite; later
+//! rewrites of the same packet adjust the checksum instead of rescanning L4.
 
 const std = @import("std");
 const types = @import("../types.zig");
@@ -39,40 +39,65 @@ fn rewrite(
     if (header.isFragment()) return false;
     if (header.total_len > packet.len) return false;
 
-    if (new_src) |addr| {
-        std.mem.writeInt(u32, packet[12..16], addr.value, .big);
-    }
-    if (new_dst) |addr| {
-        std.mem.writeInt(u32, packet[16..20], addr.value, .big);
-    }
+    const old_src = readIp(packet, 12);
+    const old_dst = readIp(packet, 16);
+    const src = new_src orelse old_src;
+    const dst = new_dst orelse old_dst;
+    if (new_src) |addr| std.mem.writeInt(u32, packet[12..16], addr.value, .big);
+    if (new_dst) |addr| std.mem.writeInt(u32, packet[16..20], addr.value, .big);
 
     const payload = packet[header.header_len..header.total_len];
     switch (header.protocol) {
         ipv4.Protocol.tcp => {
             if (payload.len < 20) return false;
+            const old_sport = readU16(payload, 0);
+            const old_dport = readU16(payload, 2);
+            const sport = new_sport orelse old_sport;
+            const dport = new_dport orelse old_dport;
+            const old_sum = readU16(payload, 16);
             if (new_sport) |port| writeU16(payload, 0, port);
             if (new_dport) |port| writeU16(payload, 2, port);
-            writeU16(payload, 16, 0);
-            writeU16(payload, 16, transportChecksum(
-                readIp(packet, 12),
-                readIp(packet, 16),
-                header.protocol,
-                payload,
-            ));
+            if (old_sum == 0) {
+                writeU16(payload, 16, 0);
+                writeU16(payload, 16, transportChecksum(src, dst, header.protocol, payload));
+            } else {
+                var sum = adjustL4Checksum(
+                    old_sum,
+                    old_src,
+                    src,
+                    old_dst,
+                    dst,
+                    old_sport,
+                    sport,
+                    old_dport,
+                    dport,
+                );
+                if (sum == 0) sum = 0xffff;
+                writeU16(payload, 16, sum);
+            }
         },
         ipv4.Protocol.udp => {
             if (payload.len < 8) return false;
             const udp_len = readU16(payload, 4);
             if (udp_len < 8 or udp_len > payload.len) return false;
+            const old_sport = readU16(payload, 0);
+            const old_dport = readU16(payload, 2);
+            const sport = new_sport orelse old_sport;
+            const dport = new_dport orelse old_dport;
+            const old_sum = readU16(payload, 6);
             if (new_sport) |port| writeU16(payload, 0, port);
             if (new_dport) |port| writeU16(payload, 2, port);
-            if (readU16(payload, 6) != 0) {
-                writeU16(payload, 6, 0);
-                var sum = transportChecksum(
-                    readIp(packet, 12),
-                    readIp(packet, 16),
-                    header.protocol,
-                    payload[0..udp_len],
+            if (old_sum != 0) {
+                var sum = adjustL4Checksum(
+                    old_sum,
+                    old_src,
+                    src,
+                    old_dst,
+                    dst,
+                    old_sport,
+                    sport,
+                    old_dport,
+                    dport,
                 );
                 if (sum == 0) sum = 0xffff;
                 writeU16(payload, 6, sum);
@@ -83,9 +108,12 @@ fn rewrite(
             if (payload[0] != icmp.Type.echo_request and payload[0] != icmp.Type.echo_reply) {
                 return false;
             }
-            if (new_sport orelse new_dport) |id| writeU16(payload, 4, id);
-            writeU16(payload, 2, 0);
-            writeU16(payload, 2, ipv4.checksum(payload));
+            if (new_sport orelse new_dport) |id| {
+                const old_id = readU16(payload, 4);
+                writeU16(payload, 4, id);
+                const old_sum = readU16(payload, 2);
+                writeU16(payload, 2, adjustWordChecksum(old_sum, old_id, id));
+            }
         },
         else => {},
     }
@@ -223,6 +251,43 @@ test "rewrites udp source and destination" {
     const back = try ipv4.parse(packet);
     try testing.expect(back.dst.eql(testIp("10.0.1.9")));
     try testing.expectEqual(@as(u16, 1234), readU16(back.payload, 2));
+}
+
+fn buildTcp(buf: []u8, src: types.Ipv4, dst: types.Ipv4, sport: u16, dport: u16, payload: []const u8) ![]u8 {
+    var tcp_buf: [512]u8 = @splat(0);
+    writeU16(&tcp_buf, 0, sport);
+    writeU16(&tcp_buf, 2, dport);
+    tcp_buf[12] = 0x50;
+    @memcpy(tcp_buf[20 .. 20 + payload.len], payload);
+    const tcp_len = 20 + payload.len;
+    writeU16(&tcp_buf, 16, transportChecksum(src, dst, ipv4.Protocol.tcp, tcp_buf[0..tcp_len]));
+    const ip_len = try ipv4.write(buf, src, dst, ipv4.Protocol.tcp, 64, 1, tcp_buf[0..tcp_len]);
+    return buf[0..ip_len];
+}
+
+test "rewrites tcp checksum incrementally" {
+    var buf: [512]u8 = undefined;
+    const packet = try buildTcp(
+        &buf,
+        testIp("10.0.1.2"),
+        testIp("10.0.2.2"),
+        40000,
+        9999,
+        "hello",
+    );
+    try testing.expect(rewriteSource(packet, testIp("10.0.2.1"), 40001));
+    try testing.expect(rewriteDestination(packet, testIp("10.0.1.9"), 1234));
+
+    const out = try ipv4.parse(packet);
+    try testing.expect(out.src.eql(testIp("10.0.2.1")));
+    try testing.expect(out.dst.eql(testIp("10.0.1.9")));
+    try testing.expectEqual(@as(u16, 40001), readU16(out.payload, 0));
+    try testing.expectEqual(@as(u16, 1234), readU16(out.payload, 2));
+    const actual = readU16(out.payload, 16);
+    writeU16(packet[out.header_len..], 16, 0);
+    const expected = transportChecksum(out.src, out.dst, ipv4.Protocol.tcp, out.payload);
+    try testing.expectEqual(expected, actual);
+    try testing.expectEqual(@as(u16, 0), ipv4.checksum(packet[0..out.header_len]));
 }
 
 test "rewrites icmp echo id and checksum" {

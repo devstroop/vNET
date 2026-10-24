@@ -693,13 +693,323 @@ fn natCommand(init: std.process.Init, args: []const []const u8) !void {
     const io = init.io;
     const gpa = init.gpa;
     const cfg = splitConfig(args);
-    if (cfg.rest.len != 1 or !std.mem.eql(u8, cfg.rest[0], "list")) {
-        try printErr(io, gpa, "usage: vrouter nat list [-c <config>]\n", .{});
+    if (cfg.rest.len == 0) {
+        try usage(io);
+        std.process.exit(2);
+    }
+    if (std.mem.eql(u8, cfg.rest[0], "list")) {
+        if (cfg.rest.len != 1) {
+            try usage(io);
+            std.process.exit(2);
+        }
+        try natList(init, cfg.path);
+        return;
+    }
+
+    const add = std.mem.eql(u8, cfg.rest[0], "add");
+    if (!add and !std.mem.eql(u8, cfg.rest[0], "del")) {
+        try usage(io);
+        std.process.exit(2);
+    }
+    if (cfg.rest.len < 2) {
+        try usage(io);
         std.process.exit(2);
     }
 
-    var parsed = loadConfig(io, gpa, cfg.path) catch |err| {
+    const source = readConfig(io, gpa, cfg.path) catch |err| {
+        try printErr(io, gpa, "cannot read {s}: {s}\n", .{ cfg.path, @errorName(err) });
+        std.process.exit(1);
+    };
+    defer gpa.free(source);
+
+    var parsed = vrouter.config_parse.parse(gpa, source) catch |err| {
         try printErr(io, gpa, "cannot load {s}: {s}\n", .{ cfg.path, @errorName(err) });
+        std.process.exit(1);
+    };
+    defer parsed.deinit();
+    vrouter.config_validate.validate(&parsed.config) catch |err| {
+        try printErr(io, gpa, "cannot load {s}: {s}\n", .{ cfg.path, @errorName(err) });
+        std.process.exit(1);
+    };
+
+    const a = parsed.arena.allocator();
+    const kind = cfg.rest[1];
+    const action = cfg.rest[0];
+    var changed = false;
+
+    if (std.mem.eql(u8, kind, "masquerade")) {
+        var out: ?[]const u8 = null;
+        var i: usize = 2;
+        while (i < cfg.rest.len) : (i += 1) {
+            const flag = cfg.rest[i];
+            if (!std.mem.eql(u8, flag, "--out") or i + 1 >= cfg.rest.len) {
+                try printErr(io, gpa, "vrouter nat: invalid masquerade option '{s}'\n", .{flag});
+                std.process.exit(2);
+            }
+            i += 1;
+            if (out != null) {
+                try printErr(io, gpa, "vrouter nat: --out specified more than once\n", .{});
+                std.process.exit(2);
+            }
+            out = cfg.rest[i];
+        }
+        const name = out orelse {
+            try printErr(io, gpa, "vrouter nat {s} masquerade requires --out <iface|port>\n", .{action});
+            std.process.exit(2);
+        };
+
+        if (add) {
+            for (parsed.config.nat.masquerade) |rule| {
+                if (std.mem.eql(u8, rule.out, name)) {
+                    try print(io, gpa, "ok: nat masquerade {s} already exists\n", .{name});
+                    return;
+                }
+            }
+            var rules: std.ArrayListUnmanaged(vrouter.config_schema.MasqueradeConfig) = .empty;
+            try rules.appendSlice(a, parsed.config.nat.masquerade);
+            try rules.append(a, .{ .out = name });
+            parsed.config.nat.masquerade = try rules.toOwnedSlice(a);
+            changed = true;
+        } else {
+            var index: ?usize = null;
+            for (parsed.config.nat.masquerade, 0..) |rule, pos| {
+                if (std.mem.eql(u8, rule.out, name)) {
+                    index = pos;
+                    break;
+                }
+            }
+            const found = index orelse {
+                try print(io, gpa, "ok: nat masquerade {s} already absent\n", .{name});
+                return;
+            };
+            var rules: std.ArrayListUnmanaged(vrouter.config_schema.MasqueradeConfig) = .empty;
+            for (parsed.config.nat.masquerade, 0..) |rule, pos| {
+                if (pos != found) try rules.append(a, rule);
+            }
+            parsed.config.nat.masquerade = try rules.toOwnedSlice(a);
+            changed = true;
+        }
+    } else if (std.mem.eql(u8, kind, "port-forward")) {
+        var proto: ?vrouter.config_schema.Proto = null;
+        var ext_port: ?u16 = null;
+        var to: ?[]const u8 = null;
+        var in_iface: ?[]const u8 = null;
+        var i: usize = 2;
+        while (i < cfg.rest.len) : (i += 1) {
+            const flag = cfg.rest[i];
+            if (i + 1 >= cfg.rest.len) {
+                try printErr(io, gpa, "vrouter nat: missing value for {s}\n", .{flag});
+                std.process.exit(2);
+            }
+            const value = cfg.rest[i + 1];
+            i += 1;
+            if (std.mem.eql(u8, flag, "--proto")) {
+                proto = std.meta.stringToEnum(vrouter.config_schema.Proto, value) orelse {
+                    try printErr(io, gpa, "vrouter nat: invalid protocol '{s}'\n", .{value});
+                    std.process.exit(2);
+                };
+                if (proto != .tcp and proto != .udp) {
+                    try printErr(io, gpa, "vrouter nat: protocol must be tcp or udp\n", .{});
+                    std.process.exit(2);
+                }
+            } else if (std.mem.eql(u8, flag, "--ext-port")) {
+                ext_port = std.fmt.parseInt(u16, value, 10) catch {
+                    try printErr(io, gpa, "vrouter nat: invalid external port '{s}'\n", .{value});
+                    std.process.exit(2);
+                };
+                if (ext_port.? == 0) {
+                    try printErr(io, gpa, "vrouter nat: external port must be 1-65535\n", .{});
+                    std.process.exit(2);
+                }
+            } else if (std.mem.eql(u8, flag, "--to")) {
+                to = value;
+            } else if (std.mem.eql(u8, flag, "--in")) {
+                in_iface = value;
+            } else {
+                try printErr(io, gpa, "vrouter nat: unknown port-forward option '{s}'\n", .{flag});
+                std.process.exit(2);
+            }
+        }
+        const proto_value = proto orelse {
+            try printErr(io, gpa, "vrouter nat {s} port-forward requires --proto tcp|udp\n", .{action});
+            std.process.exit(2);
+        };
+        const ext_value = ext_port orelse {
+            try printErr(io, gpa, "vrouter nat {s} port-forward requires --ext-port <n>\n", .{action});
+            std.process.exit(2);
+        };
+        if (add and to == null) {
+            try printErr(io, gpa, "vrouter nat add port-forward requires --to <ip:port>\n", .{});
+            std.process.exit(2);
+        }
+
+        if (add) {
+            for (parsed.config.nat.port_forward) |rule| {
+                if (rule.proto == proto_value and rule.ext_port == ext_value and
+                    optionalNameEqual(rule.in_iface, in_iface))
+                {
+                    if (std.mem.eql(u8, rule.to, to.?)) {
+                        try print(io, gpa, "ok: nat port-forward {s}/{d} already exists\n", .{
+                            @tagName(proto_value),
+                            ext_value,
+                        });
+                        return;
+                    }
+                    try printErr(io, gpa, "vrouter nat: {s}/{d} already forwards to {s}; delete it first\n", .{
+                        @tagName(proto_value),
+                        ext_value,
+                        rule.to,
+                    });
+                    std.process.exit(1);
+                }
+            }
+            var rules: std.ArrayListUnmanaged(vrouter.config_schema.PortForwardConfig) = .empty;
+            try rules.appendSlice(a, parsed.config.nat.port_forward);
+            try rules.append(a, .{
+                .proto = proto_value,
+                .ext_port = ext_value,
+                .to = to.?,
+                .in_iface = in_iface,
+            });
+            parsed.config.nat.port_forward = try rules.toOwnedSlice(a);
+            changed = true;
+        } else {
+            var found: ?usize = null;
+            for (parsed.config.nat.port_forward, 0..) |rule, pos| {
+                if (rule.proto != proto_value or rule.ext_port != ext_value) continue;
+                if (in_iface) |wanted| {
+                    if (rule.in_iface == null or !std.mem.eql(u8, rule.in_iface.?, wanted)) continue;
+                } else if (rule.in_iface != null) continue;
+                if (to) |wanted| {
+                    if (!std.mem.eql(u8, rule.to, wanted)) continue;
+                }
+                found = pos;
+                break;
+            }
+            const index = found orelse {
+                try print(io, gpa, "ok: nat port-forward {s}/{d} already absent\n", .{
+                    @tagName(proto_value),
+                    ext_value,
+                });
+                return;
+            };
+            var rules: std.ArrayListUnmanaged(vrouter.config_schema.PortForwardConfig) = .empty;
+            for (parsed.config.nat.port_forward, 0..) |rule, pos| {
+                if (pos != index) try rules.append(a, rule);
+            }
+            parsed.config.nat.port_forward = try rules.toOwnedSlice(a);
+            changed = true;
+        }
+    } else {
+        try usage(io);
+        std.process.exit(2);
+    }
+
+    if (!changed) return;
+    vrouter.config_validate.validate(&parsed.config) catch |err| {
+        try printErr(io, gpa, "vrouter nat: invalid configuration: {s}\n", .{@errorName(err)});
+        std.process.exit(1);
+    };
+
+    var path_buf: [512]u8 = undefined;
+    const control_path = controlPath(init, &path_buf) catch {
+        try printErr(io, gpa, "control socket path is too long\n", .{});
+        std.process.exit(1);
+    };
+    var daemon_running = false;
+    if (queryStatus(io, gpa, control_path)) |response| {
+        var status = response;
+        defer status.deinit();
+        if (!status.value.ok) {
+            try printErr(io, gpa, "daemon at {s}: {s}: {s}\n", .{
+                control_path,
+                status.value.error_code orelse "error",
+                status.value.message orelse "request failed",
+            });
+            std.process.exit(1);
+        }
+        if (!std.mem.eql(u8, status.value.status.?.instance, parsed.config.instance)) {
+            try printErr(io, gpa, "daemon instance '{s}' does not match config '{s}'\n", .{
+                status.value.status.?.instance,
+                parsed.config.instance,
+            });
+            std.process.exit(1);
+        }
+        daemon_running = true;
+    } else |err| switch (err) {
+        error.FileNotFound, error.ConnectionRefused => {},
+        else => {
+            try printErr(io, gpa, "cannot reach {s}: {s}\n", .{ control_path, @errorName(err) });
+            std.process.exit(1);
+        },
+    }
+
+    vrouter.config_write.saveNat(io, gpa, cfg.path, source, parsed.config.nat) catch |err| {
+        try printErr(io, gpa, "cannot save {s}: {s}\n", .{ cfg.path, @errorName(err) });
+        std.process.exit(1);
+    };
+
+    if (!daemon_running) {
+        try print(io, gpa, "saved: {s} (vrouterd is not running; start it to apply)\n", .{cfg.path});
+        return;
+    }
+
+    const masquerade = try a.alloc(vrouter.control_protocol.NatMasquerade, parsed.config.nat.masquerade.len);
+    for (parsed.config.nat.masquerade, 0..) |rule, index| {
+        masquerade[index] = .{ .out = rule.out };
+    }
+    const forwards = try a.alloc(vrouter.control_protocol.NatForward, parsed.config.nat.port_forward.len);
+    for (parsed.config.nat.port_forward, 0..) |rule, index| {
+        forwards[index] = .{
+            .proto = @tagName(rule.proto),
+            .ext_port = rule.ext_port,
+            .to = rule.to,
+            .ingress = rule.in_iface,
+        };
+    }
+
+    var client = vrouter.control_client.Client.connect(io, gpa, control_path) catch |err| {
+        try rollbackNatConfig(io, gpa, cfg.path, source, err);
+        std.process.exit(1);
+    };
+    defer client.deinit();
+    var response = client.call(.{
+        .id = 1,
+        .op = "nat.apply",
+        .nat = .{
+            .instance = parsed.config.instance,
+            .masquerade = masquerade,
+            .port_forward = forwards,
+        },
+    }) catch |err| {
+        if (err == error.Timeout) {
+            try printErr(io, gpa, "nat apply: timeout; outcome unknown, configuration kept at {s}; check `vrouter nat list`\n", .{
+                cfg.path,
+            });
+            std.process.exit(1);
+        }
+        try rollbackNatConfig(io, gpa, cfg.path, source, err);
+        std.process.exit(1);
+    };
+    defer response.deinit();
+    if (!response.value.ok) {
+        try printErr(io, gpa, "nat apply: {s}: {s}\n", .{
+            response.value.error_code orelse "error",
+            response.value.message orelse "request failed",
+        });
+        try rollbackNatConfig(io, gpa, cfg.path, source, error.ApplyFailed);
+        std.process.exit(1);
+    }
+
+    try print(io, gpa, "ok: nat {s} {s} applied live\n", .{ action, kind });
+}
+
+fn natList(init: std.process.Init, config_path: []const u8) !void {
+    const io = init.io;
+    const gpa = init.gpa;
+
+    var parsed = loadConfig(io, gpa, config_path) catch |err| {
+        try printErr(io, gpa, "cannot load {s}: {s}\n", .{ config_path, @errorName(err) });
         std.process.exit(1);
     };
     defer parsed.deinit();
@@ -750,6 +1060,25 @@ fn natCommand(init: std.process.Init, args: []const []const u8) !void {
         });
     }
     if (nat.port_forward.len == 0) try print(io, gpa, "-\n", .{});
+}
+
+fn optionalNameEqual(a: ?[]const u8, b: ?[]const u8) bool {
+    if (a) |left| {
+        if (b) |right| return std.mem.eql(u8, left, right);
+        return false;
+    }
+    return b == null;
+}
+
+fn rollbackNatConfig(io: std.Io, gpa: std.mem.Allocator, path: []const u8, source: []const u8, cause: anyerror) !void {
+    vrouter.config_write.replace(io, path, source) catch |err| {
+        try printErr(io, gpa, "nat apply: {s}; rollback failed: {s}\n", .{
+            @errorName(cause),
+            @errorName(err),
+        });
+        return;
+    };
+    try printErr(io, gpa, "nat apply: {s}; configuration restored\n", .{@errorName(cause)});
 }
 
 fn conntrackCommand(init: std.process.Init, args: []const []const u8) !void {
@@ -1776,6 +2105,8 @@ fn usage(io: std.Io) !void {
         \\  vrouter up [-c <config>]
         \\  vrouter doctor [-c <config>]
         \\  vrouter nat list [-c <config>]
+        \\  vrouter nat add|del masquerade --out <iface|port> [-c <config>]
+        \\  vrouter nat add|del port-forward --proto tcp|udp --ext-port <n> [--to <ip:port>] [--in <name>] [-c <config>]
         \\  vrouter conntrack list [--state new|established|closing] [--limit <n>] [-c <config>]
         \\  vrouter iface set|del <dev> <cidr|ipv6-cidr> [-c <config>]
         \\  vrouter iface up|down <dev> [-c <config>]

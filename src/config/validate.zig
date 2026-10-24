@@ -284,7 +284,10 @@ fn validateRoutes(cfg: *const schema.Config) ConfigError!void {
 }
 
 fn validateNat(cfg: *const schema.Config) ConfigError!void {
-    for (cfg.nat.masquerade) |m| {
+    for (cfg.nat.masquerade, 0..) |m, i| {
+        for (cfg.nat.masquerade[0..i]) |previous| {
+            if (std.mem.eql(u8, previous.out, m.out)) return error.DuplicateName;
+        }
         if (!cfg.interfaces.contains(m.out) and !cfg.ports.contains(m.out)) {
             return error.UndefinedReference;
         }
@@ -296,8 +299,15 @@ fn validateNat(cfg: *const schema.Config) ConfigError!void {
         }
     }
 
-    for (cfg.nat.port_forward) |f| {
+    for (cfg.nat.port_forward, 0..) |f, i| {
         if (f.proto != .tcp and f.proto != .udp) return error.InvalidValue;
+        for (cfg.nat.port_forward[0..i]) |previous| {
+            if (previous.proto == f.proto and previous.ext_port == f.ext_port and
+                optionalNameEqual(previous.in_iface, f.in_iface))
+            {
+                return error.DuplicateName;
+            }
+        }
         if (f.ext_port == 0) return error.InvalidValue;
         const to = types.parseIpPort(f.to) catch return error.InvalidValue;
         if (to.ip.isUnspecified() or to.ip.isMulticast() or
@@ -318,6 +328,14 @@ fn validateNat(cfg: *const schema.Config) ConfigError!void {
             }
         }
     }
+}
+
+fn optionalNameEqual(a: ?[]const u8, b: ?[]const u8) bool {
+    if (a) |left| {
+        if (b) |right| return std.mem.eql(u8, left, right);
+        return false;
+    }
+    return b == null;
 }
 
 fn validateDhcp(cfg: *const schema.Config) ConfigError!void {
@@ -917,4 +935,31 @@ test "rejects invalid firewall rules" {
     var parsed_cidr = try @import("parse.zig").parse(std.testing.allocator, bad_cidr);
     defer parsed_cidr.deinit();
     try std.testing.expectError(error.InvalidValue, validate(&parsed_cidr.config));
+}
+
+test "rejects duplicate NAT masquerade rules" {
+    const input =
+        \\{ "version": 1, "instance": "x",
+        \\  "ports": { "lan": { "kind": "l2", "device": "eth1" } },
+        \\  "interfaces": { "lan0": { "port": "lan", "address": "10.0.0.1/24" } },
+        \\  "nat": { "masquerade": [ { "out": "lan0" }, { "out": "lan0" } ] } }
+    ;
+    var parsed = try @import("parse.zig").parse(std.testing.allocator, input);
+    defer parsed.deinit();
+    try std.testing.expectError(error.DuplicateName, validate(&parsed.config));
+}
+
+test "rejects duplicate port forwards on the same ingress" {
+    const input =
+        \\{ "version": 1, "instance": "x",
+        \\  "ports": { "lan": { "kind": "l2", "device": "eth1" } },
+        \\  "interfaces": { "lan0": { "port": "lan", "address": "10.0.0.1/24" } },
+        \\  "nat": { "port_forward": [
+        \\    { "proto": "tcp", "ext_port": 8080, "to": "10.0.0.2:80", "in": "lan0" },
+        \\    { "proto": "tcp", "ext_port": 8080, "to": "10.0.0.3:80", "in": "lan0" }
+        \\  ] } }
+    ;
+    var parsed = try @import("parse.zig").parse(std.testing.allocator, input);
+    defer parsed.deinit();
+    try std.testing.expectError(error.DuplicateName, validate(&parsed.config));
 }

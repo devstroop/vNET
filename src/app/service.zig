@@ -11,6 +11,7 @@ const dns_service = @import("../services/dns/service.zig");
 const control_host = @import("../control/host.zig");
 const control_offload = @import("../control/offload.zig");
 const control_server = @import("../control/server.zig");
+const control_protocol = @import("../control/protocol.zig");
 const control_state = @import("../control/state.zig");
 const firewall_counters = @import("../control/firewall_counters.zig");
 const netlink = @import("../port/linux/netlink.zig");
@@ -243,13 +244,37 @@ pub fn run(
     }
     if (options.on_ready) |ready| ready(options.on_ready_ctx);
 
+    const apply_buf = try gpa.alloc(u8, control_server.max_request_bytes);
+    defer gpa.free(apply_buf);
     var buf: [2048]u8 = undefined;
     var netlink_tick: u8 = 0;
     var lease_save_ms = nowMs(io);
     var control_tick_ms = started_ms;
     while (!stop.load(.acquire)) {
+        var now = nowMs(io);
+        if (control) |*server| {
+            if (server.takeNatApply(apply_buf)) |line| {
+                const result = applyNatRequest(gpa, cfg, &forwarder, line);
+                server.finishNatApply(result.ok, result.code, result.message);
+                if (result.ok) {
+                    var snapshot: control_state.Snapshot = .{};
+                    buildSnapshot(
+                        &snapshot,
+                        cfg,
+                        &forwarder,
+                        manager.count(),
+                        options.state_dir.?,
+                        control_path.?,
+                        started_ms,
+                        now,
+                    );
+                    server.publish(&snapshot);
+                    control_tick_ms = now;
+                }
+            }
+        }
         forwarder.tick(io);
-        const now = nowMs(io);
+        now = nowMs(io);
         if (control) |*server| {
             if (now - control_tick_ms >= 1_000) {
                 var snapshot: control_state.Snapshot = .{};
@@ -399,6 +424,66 @@ pub fn run(
             forwarder.counters.icmpv6_echoes,
         },
     );
+}
+
+const ApplyResult = struct {
+    ok: bool,
+    code: []const u8,
+    message: []const u8,
+};
+
+fn applyNatRequest(
+    gpa: std.mem.Allocator,
+    cfg: *const schema.Config,
+    forwarder: *forward.Forwarder,
+    line: []const u8,
+) ApplyResult {
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var parsed = control_protocol.parseRequest(a, line) catch {
+        return .{ .ok = false, .code = "invalid_request", .message = "malformed NAT request" };
+    };
+    defer parsed.deinit();
+    if (!std.mem.eql(u8, parsed.value.op, "nat.apply")) {
+        return .{ .ok = false, .code = "invalid_request", .message = "wrong operation" };
+    }
+    const apply = parsed.value.nat orelse {
+        return .{ .ok = false, .code = "invalid_request", .message = "missing nat payload" };
+    };
+    if (!std.mem.eql(u8, apply.instance, cfg.instance)) {
+        return .{ .ok = false, .code = "instance_mismatch", .message = "instance does not match" };
+    }
+
+    const masquerade = a.alloc(schema.MasqueradeConfig, apply.masquerade.len) catch {
+        return .{ .ok = false, .code = "out_of_memory", .message = "out of memory" };
+    };
+    for (apply.masquerade, 0..) |rule, i| {
+        masquerade[i] = .{ .out = rule.out };
+    }
+    const forwards = a.alloc(schema.PortForwardConfig, apply.port_forward.len) catch {
+        return .{ .ok = false, .code = "out_of_memory", .message = "out of memory" };
+    };
+    for (apply.port_forward, 0..) |rule, i| {
+        const proto = std.meta.stringToEnum(schema.Proto, rule.proto) orelse {
+            return .{ .ok = false, .code = "invalid_argument", .message = "invalid protocol" };
+        };
+        forwards[i] = .{
+            .proto = proto,
+            .ext_port = rule.ext_port,
+            .to = rule.to,
+            .in_iface = rule.ingress,
+        };
+    }
+
+    forwarder.applyNatConfig(cfg, .{
+        .masquerade = masquerade,
+        .port_forward = forwards,
+    }) catch |err| {
+        return .{ .ok = false, .code = "invalid_argument", .message = @errorName(err) };
+    };
+    return .{ .ok = true, .code = "", .message = "" };
 }
 
 fn nowMs(io: std.Io) i64 {

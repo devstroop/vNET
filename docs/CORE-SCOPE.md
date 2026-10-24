@@ -305,11 +305,14 @@ pub const FlowState = enum { new, established, related, closing };
 ```
 vrouter nat add port-forward --proto tcp --ext-port 8080 --to 10.10.0.5:80
 vrouter nat add port-forward --proto udp --ext-port 51820 --to 10.10.0.7:51820
+vrouter nat del port-forward --proto tcp --ext-port 8080
 ```
 
-- Match on egress port + protocol + external port (+ optional source CIDR).
-  The optional `in` selector restricts a rule to one ingress port/interface;
-  omitted means any ingress.
+- Match on the local destination address, protocol, external port and the
+  optional `in` ingress selector; omitted `in` means any ingress. Deletion uses
+  the same protocol/port key and may add `--to`/`--in` to disambiguate.
+- Both add and delete apply live when a matching daemon is running, or save the
+  config with a warning when it is not (ADR-014).
 - Rewrite destination and reverse state; optional source rewriting for
   hairpin.
 - Range mapping `8080-8090:80-90` — v1.1.
@@ -330,8 +333,9 @@ vrouter nat add port-forward --proto udp --ext-port 51820 --to 10.10.0.7:51820
   flow are translated on the reverse path: outer and quoted IP addresses and
   L4 ports are restored, and the quoted IP/L4 checksums are adjusted
   incrementally (RFC 1624) so the ICMP payload remains valid.
-- Masquerade `out` must resolve to a static interface address. DHCP uplinks
-  fail with `InvalidArgument` until R4.
+- Masquerade `out` resolves to an interface or port address. If the interface
+  uses DHCP, the SNAT rule is deferred until the DHCP client binds a lease; the
+  live-apply path accepts that deferred state.
 - Fragments and unrelated or non-echo ICMP on an egress with masquerade are
   dropped and counted (`nat_unsupported`) rather than leaking private sources.
   Translated ICMP errors are matched by a separate translated-key index.
@@ -344,9 +348,16 @@ vrouter nat add port-forward --proto udp --ext-port 51820 --to 10.10.0.7:51820
   back out the ingress port".
 - Port forwards apply to any local address (the config has no `out` field);
   firewall policy must keep this from shadowing router-local services.
-- Checksums are recomputed in full after ordinary NAT rewrites; ICMP-error
-  quoted IP/L4 checksums use incremental adjustment because only the quoted
-  header is present.
+- Forwarded IPv4 checksums are repaired once after the packet copy and before
+  conntrack/NAT (ADR-007). Ordinary and multi-step NAT rewrites then adjust
+  TCP/UDP/ICMP checksums incrementally (RFC 1624); ICMP-error quoted headers use
+  the same incremental mechanism.
+- `vrouter nat add|del` is a config-backed live transaction (ADR-014): the CLI
+  validates and atomically saves the config, sends the complete desired NAT
+  tables over the control socket (`nat.apply`, protocol v2), and restores the
+  file if the daemon rejects or cannot receive the apply. With no daemon it
+  saves and warns. Existing conntrack flows are not flushed; removed rules
+  affect new flows.
 
 ### 5.5 Out of scope
 
@@ -567,6 +578,8 @@ vrouter status [-c] <config.json>
 vrouter up [-c <config>]
 vrouter doctor [-c <config>]
 vrouter nat list [-c <config>]
+vrouter nat add|del masquerade --out <iface|port> [-c <config>]
+vrouter nat add|del port-forward --proto tcp|udp --ext-port <n> [--to <ip:port>] [--in <name>] [-c <config>]
 vrouter conntrack list [--state new|established|closing] [--limit <n>] [-c <config>]
 vrouter iface set|del <dev> <cidr> [-c <config>]
 vrouter iface up|down <dev> [-c <config>]
@@ -589,7 +602,6 @@ Planned with their milestones:
 
 ```
 vrouter bridge create lan                   # R5
-vrouter nat add masquerade --out wan0       # R3
 vrouter pcap --iface lan --write cap.pcap   # R9
 ```
 
@@ -609,16 +621,20 @@ Implemented (R7 control-socket foundation):
   `<state_dir>/control.sock.lock` is taken before host mutations. A separate
   `<state_dir>/control.sock.up.lock` serializes concurrent `vrouter up` starts.
   Use separate run directories for separate instances.
-- Operations: `ping`, `status`, `nat.list`, `conntrack.list` (optional
-  `state` and `limit`). Responses echo the request `id`; failures return
-  `ok:false`, `error_code` and `message`. Each table response also carries the
-  daemon `instance` so clients can reject a mismatched `-c` config.
+- Operations: `ping`, `status`, `nat.list`, `nat.apply`, `conntrack.list`
+  (optional `state` and `limit`). Protocol version 2 adds `nat.apply`, which
+  carries the complete desired masquerade/port-forward tables and the instance.
+  Responses echo the request `id`; failures return `ok:false`, `error_code` and
+  `message`. Each table response also carries the daemon `instance` so clients
+  can reject a mismatched `-c` config.
 - The server accepts root or the daemon's effective uid and rejects other
   peers with `unauthorized`; until group authorization lands, the effective
   boundary is the peer uid plus socket permissions.
-- Snapshots are published by the datapath once per second. NAT rules are
-  capped at 64 SNAT + 128 port forwards and conntrack responses at 256 entries
-  (the response carries the full table count).
+- Snapshots are published by the datapath once per second, and immediately
+  after a successful `nat.apply`. NAT rules are capped at 64 SNAT + 128 port
+  forwards and conntrack responses at 256 entries (the response carries the
+  full table count). A write apply is queued to the single-threaded data loop;
+  one may be pending at a time and the request limit is 64 KiB.
 - No TCP listener. v1 exposes no HTTP listener. A post-v1 optional `vrouter-web`
   adapter may render this API in a browser; it is an unprivileged client and
   never mutates host state directly (ADR-011).
@@ -630,7 +646,8 @@ Implemented (R7 control-socket foundation):
 R2 records one **forward operation** per JSON line under
 `$VROUTER_RUN_DIR/<instance>.journal` (default `/run/vrouter`). The inverse is derived
 by `vrouter down`; the journal is fsynced and atomically replaced before the
-netlink call:
+netlink call. NAT rules are datapath state rather than host mutations, so live
+NAT edits are recorded in the config file and not in this journal:
 
 ```json
 {"op":"addr_add","dev":"lan0","cidr":"10.10.0.1/24"}

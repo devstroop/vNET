@@ -84,13 +84,11 @@ vrouter/
 │   │   └── mtu.zig              MSS clamp, PMTU errors
 │   ├── nat/
 │   │   ├── conntrack.zig        5-tuple table, timeouts, GC, port allocator (R3)
-│   │   ├── nat.zig              SNAT/DNAT rewrite, ICMP-error checksum adjust (R3)
-│   │   └── checksum.zig         incremental checksum updates (planned)
+│   │   └── nat.zig              SNAT/DNAT rewrite, RFC 1624 checksum adjust (R3)
 │   ├── services/
 │   │   ├── dhcp/message.zig     wire parser/builder
 │   │   ├── dhcp/server.zig      pool, reservations, options, DECLINE
 │   │   ├── dhcp/leases.zig      atomic JSON lease persistence
-│   │   ├── dhcp/client.zig      uplink (planned)
 │   │   └── dns/                 message, cache, UDP forwarder
 │   ├── firewall/
 │   │   ├── rules.zig            ordered rules, match/actions
@@ -278,8 +276,14 @@ pub const CtEntry = struct {
   flows and increment counters. Entries are not yet evicted on port teardown.
 - SNAT allocation preserves the source port when free, otherwise hashes and
   probes 1024–65535. Ports are released by GC.
-- NAT rewrites recompute IPv4/TCP/UDP/ICMP checksums from scratch (ADR-005
-  allows this); incremental updates are an R3 optimization.
+- Forwarded IPv4 transport checksums are repaired once after the forwarding
+  copy and before conntrack/NAT (ADR-007). NAT rewrites then adjust
+  TCP/UDP/ICMP checksums incrementally with RFC 1624; egress and pending-flush
+  paths do not rescan the payload.
+- Live NAT changes use a control queue (ADR-014): the control thread copies the
+  complete desired tables, the data loop compiles and swaps them between packet
+  batches, and the server acknowledges synchronously. Existing conntrack
+  entries keep their translation until timeout.
 - DNAT/port forwarding and hairpin are implemented for TCP/UDP; ICMP port
   forwards are rejected. ICMP errors quoting a tracked NAT flow are translated
   (outer and quoted tuple, RFC 1624 quoted-L4 checksum adjustment); fragments
@@ -304,8 +308,9 @@ CLI / API ──▶ config::diff ──▶ mutation list ──▶ journal ─�
   mutations (remove dependents before parents, add parents before children).
 - `apply` is transactional: on failure, replay the inverse of already-applied
   mutations and return a typed error.
-- Hot-reload fields: routes, NAT rules, firewall rules, DNS upstreams.
-  Restart-required: ports, bridges, addresses.
+- Hot-reload fields: NAT rules use the dedicated `nat.apply` queue (ADR-014);
+  routes, firewall rules and DNS upstreams still require the planned
+  diff/apply path. Restart-required: ports, bridges, addresses.
 - Events: `port_up/down`, `link_change`, `addr_change`, `dhcp_lease`,
   `nat_expired`, `config_applied`, `error`.
 - Post-v1, an optional `vrouter-web` adapter may expose this API over
@@ -434,7 +439,7 @@ no throughput or latency claim is made before R9.
 | IPv6 | NDP, ping6 and TCP repair (`scripts/test_ipv6.sh`) |
 | TUN | Kernel TUN peer ↔ veth host, ICMP + TCP (`scripts/test_tun.sh`) |
 | Journal | iface/route mutations + `vrouter down` (`scripts/test_journal.sh`) |
-| NAT/conntrack | SNAT UDP/ICMP/TCP, DNAT/hairpin (`scripts/nat_matrix.sh`) |
+| NAT/conntrack | SNAT UDP/ICMP/TCP, DNAT/hairpin, live add/del (`scripts/nat_matrix.sh`) |
 | NAT matrix | Emulated EIM/EDM, hairpin, port-forward, exhaustion |
 | DHCP/DNS | Client emulators; lease persistence across restart |
 | Security/privilege | Journal rollback, default-deny policy, netns isolation |
@@ -458,3 +463,5 @@ no throughput or latency claim is made before R9.
 | [010](adr/010-embedded-c-abi.md) | Embedded C ABI and host fd injection |
 | [011](adr/011-web-admin.md) | Optional local web admin (post-v1) |
 | [012](adr/012-project-rename.md) | Rename vNAT to vRouter |
+| [013](adr/013-ipv6-r9-core.md) | IPv6 core for v1.0 |
+| [014](adr/014-live-nat-updates.md) | Config-backed live NAT updates |

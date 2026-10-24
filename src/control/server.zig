@@ -11,10 +11,11 @@ const transport = @import("transport.zig");
 const unix = @import("unix.zig");
 const thread = @import("../thread.zig");
 
-const max_request_bytes = 4096;
+pub const max_request_bytes = 64 * 1024;
 const max_response_bytes = 128 * 1024;
 const client_timeout_ms = 2_000;
 const default_conntrack_limit = 100;
+const max_apply_error = 256;
 
 pub const Options = struct {
     mode: u32 = 0o660,
@@ -41,6 +42,17 @@ pub const Server = struct {
     thread: ?thread.Thread = null,
     mutex: std.Io.Mutex = .init,
     snapshot: state.Snapshot = .{},
+    apply_mutex: std.Io.Mutex = .init,
+    apply_pending: bool = false,
+    apply_claimed: bool = false,
+    apply_done: bool = false,
+    apply_ok: bool = false,
+    apply_line_len: usize = 0,
+    apply_line: [max_request_bytes]u8 = undefined,
+    apply_error_code: [max_apply_error]u8 = undefined,
+    apply_error_code_len: usize = 0,
+    apply_error_message: [max_apply_error]u8 = undefined,
+    apply_error_message_len: usize = 0,
 
     pub fn init(
         io: std.Io,
@@ -107,8 +119,45 @@ pub const Server = struct {
         self.thread = try thread.spawn(run, .{self});
     }
 
+    pub fn takeNatApply(self: *Server, out: []u8) ?[]const u8 {
+        self.apply_mutex.lockUncancelable(self.io);
+        defer self.apply_mutex.unlock(self.io);
+        if (!self.apply_pending or self.apply_claimed) return null;
+        if (out.len < self.apply_line_len) return null;
+        @memcpy(out[0..self.apply_line_len], self.apply_line[0..self.apply_line_len]);
+        self.apply_claimed = true;
+        return out[0..self.apply_line_len];
+    }
+
+    pub fn finishNatApply(
+        self: *Server,
+        ok: bool,
+        code: []const u8,
+        message: []const u8,
+    ) void {
+        self.apply_mutex.lockUncancelable(self.io);
+        defer self.apply_mutex.unlock(self.io);
+        self.apply_ok = ok;
+        self.apply_error_code_len = @min(code.len, self.apply_error_code.len);
+        @memcpy(self.apply_error_code[0..self.apply_error_code_len], code[0..self.apply_error_code_len]);
+        self.apply_error_message_len = @min(message.len, self.apply_error_message.len);
+        @memcpy(
+            self.apply_error_message[0..self.apply_error_message_len],
+            message[0..self.apply_error_message_len],
+        );
+        self.apply_done = true;
+    }
+
     pub fn deinit(self: *Server) void {
         self.stop.store(true, .release);
+        self.apply_mutex.lockUncancelable(self.io);
+        self.apply_ok = false;
+        self.apply_error_code_len = 14;
+        @memcpy(self.apply_error_code[0..14], "server_stopped");
+        self.apply_error_message_len = 14;
+        @memcpy(self.apply_error_message[0..14], "server stopped");
+        self.apply_done = true;
+        self.apply_mutex.unlock(self.io);
         if (self.thread) |worker| {
             const stream: std.Io.net.Stream = .{ .socket = self.listener.socket };
             stream.shutdown(self.io, .both) catch {};
@@ -182,6 +231,11 @@ pub const Server = struct {
             return;
         }
 
+        if (std.mem.eql(u8, parsed.value.op, "nat.apply")) {
+            self.handleNatApply(stream, parsed.value, line);
+            return;
+        }
+
         var response_buf: [max_response_bytes]u8 = undefined;
         var response: std.Io.Writer = .fixed(&response_buf);
         self.mutex.lockUncancelable(self.io);
@@ -230,6 +284,109 @@ pub const Server = struct {
         return true;
     }
 
+    fn handleNatApply(
+        self: *Server,
+        stream: std.Io.net.Stream,
+        request: protocol.Request,
+        line: []const u8,
+    ) void {
+        const apply = request.nat orelse {
+            self.sendError(stream, request.id, request.op, "invalid_request", "missing nat payload");
+            return;
+        };
+        self.mutex.lockUncancelable(self.io);
+        const instance = self.snapshot.instance;
+        const instance_matches = std.mem.eql(u8, apply.instance, instance);
+        self.mutex.unlock(self.io);
+        if (!instance_matches) {
+            self.sendError(stream, request.id, request.op, "instance_mismatch", "instance does not match");
+            return;
+        }
+
+        self.apply_mutex.lockUncancelable(self.io);
+        if (self.apply_pending and self.apply_done) {
+            self.apply_pending = false;
+            self.apply_claimed = false;
+        }
+        if (self.apply_pending) {
+            self.apply_mutex.unlock(self.io);
+            self.sendError(stream, request.id, request.op, "busy", "another NAT update is pending");
+            return;
+        }
+        if (line.len > self.apply_line.len) {
+            self.apply_mutex.unlock(self.io);
+            self.sendError(stream, request.id, request.op, "invalid_request", "request too large");
+            return;
+        }
+        @memcpy(self.apply_line[0..line.len], line);
+        self.apply_line_len = line.len;
+        self.apply_pending = true;
+        self.apply_claimed = false;
+        self.apply_done = false;
+        self.apply_ok = false;
+        self.apply_error_code_len = 0;
+        self.apply_error_message_len = 0;
+        self.apply_mutex.unlock(self.io);
+
+        var elapsed_ms: u64 = 0;
+        while (true) : (elapsed_ms += 1) {
+            self.apply_mutex.lockUncancelable(self.io);
+            if (self.apply_done) {
+                const ok = self.apply_ok;
+                var code_buf: [max_apply_error]u8 = undefined;
+                var message_buf: [max_apply_error]u8 = undefined;
+                const code_len = self.apply_error_code_len;
+                const message_len = self.apply_error_message_len;
+                @memcpy(code_buf[0..code_len], self.apply_error_code[0..code_len]);
+                @memcpy(message_buf[0..message_len], self.apply_error_message[0..message_len]);
+                self.apply_pending = false;
+                self.apply_claimed = false;
+                self.apply_mutex.unlock(self.io);
+                if (ok) {
+                    self.sendApplyOk(stream, request.id, request.op);
+                } else {
+                    self.sendError(
+                        stream,
+                        request.id,
+                        request.op,
+                        code_buf[0..code_len],
+                        message_buf[0..message_len],
+                    );
+                }
+                return;
+            }
+            if (elapsed_ms >= client_timeout_ms and !self.apply_claimed) {
+                // The datapath has not picked the job up, so cancel it before
+                // replying. Once claimed, the swap will finish; wait for the
+                // acknowledgement instead of returning an uncertain timeout.
+                self.apply_pending = false;
+                self.apply_claimed = false;
+                self.apply_mutex.unlock(self.io);
+                self.sendError(stream, request.id, request.op, "timeout", "NAT update timed out");
+                return;
+            }
+            self.apply_mutex.unlock(self.io);
+            std.Io.sleep(self.io, std.Io.Duration.fromMilliseconds(1), .awake) catch {};
+        }
+    }
+
+    fn sendApplyOk(self: *Server, stream: std.Io.net.Stream, id: ?u64, op: []const u8) void {
+        var buf: [1024]u8 = undefined;
+        var writer: std.Io.Writer = .fixed(&buf);
+        var json: std.json.Stringify = .{ .writer = &writer };
+        json.beginObject() catch return;
+        writeField(&json, "ok", true) catch return;
+        writeOptionalId(&json, id) catch return;
+        writeField(&json, "op", op) catch return;
+        json.endObject() catch return;
+        writer.writeByte('\n') catch return;
+
+        var socket_buf: [1024]u8 = undefined;
+        var stream_writer = stream.writer(self.io, &socket_buf);
+        stream_writer.interface.writeAll(writer.buffered()) catch return;
+        stream_writer.interface.flush() catch {};
+    }
+
     fn sendError(
         self: *Server,
         stream: std.Io.net.Stream,
@@ -266,6 +423,7 @@ fn isSupported(op: []const u8) bool {
     return std.mem.eql(u8, op, "ping") or
         std.mem.eql(u8, op, "status") or
         std.mem.eql(u8, op, "nat.list") or
+        std.mem.eql(u8, op, "nat.apply") or
         std.mem.eql(u8, op, "conntrack.list");
 }
 

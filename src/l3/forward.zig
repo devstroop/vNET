@@ -557,6 +557,81 @@ pub const Forwarder = struct {
         });
     }
 
+    pub fn applyNatConfig(
+        self: *Forwarder,
+        cfg: *const schema.Config,
+        nat: schema.NatConfig,
+    ) PortError!void {
+        var new_snat: std.ArrayListUnmanaged(nat_mod.Rule) = .empty;
+        errdefer new_snat.deinit(self.gpa);
+        var new_forward: std.ArrayListUnmanaged(nat_mod.ForwardRule) = .empty;
+        errdefer new_forward.deinit(self.gpa);
+
+        for (nat.masquerade) |masquerade| {
+            if (masquerade.out.len == 0) return error.InvalidArgument;
+            const rule = resolveMasquerade(cfg, self.local.items, self.ports, masquerade.out) orelse {
+                if (masqueradeDeferred(self, cfg, masquerade.out)) continue;
+                return error.InvalidArgument;
+            };
+            for (new_snat.items) |existing| {
+                if (existing.port.eql(rule.port)) return error.InvalidArgument;
+            }
+            try new_snat.append(self.gpa, rule);
+        }
+
+        for (nat.port_forward) |forward| {
+            const proto: u8 = switch (forward.proto) {
+                .tcp => 6,
+                .udp => 17,
+                .icmp, .icmpv6 => return error.InvalidArgument,
+            };
+            if (forward.ext_port == 0) return error.InvalidArgument;
+            const to = types.parseIpPort(forward.to) catch return error.InvalidArgument;
+            if (to.ip.isUnspecified() or to.ip.isMulticast() or
+                to.ip.eql(types.Ipv4.limited_broadcast))
+            {
+                return error.InvalidArgument;
+            }
+            const ingress: ?types.PortId = if (forward.in_iface) |name| blk: {
+                const entry = findRoutePort(cfg, self.ports, name) orelse
+                    return error.InvalidArgument;
+                break :blk entry.id;
+            } else null;
+            for (new_forward.items) |existing| {
+                if (existing.proto == proto and existing.ext_port == forward.ext_port and
+                    optionalPortEqual(existing.ingress, ingress))
+                {
+                    return error.InvalidArgument;
+                }
+            }
+            try new_forward.append(self.gpa, .{
+                .proto = proto,
+                .ext_port = forward.ext_port,
+                .to_addr = to.ip,
+                .to_port = to.port,
+                .ingress = ingress,
+            });
+        }
+
+        var old_snat = self.snat_rules;
+        var old_forward = self.forward_rules;
+        self.snat_rules = new_snat;
+        self.forward_rules = new_forward;
+        old_snat.deinit(self.gpa);
+        old_forward.deinit(self.gpa);
+
+        for (self.dhcp_clients.items) |*client| {
+            client.want_masquerade = false;
+            for (nat.masquerade) |masquerade| {
+                const port = masqueradeOutPort(cfg, self.ports, masquerade.out) orelse continue;
+                if (port.eql(client.port)) {
+                    client.want_masquerade = true;
+                    break;
+                }
+            }
+        }
+    }
+
     pub fn dhcpServers(self: *Forwarder) []dhcp_server.Server {
         return self.dhcp_servers.items;
     }
@@ -1989,6 +2064,7 @@ pub const Forwarder = struct {
             self.counters.dropped += 1;
             return;
         };
+        fixTransportChecksum(packet);
 
         if (entry) |found| {
             updateFlow(found, ipm, now, direction == .reply);
@@ -2344,7 +2420,6 @@ pub const Forwarder = struct {
                 self.counters.dropped += 1;
                 return;
             };
-            fixTransportChecksum(out[0..total]);
             try egress.port.write(io, out[0..total]);
             self.counters.forwarded += 1;
             return;
@@ -2414,7 +2489,6 @@ pub const Forwarder = struct {
             self.counters.dropped += 1;
             return;
         };
-        fixTransportChecksum(out[0..total]);
         self.sendL2Vlan(io, egress_port, resolved.mac, ethernet.EtherType.ipv4, out[0..total], route.vlan) catch {
             self.counters.dropped += 1;
             return;
@@ -3582,7 +3656,6 @@ pub const Forwarder = struct {
                 self.counters.dropped += 1;
                 return true;
             };
-            fixTransportChecksum(out[0..total]);
             try egress.port.write(io, out[0..total]);
             self.counters.forwarded += 1;
             return true;
@@ -3652,7 +3725,6 @@ pub const Forwarder = struct {
             self.counters.dropped += 1;
             return true;
         };
-        fixTransportChecksum(out[0..total]);
         self.sendL2Vlan(io, egress_port, resolved.mac, ethernet.EtherType.ipv4, out[0..total], route.vlan) catch {
             self.counters.dropped += 1;
             return true;
@@ -3873,7 +3945,6 @@ pub const Forwarder = struct {
                 self.counters.pending_dropped += 1;
                 continue;
             };
-            fixTransportChecksum(packet[0..len]);
             self.sendL2Vlan(io, port, next_mac, ethernet.EtherType.ipv4, packet[0..len], vlan) catch {
                 self.counters.pending_dropped += 1;
                 continue;
@@ -4297,9 +4368,8 @@ fn fixTransportChecksum6(packet: []u8) void {
 }
 
 /// AF_PACKET sees locally generated packets before some NICs complete checksum
-/// offload; recomputing TCP/UDP checksums keeps forwarded traffic valid. The
-/// cost is bounded to one pass over L4 and is revisited when offload is
-/// negotiated (R3 perf).
+/// offload. Repair once after the forwarding copy, before conntrack/NAT, so NAT
+/// can adjust the checksum incrementally instead of rescanning the payload.
 fn fixTransportChecksum(packet: []u8) void {
     const header = ipv4.parse(packet) catch return;
     if (header.isFragment()) return;
@@ -4617,12 +4687,33 @@ fn updateFlow(
     entry.last_seen_ms = now_ms;
 }
 
-fn resolveMasquerade(
+fn masqueradeDeferred(self: *const Forwarder, cfg: *const schema.Config, out: []const u8) bool {
+    if (cfg.interfaces.get(out)) |itf| {
+        if (itf.address) |address| {
+            if (std.mem.eql(u8, address, "dhcp")) {
+                const port_name = itf.port orelse return false;
+                const port_entry = findPort(self.ports, port_name) orelse return false;
+                return self.hasDhcpClient(port_entry.id);
+            }
+        }
+    }
+    if (findPort(self.ports, out)) |port_entry| return self.hasDhcpClient(port_entry.id);
+    return false;
+}
+
+fn optionalPortEqual(a: ?types.PortId, b: ?types.PortId) bool {
+    if (a) |left| {
+        if (b) |right| return left.eql(right);
+        return false;
+    }
+    return b == null;
+}
+
+fn masqueradeOutPort(
     cfg: *const schema.Config,
-    locals: []const LocalAddr,
     ports: []const PortEntry,
     out: []const u8,
-) ?nat_mod.Rule {
+) ?types.PortId {
     if (cfg.interfaces.get(out)) |itf| {
         const port_name = if (itf.port) |name|
             name
@@ -4633,15 +4724,28 @@ fn resolveMasquerade(
             break :blk bridge.ports[0];
         } else return null;
         const port_entry = findPort(ports, port_name) orelse return null;
+        return port_entry.id;
+    }
+    const port_entry = findPort(ports, out) orelse return null;
+    return port_entry.id;
+}
+
+fn resolveMasquerade(
+    cfg: *const schema.Config,
+    locals: []const LocalAddr,
+    ports: []const PortEntry,
+    out: []const u8,
+) ?nat_mod.Rule {
+    const port_id = masqueradeOutPort(cfg, ports, out) orelse return null;
+    if (cfg.interfaces.get(out)) |itf| {
         const address = itf.address orelse return null;
         if (std.mem.eql(u8, address, "dhcp")) return null;
         const prefix = types.Prefix4.parse(address) catch return null;
-        return .{ .port = port_entry.id, .addr = prefix.addr };
+        return .{ .port = port_id, .addr = prefix.addr };
     }
 
-    const port_entry = findPort(ports, out) orelse return null;
     for (locals) |local| {
-        if (local.port.eql(port_entry.id)) return .{ .port = port_entry.id, .addr = local.prefix.addr };
+        if (local.port.eql(port_id)) return .{ .port = port_id, .addr = local.prefix.addr };
     }
     return null;
 }
@@ -5435,6 +5539,128 @@ test "forwarder builds state from config" {
     try testing.expectEqual(@as(u16, 8080), fwd.forward_rules.items[0].ext_port);
     try testing.expect(fwd.forward_rules.items[0].to_addr.eql(testIp("10.0.1.10")));
     try testing.expectEqual(@as(u16, 80), fwd.forward_rules.items[0].to_port);
+}
+
+test "applyNatConfig replaces NAT tables atomically" {
+    const MemoryPort = @import("../port/memory.zig").MemoryPort;
+    var a = MemoryPort.init(testing.allocator, port_a, "a", 1500);
+    defer a.deinit();
+    a.mac = port_a_mac;
+    var b = MemoryPort.init(testing.allocator, port_b, "b", 1500);
+    defer b.deinit();
+    b.mac = port_b_mac;
+
+    const entries = [2]PortEntry{
+        .{ .id = port_a, .config_name = "a", .port = a.port() },
+        .{ .id = port_b, .config_name = "b", .port = b.port() },
+    };
+    const json =
+        \\{
+        \\  "version": 1,
+        \\  "instance": "fwd",
+        \\  "ports": {
+        \\    "a": { "kind": "l2", "device": "a" },
+        \\    "b": { "kind": "l2", "device": "b" }
+        \\  },
+        \\  "interfaces": {
+        \\    "lan-a": { "port": "a", "address": "10.0.1.1/24" },
+        \\    "lan-b": { "port": "b", "address": "10.0.2.1/24" }
+        \\  },
+        \\  "nat": {
+        \\    "masquerade": [ { "out": "lan-b" } ],
+        \\    "port_forward": [ { "proto": "tcp", "ext_port": 8080, "to": "10.0.1.10:80" } ]
+        \\  }
+        \\}
+    ;
+    var parsed = try config_parse.parse(testing.allocator, json);
+    defer parsed.deinit();
+
+    var fwd = try Forwarder.fromConfig(testing.allocator, testing.io, &parsed.config, &entries);
+    defer fwd.deinit();
+
+    try fwd.applyNatConfig(&parsed.config, .{});
+    try testing.expectEqual(@as(usize, 0), fwd.snat_rules.items.len);
+    try testing.expectEqual(@as(usize, 0), fwd.forward_rules.items.len);
+
+    try fwd.applyNatConfig(&parsed.config, .{
+        .masquerade = &.{.{ .out = "lan-a" }},
+        .port_forward = &.{.{
+            .proto = .udp,
+            .ext_port = 5353,
+            .to = "10.0.1.20:53",
+            .in_iface = "lan-a",
+        }},
+    });
+    try testing.expectEqual(@as(usize, 1), fwd.snat_rules.items.len);
+    try testing.expect(fwd.snat_rules.items[0].port.eql(port_a));
+    try testing.expect(fwd.snat_rules.items[0].addr.eql(testIp("10.0.1.1")));
+    try testing.expectEqual(@as(usize, 1), fwd.forward_rules.items.len);
+    try testing.expectEqual(@as(u8, 17), fwd.forward_rules.items[0].proto);
+    try testing.expect(fwd.forward_rules.items[0].ingress.?.eql(port_a));
+
+    try testing.expectError(error.InvalidArgument, fwd.applyNatConfig(&parsed.config, .{
+        .masquerade = &.{ .{ .out = "lan-a" }, .{ .out = "lan-a" } },
+    }));
+    try testing.expectEqual(@as(usize, 1), fwd.snat_rules.items.len);
+    try testing.expect(fwd.snat_rules.items[0].addr.eql(testIp("10.0.1.1")));
+    try testing.expectEqual(@as(usize, 1), fwd.forward_rules.items.len);
+}
+
+test "live NAT apply keeps DHCP client masquerade state in sync" {
+    const MemoryPort = @import("../port/memory.zig").MemoryPort;
+    var a = MemoryPort.init(testing.allocator, port_a, "a", 1500);
+    defer a.deinit();
+    a.mac = port_a_mac;
+    var b = MemoryPort.init(testing.allocator, port_b, "b", 1500);
+    defer b.deinit();
+    b.mac = port_b_mac;
+
+    const entries = [2]PortEntry{
+        .{ .id = port_a, .config_name = "a", .port = a.port() },
+        .{ .id = port_b, .config_name = "b", .port = b.port() },
+    };
+    const json =
+        \\{
+        \\  "version": 1,
+        \\  "instance": "fwd",
+        \\  "ports": {
+        \\    "a": { "kind": "l2", "device": "a" },
+        \\    "b": { "kind": "l2", "device": "b" }
+        \\  },
+        \\  "interfaces": {
+        \\    "lan-a": { "port": "a", "address": "10.0.1.1/24" },
+        \\    "wan": { "port": "b", "address": "dhcp" }
+        \\  }
+        \\}
+    ;
+    var parsed = try config_parse.parse(testing.allocator, json);
+    defer parsed.deinit();
+
+    var fwd = try Forwarder.fromConfig(testing.allocator, testing.io, &parsed.config, &entries);
+    defer fwd.deinit();
+
+    try testing.expectEqual(@as(usize, 1), fwd.dhcp_clients.items.len);
+    try testing.expect(!fwd.dhcp_clients.items[0].want_masquerade);
+
+    try fwd.applyNatConfig(&parsed.config, .{
+        .masquerade = &.{.{ .out = "wan" }},
+    });
+    try testing.expectEqual(@as(usize, 0), fwd.snat_rules.items.len);
+    try testing.expect(fwd.dhcp_clients.items[0].want_masquerade);
+
+    const client = &fwd.dhcp_clients.items[0];
+    client.offered_ip = testIp("203.0.113.2");
+    client.subnet_mask = types.Ipv4{ .value = 0xffffff00 };
+    fwd.applyDhcpClient(client, nowMs(testing.io));
+    try testing.expectEqual(@as(usize, 1), fwd.snat_rules.items.len);
+    try testing.expect(fwd.snat_rules.items[0].port.eql(port_b));
+    try testing.expect(fwd.snat_rules.items[0].addr.eql(testIp("203.0.113.2")));
+
+    try fwd.applyNatConfig(&parsed.config, .{});
+    try testing.expectEqual(@as(usize, 0), fwd.snat_rules.items.len);
+    try testing.expect(!fwd.dhcp_clients.items[0].want_masquerade);
+    fwd.applyDhcpClient(&fwd.dhcp_clients.items[0], nowMs(testing.io));
+    try testing.expectEqual(@as(usize, 0), fwd.snat_rules.items.len);
 }
 
 test "kernel offload bridge maps its veth trunk as one synthetic member" {
