@@ -8,6 +8,14 @@ All notable changes to vRouter are documented here. The format follows
 
 ### Added
 
+- **Live NAT updates (ADR-014):** `vrouter nat add|del masquerade` and
+  `vrouter nat add|del port-forward` validate and atomically save the config,
+  apply the complete desired NAT tables over the protocol-v2 `nat.apply`
+  control operation, and restore the previous config if the daemon rejects the
+  update. With no daemon the change is saved with a warning. The NAT apply queue
+  is bounded, keeps the datapath lock-free, and publishes a snapshot
+  immediately. `scripts/nat_matrix.sh` covers live add/delete, rollback and
+  restart persistence.
 - **IPv6 core (ADR-013):** dual-stack forwarding between L2 ports, SVIs and
   TUN ports; NDP neighbor discovery with a bounded pending queue; ICMPv6 echo,
   errors and packet-too-big; IPv6 static/connected routes; and software repair
@@ -90,6 +98,12 @@ All notable changes to vRouter are documented here. The format follows
   `vrouter`/`VROUTER`. There are no compatibility aliases. Stop the old daemon
   and run `vnat down` before upgrading; `/run/vnat` state is not migrated.
 - Bump the project version to 0.1.0.
+- Live NAT edits preserve unrelated JSON keys while normalizing the config file
+  to two-space indentation. The control protocol is now version 2 and requests
+  may be up to 64 KiB.
+- Forwarded IPv4 checksums are repaired once before conntrack/NAT; NAT rewrites
+  adjust TCP/UDP/ICMP checksums incrementally (RFC 1624) instead of rescanning
+  the payload on every rewrite (ADR-007, ADR-014).
 
 ### Fixed
 
@@ -191,7 +205,7 @@ All notable changes to vRouter are documented here. The format follows
   counters.
 - SNAT/masquerade for TCP, UDP and ICMP echo: source address/port rewrite,
   source-port preservation, deterministic collision allocation, reverse
-  translation and full IP/L4 checksum recompute.
+  translation, and incremental IP/L4 checksum adjustment after one repair.
 - Forwarded TCP/UDP/ICMP-echo flows are tracked even without NAT; replies to a
   NAT address are reverse-translated before local delivery.
 - DNAT/port forwarding for TCP/UDP with reverse translation; hairpin NAT SNATs
@@ -203,9 +217,9 @@ All notable changes to vRouter are documented here. The format follows
 - `scripts/nat_matrix.sh`: UDP source-port preservation and collision, ICMP
   echo, TCP HTTP through masquerade, WAN-to-internal DNAT, hairpin DNAT and
   SNAT/DNAT ICMP-error translation.
-- Masquerade currently requires a static egress address (DHCP in R4); fragments
-  and non-echo ICMP on SNAT egress are dropped and counted until translation
-  lands. Full incremental checksum updates for ordinary rewrites are next.
+- Masquerade on a DHCP uplink is installed after the client binds; fragments
+  and non-echo ICMP on SNAT egress are still dropped and counted until
+  translation lands. Live add/delete is config-backed (ADR-014).
 
 ### R1 — Linux ports
 

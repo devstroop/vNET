@@ -16,6 +16,7 @@ daemon with a command-line interface and exposes a C ABI for embedded hosts.
   TTL/hop-limit processing
 - Userspace IPv4 connection tracking and garbage collection
 - Source NAT, destination NAT, port forwarding, and hairpin handling
+- Live `vrouter nat add|del` updates with atomic config save and rollback
 - DHCPv4 server and client with lease persistence (DHCPv6 in v1.1)
 - DNS forwarding with cache, TCP fallback, and split zones
 - Atomic, journaled route/address/link changes with rollback
@@ -77,6 +78,8 @@ vrouter status [-c <config>]
 vrouter port list
 vrouter iface set <dev> <cidr> [-c <config>]
 vrouter route add <dst> [via <ip>] dev <dev> [-c <config>]
+vrouter nat add|del masquerade --out <iface|port> [-c <config>]
+vrouter nat add|del port-forward --proto tcp|udp --ext-port <n> [--to <ip:port>] [--in <name>] [-c <config>]
 vrouter down [-c <config>]
 vrouter journal [-c <config>]
 vrouter dhcp status [-c <config>]
@@ -104,8 +107,8 @@ Contributor rules: `AGENTS.md`.
 
 ## Implementation Status
 
-- R0-R4: complete
-- R5-R6: complete (VLAN bridging and firewall core wired)
+- R0-R6: complete, including live NAT add/del and incremental checksum
+  rewrites for the v0.2.0 Linux preview
 - R7: Linux control socket and C ABI foundation complete; Android
   JNI/VpnService host and proxy NAT pending
 - R8: planned

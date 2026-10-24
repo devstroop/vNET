@@ -4,13 +4,31 @@
 const std = @import("std");
 const state = @import("state.zig");
 
-pub const version = 1;
+pub const version = 2;
+
+pub const NatMasquerade = struct {
+    out: []const u8 = "",
+};
+
+pub const NatForward = struct {
+    proto: []const u8 = "",
+    ext_port: u16 = 0,
+    to: []const u8 = "",
+    ingress: ?[]const u8 = null,
+};
+
+pub const NatApply = struct {
+    instance: []const u8 = "",
+    masquerade: []const NatMasquerade = &.{},
+    port_forward: []const NatForward = &.{},
+};
 
 pub const Request = struct {
     id: ?u64 = null,
     op: []const u8,
     state: ?[]const u8 = null,
     limit: ?u32 = null,
+    nat: ?NatApply = null,
 };
 
 pub const Status = struct {

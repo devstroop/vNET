@@ -87,23 +87,26 @@ ICMP frag-needed is implemented). None block the exit criterion.
 - [x] DNAT/port forwarding + hairpin (TCP/UDP; ICMP port forwards rejected).
 - [x] ICMP-error translation for tracked NAT flows (outer + quoted tuple,
       RFC 1624 quoted-L4 checksum adjustment).
-- [ ] Incremental checksum updates for ordinary NAT rewrites (full recompute
-      is correct but slower).
+- [x] Incremental RFC 1624 checksum updates for ordinary NAT rewrites; offload
+      repair runs once before NAT (ADR-007, ADR-014).
 - [x] `vrouter nat list`, `vrouter conntrack list` (read-only, via the R7 control
       socket).
-- [ ] `vrouter nat add|del …` write verbs.
+- [x] `vrouter nat add|del …` write verbs backed by atomic config saves and
+      the `nat.apply` control operation (ADR-014).
 - [x] Exhaustion/limit behavior + counters.
-- [x] netns matrix: SNAT TCP/UDP/ICMP, DNAT/hairpin and SNAT/DNAT ICMP-error
-      translation are covered by `scripts/nat_matrix.sh`.
+- [x] netns matrix: SNAT TCP/UDP/ICMP, DNAT/hairpin, SNAT/DNAT ICMP-error
+      translation and live add/delete/rollback/restart persistence are covered
+      by `scripts/nat_matrix.sh`.
 
-**Status: IN PROGRESS.** Conntrack, SNAT/masquerade, DNAT/port forwarding and
-hairpin NAT are in the datapath (`src/nat/`, `src/l3/forward.zig`). Masquerade
-requires a static egress address until R4 DHCP. Fragments and unrelated or
-non-echo ICMP on SNAT egress are dropped (counted) rather than leaked; full
-incremental checksum updates for ordinary rewrites remain.
+**Status: COMPLETE for v0.2.0; the 1 h churn gate moves to the R9 soak.**
+Conntrack, SNAT/masquerade, DNAT/port forwarding, hairpin NAT, live NAT
+mutations and incremental rewrites are in the datapath (`src/nat/`,
+`src/l3/forward.zig`). Masquerade on a DHCP uplink is installed when the client
+binds. Fragments and unrelated or non-echo ICMP on SNAT egress are dropped
+(counted) rather than leaked.
 
 **Exit:** LAN hosts reach an external network through vRouter's NAT; inbound port
-forward works; conntrack survives 1 h churn.
+forward works; conntrack survives 1 h churn (validated in R9).
 
 ### R4 — DHCP + DNS services (3–4 weeks)
 
@@ -322,3 +325,5 @@ or bypass the control socket; v1 CLI/API behavior is unchanged.
 | 10 | Embedded C ABI and host fd injection | Accepted — ADR-010 (R7 foundation) |
 | 11 | Optional local web admin via HTMX | Accepted — ADR-011 (R10, post-v1) |
 | 12 | Rename vNAT to vRouter | Accepted — ADR-012 |
+| 13 | IPv6 core in v1.0; services/NAT66 in v1.1 | Accepted — ADR-013 |
+| 14 | Config-backed live NAT updates | Accepted — ADR-014 |

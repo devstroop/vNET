@@ -28,8 +28,10 @@ command -v "$ZIG" >/dev/null 2>&1 || {
 WORK="$(mktemp -d)"
 export VROUTER_RUN_DIR="$WORK/run"
 BIN="$ROOT/zig-out/bin"
+CLI="$BIN/vrouter"
 CFG="$WORK/vrouter-nat.json"
 LOG="$WORK/vrouterd.log"
+LOG2="$WORK/vrouterd-restart.log"
 UDP_LOG="$WORK/udp.log"
 HTTP_LOG="$WORK/http.log"
 HTTP2_LOG="$WORK/http2.log"
@@ -75,7 +77,8 @@ cat > "$CFG" <<'EOF'
   "instance": "nat-test",
   "ports": {
     "lan": { "kind": "l2", "device": "lan0" },
-    "wan": { "kind": "l2", "device": "rb" }
+    "wan": { "kind": "l2", "device": "rb" },
+    "dummy": { "kind": "l3", "device": "vrdummy", "create": "tun" }
   },
   "interfaces": {
     "lan0": { "port": "lan", "address": "10.0.1.1/24" },
@@ -188,16 +191,16 @@ nsenter -t "$pidB" -n ss -lun 2>/dev/null | grep -q ':9999' || {
 }
 
 udp_probe() {
-    local src="$1"
+    local src="$1" sport="${2:-40000}" dst="${3:-10.0.2.2}" dport="${4:-9999}"
     nsenter -t "$pidA" -n python3 -c '
 import socket, sys
 s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-s.bind((sys.argv[1], 40000))
+s.bind((sys.argv[1], int(sys.argv[2])))
 s.settimeout(3)
-s.sendto(b"probe", ("10.0.2.2", 9999))
+s.sendto(b"probe", (sys.argv[3], int(sys.argv[4])))
 data, _ = s.recvfrom(2048)
 print(data.decode())
-' "$src"
+' "$src" "$sport" "$dst" "$dport"
 }
 
 log "snat udp"
@@ -364,6 +367,80 @@ done
 }
 ok "hairpin 10.0.1.2 -> 10.0.2.1:8080 -> 10.0.1.10:8000 (http 200)"
 
+log "live port-forward add"
+"$CLI" nat add port-forward --proto tcp --ext-port 8083 --to 10.0.1.10:8000 -c "$CFG" || \
+    die "live port-forward add failed"
+grep -q '"ext_port": 8083' "$CFG" || die "live add did not persist 8083"
+"$CLI" nat list -c "$CFG" | grep -q '8083' || die "live add missing from nat list"
+http_ok=0
+for i in $(seq 1 10); do
+    if http_probe "$pidB" 10.0.2.1 8083; then
+        http_ok=1
+        break
+    fi
+    sleep 0.1
+done
+[ "$http_ok" = "1" ] || die "live port-forward 8083 did not forward"
+ok "live add 8083 -> 10.0.1.10:8000"
+
+log "specific-ingress delete requires --in"
+"$CLI" nat add port-forward --proto tcp --ext-port 8084 --to 10.0.1.10:8000 --in wan0 -c "$CFG" || \
+    die "live port-forward add with --in failed"
+grep -q '"ext_port": 8084' "$CFG" || die "live add did not persist 8084"
+"$CLI" nat del port-forward --proto tcp --ext-port 8084 -c "$CFG" >"$WORK/in-del.out" 2>&1 || true
+grep -q '"ext_port": 8084' "$CFG" || die "delete without --in removed an ingress-specific rule"
+grep -q 'already absent' "$WORK/in-del.out" || {
+    cat "$WORK/in-del.out"
+    die "delete without --in did not report the wildcard rule absent"
+}
+"$CLI" nat del port-forward --proto tcp --ext-port 8084 --in wan0 -c "$CFG" || \
+    die "live port-forward delete with --in failed"
+! grep -q '"ext_port": 8084' "$CFG" || die "live delete with --in left 8084"
+ok "delete without --in leaves ingress-specific rules alone"
+
+log "live port-forward rollback"
+cp "$CFG" "$WORK/rollback.before"
+if "$CLI" nat add masquerade --out dummy -c "$CFG" >"$WORK/rollback.out" 2>"$WORK/rollback.err"; then
+    die "apply of addressless masquerade unexpectedly succeeded"
+fi
+cmp -s "$CFG" "$WORK/rollback.before" || die "failed apply did not restore the config"
+grep -q 'configuration restored' "$WORK/rollback.err" || {
+    cat "$WORK/rollback.err"
+    die "rollback was not reported"
+}
+ok "failed live apply rolled the config back"
+
+log "live port-forward delete"
+"$CLI" nat del port-forward --proto tcp --ext-port 8081 -c "$CFG" || \
+    die "live port-forward delete failed"
+! grep -q '"ext_port": 8081' "$CFG" || die "live delete left 8081 in the config"
+"$CLI" nat list -c "$CFG" | grep -q '8081' && die "live delete left 8081 in nat list"
+gone=0
+for i in $(seq 1 5); do
+    if ! http_probe "$pidB" 10.0.2.1 8081; then
+        gone=1
+        break
+    fi
+    sleep 0.2
+done
+[ "$gone" = "1" ] || die "deleted port-forward 8081 still forwards"
+ok "live delete 8081"
+
+log "live masquerade delete/add"
+"$CLI" nat del masquerade --out wan0 -c "$CFG" || die "live masquerade delete failed"
+plain="$(udp_probe 10.0.1.2 40002 10.0.2.2 9999)" || {
+    cat "$LOG"
+    die "udp probe without masquerade failed"
+}
+[ "$plain" = "peer=10.0.1.2:40002" ] || die "masquerade still active after delete: $plain"
+"$CLI" nat add masquerade --out wan0 -c "$CFG" || die "live masquerade add failed"
+translated="$(udp_probe 10.0.1.2 40003 10.0.2.2 9999)" || {
+    cat "$LOG"
+    die "udp probe after masquerade add failed"
+}
+[ "$translated" = "peer=10.0.2.1:40003" ] || die "masquerade did not resume: $translated"
+ok "masquerade delete/add applies live"
+
 kill -0 "$vpid" 2>/dev/null || die "vrouterd exited during test"
 kill -TERM "$vpid"
 for i in $(seq 1 100); do
@@ -391,3 +468,60 @@ grep -q "icmp=[1-9]" "$LOG" || {
     die "icmp errors were not translated"
 }
 ok "conntrack, snat, dnat and icmp counters: $(grep 'stopping instance' "$LOG" | tail -1)"
+
+log "restart persistence"
+"$BIN/vrouterd" -c "$CFG" >"$LOG2" 2>&1 &
+vpid=$!
+for i in $(seq 1 100); do
+    grep -q "started instance" "$LOG2" && break
+    if ! kill -0 "$vpid" 2>/dev/null; then
+        cat "$LOG2"
+        die "vrouterd restart exited"
+    fi
+    sleep 0.02
+done
+grep -q "started instance" "$LOG2" || {
+    cat "$LOG2"
+    die "vrouterd did not restart"
+}
+"$CLI" nat list -c "$CFG" | grep -q '8083' || die "8083 missing after restart"
+! "$CLI" nat list -c "$CFG" | grep -q '8081' || die "deleted 8081 returned after restart"
+http_ok=0
+for i in $(seq 1 10); do
+    if http_probe "$pidB" 10.0.2.1 8083; then
+        http_ok=1
+        break
+    fi
+    sleep 0.1
+done
+[ "$http_ok" = "1" ] || die "persisted port-forward 8083 did not forward after restart"
+gone=0
+for i in $(seq 1 5); do
+    if ! http_probe "$pidB" 10.0.2.1 8081; then
+        gone=1
+        break
+    fi
+    sleep 0.2
+done
+[ "$gone" = "1" ] || die "deleted port-forward 8081 returned after restart"
+after_restart="$(udp_probe 10.0.1.2 40004 10.0.2.2 9999)" || {
+    cat "$LOG2"
+    die "udp probe after restart failed"
+}
+[ "$after_restart" = "peer=10.0.2.1:40004" ] || die "masquerade did not persist: $after_restart"
+ok "live changes survive a daemon restart"
+
+log "live port-forward delete after restart"
+"$CLI" nat del port-forward --proto tcp --ext-port 8083 --to 10.0.1.10:8000 -c "$CFG" || \
+    die "post-restart port-forward delete failed"
+! grep -q '"ext_port": 8083' "$CFG" || die "post-restart delete left 8083 in config"
+gone=0
+for i in $(seq 1 5); do
+    if ! http_probe "$pidB" 10.0.2.1 8083; then
+        gone=1
+        break
+    fi
+    sleep 0.2
+done
+[ "$gone" = "1" ] || die "post-restart delete still forwards 8083"
+ok "post-restart live delete 8083"
