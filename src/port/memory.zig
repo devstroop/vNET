@@ -163,6 +163,7 @@ pub const MemoryPort = struct {
 const vtable = port_mod.Port.VTable{
     .read = vRead,
     .write = vWrite,
+    .pollFd = vPollFd,
     .info = vInfo,
     .stats = vStats,
     .refresh = vRefresh,
@@ -181,6 +182,11 @@ fn vWrite(ctx: *anyopaque, io: std.Io, frame: []const u8) PortError!void {
     _ = io;
     const self: *MemoryPort = @ptrCast(@alignCast(ctx));
     return self.writeImpl(frame);
+}
+
+fn vPollFd(ctx: *anyopaque) ?std.posix.fd_t {
+    _ = ctx;
+    return null;
 }
 
 fn vInfo(ctx: *anyopaque) port_mod.PortInfo {
@@ -224,6 +230,7 @@ test "memory port inject and read" {
     const frame = [_]u8{ 0xde, 0xad, 0xbe, 0xef };
     try mp.inject(&frame);
     try std.testing.expectEqual(@as(usize, 1), mp.queuedRx());
+    try std.testing.expect(mp.port().pollFd() == null);
 
     var buf: [64]u8 = undefined;
     const n = (try mp.port().read(std.testing.io, &buf)).?;

@@ -120,6 +120,7 @@ pub const FdPort = struct {
 const vtable: port_mod.Port.VTable = .{
     .read = readImpl,
     .write = writeImpl,
+    .pollFd = pollFdImpl,
     .info = infoImpl,
     .stats = statsImpl,
     .refresh = refreshImpl,
@@ -134,6 +135,11 @@ fn readImpl(ctx: *anyopaque, _: std.Io, buf: []u8) PortError!?usize {
 
 fn writeImpl(ctx: *anyopaque, _: std.Io, frame: []const u8) PortError!void {
     return @as(*FdPort, @ptrCast(@alignCast(ctx))).writeImpl(frame);
+}
+
+fn pollFdImpl(ctx: *anyopaque) ?std.posix.fd_t {
+    const self: *FdPort = @ptrCast(@alignCast(ctx));
+    return if (self.closed or !self.link_up) null else self.fd;
 }
 
 fn infoImpl(ctx: *anyopaque) port_mod.PortInfo {

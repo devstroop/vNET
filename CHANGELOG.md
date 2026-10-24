@@ -111,6 +111,9 @@ All notable changes to vRouter are documented here. The format follows
 - Forwarded IPv4 checksums are repaired once before conntrack/NAT; NAT rewrites
   adjust TCP/UDP/ICMP checksums incrementally (RFC 1624) instead of rescanning
   the payload on every rewrite (ADR-007, ADR-014).
+- The datapath now waits on port readiness with `poll` instead of a fixed 1 ms
+  sleep, so idle frames are picked up immediately, and drains up to 256 frames
+  per port before moving on.
 
 ### Fixed
 
