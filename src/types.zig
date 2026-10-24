@@ -102,6 +102,299 @@ pub const Ipv4 = struct {
     }
 };
 
+pub const Ipv6 = struct {
+    /// Host-order integer. Network byte order is produced by `toBytes`.
+    value: u128 = 0,
+
+    pub const unspecified: Ipv6 = .{ .value = 0 };
+    pub const loopback: Ipv6 = .{ .value = 1 };
+
+    pub fn fromBytes(b: [16]u8) Ipv6 {
+        return .{ .value = std.mem.readInt(u128, &b, .big) };
+    }
+
+    pub fn toBytes(self: Ipv6) [16]u8 {
+        var b: [16]u8 = undefined;
+        std.mem.writeInt(u128, &b, self.value, .big);
+        return b;
+    }
+
+    /// RFC 4291 text representation, including `::` compression and an
+    /// embedded IPv4 tail for IPv4-mapped addresses (RFC 5952 §5).
+    pub fn parse(s: []const u8) !Ipv6 {
+        if (s.len == 0 or std.mem.indexOfScalar(u8, s, '%') != null) {
+            return error.InvalidIpv6;
+        }
+
+        var left: [8]u16 = undefined;
+        var right: [8]u16 = undefined;
+        var left_len: usize = 0;
+        var right_len: usize = 0;
+
+        if (std.mem.indexOf(u8, s, "::")) |dc| {
+            if (std.mem.indexOf(u8, s[dc + 2 ..], "::") != null) return error.InvalidIpv6;
+            // An embedded IPv4 tail must be the final part of the address.
+            if (std.mem.indexOfScalar(u8, s[0..dc], '.') != null) return error.InvalidIpv6;
+            if (dc > 0) left_len = try parseIpv6Side(s[0..dc], &left);
+            if (dc + 2 < s.len) right_len = try parseIpv6Side(s[dc + 2 ..], &right);
+            if (left_len + right_len >= 8) return error.InvalidIpv6;
+        } else {
+            left_len = try parseIpv6Side(s, &left);
+            if (left_len != 8) return error.InvalidIpv6;
+        }
+
+        var groups: [8]u16 = @splat(0);
+        @memcpy(groups[0..left_len], left[0..left_len]);
+        if (right_len > 0) @memcpy(groups[8 - right_len ..], right[0..right_len]);
+
+        var value: u128 = 0;
+        for (groups) |group| value = (value << 16) | group;
+        return .{ .value = value };
+    }
+
+    pub fn eql(a: Ipv6, b: Ipv6) bool {
+        return a.value == b.value;
+    }
+
+    pub fn isUnspecified(self: Ipv6) bool {
+        return self.value == 0;
+    }
+
+    pub fn isLoopback(self: Ipv6) bool {
+        return self.value == 1;
+    }
+
+    pub fn isMulticast(self: Ipv6) bool {
+        return self.value >> 120 == 0xff;
+    }
+
+    pub fn isLinkLocal(self: Ipv6) bool {
+        return self.value >> 118 == 0x3fa;
+    }
+
+    pub fn isUniqueLocal(self: Ipv6) bool {
+        return self.value >> 121 == 0x7e;
+    }
+
+    pub fn isIpv4Mapped(self: Ipv6) bool {
+        return self.value >> 32 == 0xffff;
+    }
+
+    pub fn format(self: Ipv6, w: *std.Io.Writer) std.Io.Writer.Error!void {
+        if (self.isIpv4Mapped()) {
+            const mapped = Ipv4{ .value = @truncate(self.value) };
+            try w.print("::ffff:{f}", .{mapped});
+            return;
+        }
+
+        const groups = ipv6Groups(self);
+        var best_start: usize = 8;
+        var best_len: usize = 0;
+        var i: usize = 0;
+        while (i < 8) {
+            if (groups[i] != 0) {
+                i += 1;
+                continue;
+            }
+            const start = i;
+            while (i < 8 and groups[i] == 0) i += 1;
+            const run = i - start;
+            if (run >= 2 and run > best_len) {
+                best_start = start;
+                best_len = run;
+            }
+        }
+
+        i = 0;
+        while (i < 8) {
+            if (best_len != 0 and i == best_start) {
+                try w.writeAll("::");
+                i += best_len;
+                continue;
+            }
+            if (i != 0 and !(best_len != 0 and i == best_start + best_len)) {
+                try w.writeByte(':');
+            }
+            try w.print("{x}", .{groups[i]});
+            i += 1;
+        }
+    }
+};
+
+fn parseIpv6Side(s: []const u8, out: *[8]u16) !usize {
+    if (s.len == 0) return 0;
+
+    var count: usize = 0;
+    var it = std.mem.splitScalar(u8, s, ':');
+    while (it.next()) |part| {
+        if (part.len == 0) return error.InvalidIpv6;
+        if (count == out.len) return error.InvalidIpv6;
+
+        if (std.mem.indexOfScalar(u8, part, '.') != null) {
+            if (it.next() != null) return error.InvalidIpv6;
+            const v4 = Ipv4.parse(part) catch return error.InvalidIpv6;
+            if (count + 2 > out.len) return error.InvalidIpv6;
+            const b = v4.toBytes();
+            out[count] = (@as(u16, b[0]) << 8) | b[1];
+            out[count + 1] = (@as(u16, b[2]) << 8) | b[3];
+            return count + 2;
+        }
+
+        if (part.len > 4) return error.InvalidIpv6;
+        for (part) |c| {
+            if (!std.ascii.isHex(c)) return error.InvalidIpv6;
+        }
+        out[count] = std.fmt.parseInt(u16, part, 16) catch return error.InvalidIpv6;
+        count += 1;
+    }
+    return count;
+}
+
+fn ipv6Groups(ip: Ipv6) [8]u16 {
+    const b = ip.toBytes();
+    var groups: [8]u16 = undefined;
+    for (&groups, 0..) |*group, i| {
+        group.* = (@as(u16, b[i * 2]) << 8) | b[i * 2 + 1];
+    }
+    return groups;
+}
+
+pub const Prefix6 = struct {
+    addr: Ipv6,
+    len: u8,
+
+    pub fn parse(s: []const u8) !Prefix6 {
+        const slash = std.mem.indexOfScalar(u8, s, '/') orelse return error.InvalidPrefix;
+        const addr = try Ipv6.parse(s[0..slash]);
+        const len = std.fmt.parseInt(u8, s[slash + 1 ..], 10) catch return error.InvalidPrefix;
+        if (len > 128) return error.InvalidPrefix;
+        return .{ .addr = addr, .len = len };
+    }
+
+    pub fn mask(self: Prefix6) u128 {
+        if (self.len == 0) return 0;
+        const shift: u7 = @intCast(128 - self.len);
+        const all: u128 = std.math.maxInt(u128);
+        return all << shift;
+    }
+
+    pub fn network(self: Prefix6) Ipv6 {
+        return .{ .value = self.addr.value & self.mask() };
+    }
+
+    pub fn contains(self: Prefix6, ip: Ipv6) bool {
+        return (ip.value & self.mask()) == self.network().value;
+    }
+
+    pub fn eql(a: Prefix6, b: Prefix6) bool {
+        return a.len == b.len and a.network().value == b.network().value;
+    }
+
+    pub fn format(self: Prefix6, w: *std.Io.Writer) std.Io.Writer.Error!void {
+        try w.print("{f}/{}", .{ self.addr, self.len });
+    }
+};
+
+pub const IpFamily = enum { ipv4, ipv6 };
+
+pub const IpAddr = union(IpFamily) {
+    ipv4: Ipv4,
+    ipv6: Ipv6,
+
+    pub fn parse(s: []const u8) !IpAddr {
+        if (std.mem.indexOfScalar(u8, s, ':') != null) {
+            return .{ .ipv6 = try Ipv6.parse(s) };
+        }
+        return .{ .ipv4 = try Ipv4.parse(s) };
+    }
+
+    pub fn eql(a: IpAddr, b: IpAddr) bool {
+        return switch (a) {
+            .ipv4 => |a4| switch (b) {
+                .ipv4 => |b4| a4.eql(b4),
+                .ipv6 => false,
+            },
+            .ipv6 => |a6| switch (b) {
+                .ipv4 => false,
+                .ipv6 => |b6| a6.eql(b6),
+            },
+        };
+    }
+
+    pub fn family(self: IpAddr) IpFamily {
+        return switch (self) {
+            .ipv4 => .ipv4,
+            .ipv6 => .ipv6,
+        };
+    }
+
+    pub fn format(self: IpAddr, w: *std.Io.Writer) std.Io.Writer.Error!void {
+        switch (self) {
+            .ipv4 => |ip| try w.print("{f}", .{ip}),
+            .ipv6 => |ip| try w.print("{f}", .{ip}),
+        }
+    }
+};
+
+pub const IpPrefix = union(IpFamily) {
+    ipv4: Prefix4,
+    ipv6: Prefix6,
+
+    pub fn parse(s: []const u8) !IpPrefix {
+        if (std.mem.indexOfScalar(u8, s, ':') != null) {
+            return .{ .ipv6 = try Prefix6.parse(s) };
+        }
+        return .{ .ipv4 = try Prefix4.parse(s) };
+    }
+
+    pub fn family(self: IpPrefix) IpFamily {
+        return switch (self) {
+            .ipv4 => .ipv4,
+            .ipv6 => .ipv6,
+        };
+    }
+
+    pub fn network(self: IpPrefix) IpAddr {
+        return switch (self) {
+            .ipv4 => |p| .{ .ipv4 = p.network() },
+            .ipv6 => |p| .{ .ipv6 = p.network() },
+        };
+    }
+
+    pub fn contains(self: IpPrefix, ip: IpAddr) bool {
+        return switch (self) {
+            .ipv4 => |p| switch (ip) {
+                .ipv4 => |addr| p.contains(addr),
+                .ipv6 => false,
+            },
+            .ipv6 => |p| switch (ip) {
+                .ipv4 => false,
+                .ipv6 => |addr| p.contains(addr),
+            },
+        };
+    }
+
+    pub fn eql(a: IpPrefix, b: IpPrefix) bool {
+        return switch (a) {
+            .ipv4 => |a4| switch (b) {
+                .ipv4 => |b4| a4.eql(b4),
+                .ipv6 => false,
+            },
+            .ipv6 => |a6| switch (b) {
+                .ipv4 => false,
+                .ipv6 => |b6| a6.eql(b6),
+            },
+        };
+    }
+
+    pub fn format(self: IpPrefix, w: *std.Io.Writer) std.Io.Writer.Error!void {
+        switch (self) {
+            .ipv4 => |p| try w.print("{f}", .{p}),
+            .ipv6 => |p| try w.print("{f}", .{p}),
+        }
+    }
+};
+
 pub const Prefix4 = struct {
     addr: Ipv4,
     len: u8,
@@ -208,6 +501,68 @@ pub const VlanId = struct {
 
     pub const max: VlanId = .{ .value = 4094 };
 };
+
+test "ipv6 parse and RFC 5952 format" {
+    const cases = [_]struct { input: []const u8, output: []const u8 }{
+        .{ .input = "::", .output = "::" },
+        .{ .input = "::1", .output = "::1" },
+        .{ .input = "2001:0db8:0000:0000:0000:ff00:0042:8329", .output = "2001:db8::ff00:42:8329" },
+        .{ .input = "2001:db8:0:0:1:0:0:1", .output = "2001:db8::1:0:0:1" },
+        .{ .input = "fe80::1", .output = "fe80::1" },
+        .{ .input = "::ffff:192.0.2.128", .output = "::ffff:192.0.2.128" },
+    };
+    for (cases) |case| {
+        const ip = try Ipv6.parse(case.input);
+        var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+        defer out.deinit();
+        try out.writer.print("{f}", .{ip});
+        try std.testing.expectEqualStrings(case.output, out.written());
+        try std.testing.expect(ip.eql(try Ipv6.parse(case.output)));
+    }
+}
+
+test "ipv6 rejects malformed addresses" {
+    const invalid = [_][]const u8{
+        "",
+        "1:2:3:4:5:6:7",
+        "1:2:3:4:5:6:7:8:9",
+        "1::2::3",
+        "1:2:3:4:5:6:7:8::",
+        "12345::",
+        "fe80::1%eth0",
+        ":1:2:3:4:5:6:7",
+        "1:2:3:4:5:6:7:",
+        "::ffff:192.0.2",
+        "192.0.2.1::",
+        "192.0.2.1::1",
+    };
+    for (invalid) |text| {
+        try std.testing.expectError(error.InvalidIpv6, Ipv6.parse(text));
+    }
+}
+
+test "ipv6 prefix containment" {
+    const p = try Prefix6.parse("2001:db8:1::/48");
+    try std.testing.expect(p.contains(try Ipv6.parse("2001:db8:1:2::1")));
+    try std.testing.expect(!p.contains(try Ipv6.parse("2001:db8:2::1")));
+    try std.testing.expect(p.eql(try Prefix6.parse("2001:db8:1:ffff::/48")));
+    try std.testing.expectError(error.InvalidPrefix, Prefix6.parse("2001:db8::/129"));
+}
+
+test "dual-stack address and prefix parsing" {
+    const v4 = try IpAddr.parse("10.0.0.1");
+    const v6 = try IpAddr.parse("2001:db8::1");
+    try std.testing.expectEqual(IpFamily.ipv4, v4.family());
+    try std.testing.expectEqual(IpFamily.ipv6, v6.family());
+    try std.testing.expect(!v4.eql(v6));
+
+    const p4 = try IpPrefix.parse("10.0.0.0/8");
+    const p6 = try IpPrefix.parse("2001:db8::/32");
+    try std.testing.expect(p4.contains(v4));
+    try std.testing.expect(!p4.contains(v6));
+    try std.testing.expect(p6.contains(v6));
+    try std.testing.expect(!p6.contains(v4));
+}
 
 test "mac parse and format" {
     const mac = try Mac.parse("aa:bb:cc:dd:ee:ff");
