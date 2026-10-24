@@ -43,8 +43,11 @@ pub const BridgeConfig = struct {
 pub const InterfaceConfig = struct {
     bridge: ?[]const u8 = null,
     port: ?[]const u8 = null,
-    /// CIDR (e.g. "10.10.0.1/24") or "dhcp".
+    /// CIDR (e.g. "10.10.0.1/24") or "dhcp". IPv4 only; use `addresses`
+    /// for IPv6 or additional addresses.
     address: ?[]const u8 = null,
+    /// Additional IPv4/IPv6 CIDRs (for example "2001:db8:1::1/64").
+    addresses: []const []const u8 = &.{},
     /// Routed VLAN on a VLAN-aware bridge SVI; defaults to 1.
     vlan: ?u16 = null,
 };
@@ -57,7 +60,7 @@ pub const RouteConfig = struct {
     table: u32 = 0,
 };
 
-pub const Proto = enum { tcp, udp, icmp };
+pub const Proto = enum { tcp, udp, icmp, icmpv6 };
 
 pub const MasqueradeConfig = struct {
     out: []const u8,
@@ -109,8 +112,13 @@ pub const FirewallAction = enum { accept, drop, reject };
 
 pub const FirewallCtState = enum { new, established, related, invalid };
 
+pub const FirewallFamily = enum { ipv4, ipv6, any };
+
 pub const FirewallRuleConfig = struct {
     action: FirewallAction,
+    /// Address family matched by this rule. Defaults to IPv4 so existing
+    /// configurations retain their meaning.
+    family: FirewallFamily = .ipv4,
     proto: ?Proto = null,
     src: ?[]const u8 = null,
     dst: ?[]const u8 = null,
@@ -128,6 +136,8 @@ pub const FirewallRateLimitConfig = struct {
     arp: u32 = 512,
     /// DHCP server requests per second.
     dhcp: u32 = 100,
+    /// Neighbor Discovery messages accepted per second.
+    ndp: u32 = 256,
 };
 
 pub const FirewallConfig = struct {

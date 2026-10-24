@@ -17,6 +17,7 @@ pub const Aggregates = struct {
     icmp_rate_limited: u64 = 0,
     arp_rate_limited: u64 = 0,
     dhcp_rate_limited: u64 = 0,
+    ndp_rate_limited: u64 = 0,
 };
 
 pub const Wire = struct {
@@ -29,6 +30,7 @@ pub const Wire = struct {
     icmp_rate_limited: u64 = 0,
     arp_rate_limited: u64 = 0,
     dhcp_rate_limited: u64 = 0,
+    ndp_rate_limited: u64 = 0,
 };
 
 pub fn save(
@@ -73,6 +75,7 @@ pub fn saveDir(
         .icmp_rate_limited = aggregates.icmp_rate_limited,
         .arp_rate_limited = aggregates.arp_rate_limited,
         .dhcp_rate_limited = aggregates.dhcp_rate_limited,
+        .ndp_rate_limited = aggregates.ndp_rate_limited,
     }, .{}, &out.writer);
     try out.writer.writeByte('\n');
 
@@ -169,6 +172,7 @@ test "counters file round trip" {
         .icmp_rate_limited = 1,
         .arp_rate_limited = 4,
         .dhcp_rate_limited = 0,
+        .ndp_rate_limited = 6,
     });
 
     var loaded = (try loadDir(std.testing.io, std.testing.allocator, tmp.dir, "counters")).?;
@@ -178,6 +182,7 @@ test "counters file round trip" {
     try std.testing.expectEqual(@as(u64, 9), loaded.value.firewall_dropped);
     try std.testing.expectEqual(@as(u64, 2), loaded.value.firewall_spoofed);
     try std.testing.expectEqual(@as(u64, 4), loaded.value.arp_rate_limited);
+    try std.testing.expectEqual(@as(u64, 6), loaded.value.ndp_rate_limited);
 
     try std.testing.expect((try loadDir(std.testing.io, std.testing.allocator, tmp.dir, "missing")) == null);
 }

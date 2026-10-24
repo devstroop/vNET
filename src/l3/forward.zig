@@ -12,9 +12,13 @@ const schema = @import("../config/schema.zig");
 const ethernet = @import("../l2/ethernet.zig");
 const stp = @import("../l2/stp.zig");
 const ipv4 = @import("ipv4.zig");
+const ipv6 = @import("ipv6.zig");
+const icmpv6 = @import("icmpv6.zig");
+const ndp = @import("ndp.zig");
 const arp = @import("arp.zig");
 const icmp = @import("icmp.zig");
 const fib = @import("fib.zig");
+const fib6 = @import("fib6.zig");
 const conntrack_mod = @import("../nat/conntrack.zig");
 const nat_mod = @import("../nat/nat.zig");
 const dhcp_message = @import("../services/dhcp/message.zig");
@@ -28,6 +32,8 @@ pub const conntrack_default_entries: u32 = 65_536;
 pub const conntrack_small_entries: u32 = 4_096;
 
 pub const arp_ttl_ms: i64 = 300_000;
+pub const ndp_ttl_ms: i64 = 300_000;
+pub const ndp_pending_ttl_ms: i64 = 1_000;
 pub const arp_request_interval_ms: i64 = 1_000;
 pub const arp_pending_ttl_ms: i64 = 1_000;
 const arp_miss_max_entries: usize = 1024;
@@ -51,6 +57,16 @@ const PendingPacket = struct {
     bytes: [pending_packet_max]u8 = undefined,
 };
 
+const PendingPacket6 = struct {
+    used: bool = false,
+    port: types.PortId = .{ .value = 0 },
+    next_hop: types.Ipv6 = .{ .value = 0 },
+    vlan: u16 = 0,
+    queued_ms: i64 = 0,
+    len: u16 = 0,
+    bytes: [pending_packet_max]u8 = undefined,
+};
+
 pub const PortEntry = struct {
     id: types.PortId,
     config_name: []const u8,
@@ -59,6 +75,12 @@ pub const PortEntry = struct {
 
 pub const LocalAddr = struct {
     prefix: types.Prefix4,
+    port: types.PortId,
+    vlan: u16 = 0,
+};
+
+pub const LocalAddr6 = struct {
+    prefix: types.Prefix6,
     port: types.PortId,
     vlan: u16 = 0,
 };
@@ -76,6 +98,16 @@ pub const Counters = struct {
     pending_queued: u64 = 0,
     pending_flushed: u64 = 0,
     pending_dropped: u64 = 0,
+    ndp_requests: u64 = 0,
+    ndp_advertisements: u64 = 0,
+    ndp_learned: u64 = 0,
+    ndp_rate_limited: u64 = 0,
+    ndp_dropped: u64 = 0,
+    ipv6_forwarded: u64 = 0,
+    ipv6_local_delivered: u64 = 0,
+    ipv6_dropped: u64 = 0,
+    icmpv6_errors: u64 = 0,
+    icmpv6_echoes: u64 = 0,
     snat_packets: u64 = 0,
     dnat_packets: u64 = 0,
     icmp_translated: u64 = 0,
@@ -282,9 +314,10 @@ const FirewallIface = union(enum) {
 
 const FirewallRule = struct {
     action: schema.FirewallAction,
+    family: schema.FirewallFamily = .ipv4,
     proto: ?u8 = null,
-    src: ?types.Prefix4 = null,
-    dst: ?types.Prefix4 = null,
+    src: ?types.IpPrefix = null,
+    dst: ?types.IpPrefix = null,
     sport: ?u16 = null,
     dport: ?u16 = null,
     iif: ?FirewallIface = null,
@@ -344,10 +377,15 @@ pub const Forwarder = struct {
     gpa: std.mem.Allocator,
     ports: []const PortEntry,
     fib: fib.Fib = .{},
+    fib6: fib6.Fib = .{},
     arp: arp.Cache = .{},
+    ndp: ndp.Cache = .{},
     local: std.ArrayListUnmanaged(LocalAddr) = .empty,
+    local6: std.ArrayListUnmanaged(LocalAddr6) = .empty,
     arp_misses: std.AutoHashMapUnmanaged(u32, i64) = .empty,
+    ndp_misses: std.AutoHashMapUnmanaged(ndp.Key, i64) = .empty,
     pending: [pending_slots]PendingPacket = @splat(.{}),
+    pending6: [pending_slots]PendingPacket6 = @splat(.{}),
     conntrack: conntrack_mod.Conntrack,
     snat_rules: std.ArrayListUnmanaged(nat_mod.Rule) = .empty,
     forward_rules: std.ArrayListUnmanaged(nat_mod.ForwardRule) = .empty,
@@ -362,6 +400,7 @@ pub const Forwarder = struct {
     icmp_limiter: rate.Limiter = .{},
     arp_limiter: rate.Limiter = .{},
     dhcp_limiter: rate.Limiter = .{},
+    ndp_limiter: rate.Limiter = .{},
     firewall: schema.FirewallConfig = .{
         .default_in = .accept,
         .default_forward = .accept,
@@ -386,8 +425,12 @@ pub const Forwarder = struct {
         errdefer self.conntrack.deinit();
         try self.arp.reserve(gpa, 64);
         errdefer self.arp.deinit(gpa);
+        try self.ndp.reserve(gpa, 64);
+        errdefer self.ndp.deinit(gpa);
         try self.arp_misses.ensureTotalCapacity(gpa, arp_miss_max_entries);
         errdefer self.arp_misses.deinit(gpa);
+        try self.ndp_misses.ensureTotalCapacity(gpa, arp_miss_max_entries);
+        errdefer self.ndp_misses.deinit(gpa);
         self.storm_limiters = try gpa.alloc(rate.Limiter, ports.len);
         for (self.storm_limiters) |*limiter| limiter.* = rate.Limiter.init(0);
         return self;
@@ -395,9 +438,13 @@ pub const Forwarder = struct {
 
     pub fn deinit(self: *Forwarder) void {
         self.fib.deinit(self.gpa);
+        self.fib6.deinit(self.gpa);
         self.arp.deinit(self.gpa);
+        self.ndp.deinit(self.gpa);
         self.local.deinit(self.gpa);
+        self.local6.deinit(self.gpa);
         self.arp_misses.deinit(self.gpa);
+        self.ndp_misses.deinit(self.gpa);
         self.snat_rules.deinit(self.gpa);
         self.forward_rules.deinit(self.gpa);
         self.firewall_rules.deinit(self.gpa);
@@ -438,6 +485,30 @@ pub const Forwarder = struct {
 
     pub fn addRoute(self: *Forwarder, route: fib.Route) PortError!void {
         try self.fib.add(self.gpa, route);
+    }
+
+    pub fn addLocal6(
+        self: *Forwarder,
+        prefix: types.Prefix6,
+        port: types.PortId,
+        vlan: u16,
+    ) PortError!void {
+        try self.local6.append(self.gpa, .{ .prefix = prefix, .port = port, .vlan = vlan });
+    }
+
+    fn removeLocal6(self: *Forwarder, prefix: types.Prefix6, port: types.PortId, vlan: u16) void {
+        for (self.local6.items, 0..) |local, i| {
+            if (local.port.eql(port) and local.vlan == vlan and
+                local.prefix.len == prefix.len and local.prefix.addr.eql(prefix.addr))
+            {
+                _ = self.local6.swapRemove(i);
+                return;
+            }
+        }
+    }
+
+    pub fn addRoute6(self: *Forwarder, route: fib6.Route) PortError!void {
+        try self.fib6.add(self.gpa, route);
     }
 
     pub fn addSnatRule(self: *Forwarder, port: types.PortId, addr: types.Ipv4) PortError!void {
@@ -534,6 +605,7 @@ pub const Forwarder = struct {
         }
         if (now - self.last_maintenance_ms >= maintenance_interval_ms) {
             self.arp.prune(now, arp_ttl_ms);
+            self.ndp.prune(now, ndp_ttl_ms);
             self.pruneFdb(now);
             self.last_maintenance_ms = now;
         }
@@ -555,6 +627,7 @@ pub const Forwarder = struct {
         self.icmp_limiter = rate.Limiter.init(cfg.firewall.rate_limit.icmp);
         self.arp_limiter = rate.Limiter.init(cfg.firewall.rate_limit.arp);
         self.dhcp_limiter = rate.Limiter.init(cfg.firewall.rate_limit.dhcp);
+        self.ndp_limiter = rate.Limiter.init(cfg.firewall.rate_limit.ndp);
         for (self.ports, 0..) |entry, i| {
             if (cfg.ports.get(entry.config_name)) |port_cfg| {
                 self.storm_limiters[i] = rate.Limiter.init(port_cfg.storm_control);
@@ -648,60 +721,109 @@ pub const Forwarder = struct {
         var it = cfg.interfaces.iterator();
         while (it.next()) |entry| {
             const itf = entry.value_ptr.*;
-            const address = itf.address orelse continue;
 
             if (itf.bridge) |bridge_name| {
                 const bridge = self.bridgeByName(cfg, bridge_name) orelse return error.NotFound;
-                if (std.mem.eql(u8, address, "dhcp")) return error.InvalidArgument;
-                const prefix = types.Prefix4.parse(address) catch return error.InvalidArgument;
                 const vlan = if (bridge.vlan_aware) itf.vlan orelse 1 else 0;
-                for (bridge.members) |member| try self.addLocal(prefix, member, vlan);
-                try self.addRoute(.{
-                    .prefix = .{ .addr = prefix.network(), .len = prefix.len },
-                    .port = bridge.members[0],
-                    .bridge = bridge.id,
-                    .vlan = vlan,
-                    .kind = .connected,
-                });
+                if (itf.address) |address| {
+                    if (std.mem.eql(u8, address, "dhcp")) return error.InvalidArgument;
+                    const prefix = types.Prefix4.parse(address) catch return error.InvalidArgument;
+                    for (bridge.members) |member| try self.addLocal(prefix, member, vlan);
+                    try self.addRoute(.{
+                        .prefix = .{ .addr = prefix.network(), .len = prefix.len },
+                        .port = bridge.members[0],
+                        .bridge = bridge.id,
+                        .vlan = vlan,
+                        .kind = .connected,
+                    });
+                }
+                for (itf.addresses) |address| {
+                    const prefix = types.IpPrefix.parse(address) catch return error.InvalidArgument;
+                    switch (prefix) {
+                        .ipv4 => |p| {
+                            for (bridge.members) |member| try self.addLocal(p, member, vlan);
+                            try self.addRoute(.{
+                                .prefix = .{ .addr = p.network(), .len = p.len },
+                                .port = bridge.members[0],
+                                .bridge = bridge.id,
+                                .vlan = vlan,
+                                .kind = .connected,
+                            });
+                        },
+                        .ipv6 => |p| {
+                            for (bridge.members) |member| {
+                                const bridge_port = self.portById(member) orelse return error.NotFound;
+                                if (bridge_port.port.info().mtu < 1280) return error.InvalidArgument;
+                                try self.addLocal6(p, member, vlan);
+                            }
+                            try self.addRoute6(.{
+                                .prefix = .{ .addr = p.network(), .len = p.len },
+                                .port = bridge.members[0],
+                                .bridge = bridge.id,
+                                .vlan = vlan,
+                                .kind = .connected,
+                            });
+                        },
+                    }
+                }
                 continue;
             }
 
             const port_name = itf.port orelse continue;
             const port_entry = findPort(ports, port_name) orelse return error.NotFound;
-            if (std.mem.eql(u8, address, "dhcp")) {
-                var want_masquerade = false;
-                for (cfg.nat.masquerade) |masquerade| {
-                    if (std.mem.eql(u8, masquerade.out, entry.key_ptr.*) or
-                        std.mem.eql(u8, masquerade.out, port_name))
-                    {
-                        want_masquerade = true;
-                        break;
+            if (itf.address) |address| {
+                if (std.mem.eql(u8, address, "dhcp")) {
+                    var want_masquerade = false;
+                    for (cfg.nat.masquerade) |masquerade| {
+                        if (std.mem.eql(u8, masquerade.out, entry.key_ptr.*) or
+                            std.mem.eql(u8, masquerade.out, port_name))
+                        {
+                            want_masquerade = true;
+                            break;
+                        }
                     }
+                    try self.addDhcpClient(
+                        io,
+                        port_entry.id,
+                        port_entry.port.info().mac,
+                        want_masquerade,
+                    );
+                } else {
+                    const prefix = types.Prefix4.parse(address) catch return error.InvalidArgument;
+                    try self.addLocal(prefix, port_entry.id, 0);
+                    try self.addRoute(.{
+                        .prefix = .{ .addr = prefix.network(), .len = prefix.len },
+                        .port = port_entry.id,
+                        .kind = .connected,
+                    });
                 }
-                try self.addDhcpClient(
-                    io,
-                    port_entry.id,
-                    port_entry.port.info().mac,
-                    want_masquerade,
-                );
-                continue;
             }
-
-            const prefix = types.Prefix4.parse(address) catch return error.InvalidArgument;
-            try self.addLocal(prefix, port_entry.id, 0);
-            try self.addRoute(.{
-                .prefix = .{ .addr = prefix.network(), .len = prefix.len },
-                .port = port_entry.id,
-                .kind = .connected,
-            });
+            for (itf.addresses) |address| {
+                const prefix = types.IpPrefix.parse(address) catch return error.InvalidArgument;
+                switch (prefix) {
+                    .ipv4 => |p| {
+                        try self.addLocal(p, port_entry.id, 0);
+                        try self.addRoute(.{
+                            .prefix = .{ .addr = p.network(), .len = p.len },
+                            .port = port_entry.id,
+                            .kind = .connected,
+                        });
+                    },
+                    .ipv6 => |p| {
+                        if (port_entry.port.info().mtu < 1280) return error.InvalidArgument;
+                        try self.addLocal6(p, port_entry.id, 0);
+                        try self.addRoute6(.{
+                            .prefix = .{ .addr = p.network(), .len = p.len },
+                            .port = port_entry.id,
+                            .kind = .connected,
+                        });
+                    },
+                }
+            }
         }
 
         for (cfg.routes) |route| {
-            const dst = types.Prefix4.parse(route.dst) catch return error.InvalidArgument;
-            const next_hop: ?types.Ipv4 = if (route.via) |via|
-                types.Ipv4.parse(via) catch return error.InvalidArgument
-            else
-                null;
+            const dst = types.IpPrefix.parse(route.dst) catch return error.InvalidArgument;
             const dev = route.dev orelse return error.InvalidArgument;
             var port_entry = findRoutePort(cfg, ports, dev) orelse null;
             var route_bridge: ?u32 = null;
@@ -716,14 +838,37 @@ pub const Forwarder = struct {
             }
             const endpoint = port_entry orelse return error.NotFound;
 
-            try self.addRoute(.{
-                .prefix = .{ .addr = dst.network(), .len = dst.len },
-                .next_hop = next_hop,
-                .port = endpoint.id,
-                .bridge = route_bridge,
-                .vlan = route_vlan,
-                .metric = route.metric,
-            });
+            switch (dst) {
+                .ipv4 => |p| {
+                    const next_hop: ?types.Ipv4 = if (route.via) |via|
+                        types.Ipv4.parse(via) catch return error.InvalidArgument
+                    else
+                        null;
+                    try self.addRoute(.{
+                        .prefix = .{ .addr = p.network(), .len = p.len },
+                        .next_hop = next_hop,
+                        .port = endpoint.id,
+                        .bridge = route_bridge,
+                        .vlan = route_vlan,
+                        .metric = route.metric,
+                    });
+                },
+                .ipv6 => |p| {
+                    if (endpoint.port.info().mtu < 1280) return error.InvalidArgument;
+                    const next_hop: ?types.Ipv6 = if (route.via) |via|
+                        types.Ipv6.parse(via) catch return error.InvalidArgument
+                    else
+                        null;
+                    try self.addRoute6(.{
+                        .prefix = .{ .addr = p.network(), .len = p.len },
+                        .next_hop = next_hop,
+                        .port = endpoint.id,
+                        .bridge = route_bridge,
+                        .vlan = route_vlan,
+                        .metric = route.metric,
+                    });
+                },
+            }
         }
 
         for (cfg.nat.masquerade) |masquerade| {
@@ -750,7 +895,7 @@ pub const Forwarder = struct {
             const proto: u8 = switch (forward.proto) {
                 .tcp => 6,
                 .udp => 17,
-                .icmp => return error.InvalidArgument,
+                .icmp, .icmpv6 => return error.InvalidArgument,
             };
             const ingress = if (forward.in_iface) |name| blk: {
                 const port_entry = findRoutePort(cfg, ports, name) orelse return error.NotFound;
@@ -822,8 +967,8 @@ pub const Forwarder = struct {
 
     pub const FirewallProbe = struct {
         proto: u8,
-        src: types.Ipv4,
-        dst: types.Ipv4,
+        src: types.IpAddr,
+        dst: types.IpAddr,
         sport: ?u16 = null,
         dport: ?u16 = null,
         iif: ?[]const u8 = null,
@@ -884,20 +1029,44 @@ pub const Forwarder = struct {
         var l4: [4]u8 = .{ 0, 0, 0, 0 };
         if (probe.sport) |port| std.mem.writeInt(u16, l4[0..2], port, .big);
         if (probe.dport) |port| std.mem.writeInt(u16, l4[2..4], port, .big);
-        const ip = ipv4.Header{
-            .header_len = 20,
-            .total_len = 24,
-            .id = 0,
-            .flags_frag = 0,
-            .ttl = 64,
-            .protocol = probe.proto,
-            .src = probe.src,
-            .dst = probe.dst,
-            .payload = &l4,
-            .packet = &l4,
+
+        const family = probe.src.family();
+        if (probe.dst.family() != family) return error.InvalidArgument;
+        const ports = switch (family) {
+            .ipv4 => firewallPorts(.{
+                .header_len = 20,
+                .total_len = 24,
+                .id = 0,
+                .flags_frag = 0,
+                .ttl = 64,
+                .protocol = probe.proto,
+                .src = probe.src.ipv4,
+                .dst = probe.dst.ipv4,
+                .payload = &l4,
+                .packet = &l4,
+            }),
+            .ipv6 => firewallPorts6(.{
+                .header_len = 40,
+                .total_len = 44,
+                .hop_limit = 64,
+                .protocol = probe.proto,
+                .src = probe.src.ipv6,
+                .dst = probe.dst.ipv6,
+                .payload = &l4,
+                .packet = &l4,
+            }),
         };
 
-        if (fwd.firewallMatch(iif, oif, ip, probe.state)) |matched| {
+        if (fwd.firewallMatch(
+            iif,
+            oif,
+            family,
+            probe.proto,
+            probe.src,
+            probe.dst,
+            ports,
+            if (family == .ipv4) probe.state else .new,
+        )) |matched| {
             return .{ .rule = matched.index, .action = matched.action };
         }
         return .{
@@ -973,6 +1142,7 @@ pub const Forwarder = struct {
     ) PortError!void {
         self.counters.rx_frames += 1;
         self.gcPending(now);
+        self.gcPending6(now);
         if (now - self.conntrack.last_gc_ms >= conntrack_mod.gc_interval_ms) {
             self.conntrack.gc(now);
         }
@@ -982,6 +1152,15 @@ pub const Forwarder = struct {
             return;
         };
         if (ingress_entry.port.info().kind == .tun) {
+            if (frame.len != 0 and frame[0] >> 4 == 6) {
+                const ip = ipv6.parse(frame) catch {
+                    self.counters.dropped += 1;
+                    self.counters.ipv6_dropped += 1;
+                    return;
+                };
+                try self.handleIpv6(io, null, ip, ingress, 0, now);
+                return;
+            }
             const ip = ipv4.parse(frame) catch {
                 self.counters.dropped += 1;
                 return;
@@ -1051,6 +1230,25 @@ pub const Forwarder = struct {
                     return;
                 };
                 try self.handleIpv4(io, eth, ip, ingress, vlan);
+                if (bridge) |b| {
+                    if (eth.dst.isMulticast()) {
+                        try self.bridgeForward(io, b, frame, eth, ingress, vlan, now);
+                    }
+                }
+            },
+            ethernet.EtherType.ipv6 => {
+                if (bridge) |b| {
+                    if (!eth.dst.isMulticast() and !self.bridgeMacLocal(b, eth.dst)) {
+                        try self.bridgeForward(io, b, frame, eth, ingress, vlan, now);
+                        return;
+                    }
+                }
+                const ip = ipv6.parse(eth.payload) catch {
+                    self.counters.dropped += 1;
+                    self.counters.ipv6_dropped += 1;
+                    return;
+                };
+                try self.handleIpv6(io, eth, ip, ingress, vlan, now);
                 if (bridge) |b| {
                     if (eth.dst.isMulticast()) {
                         try self.bridgeForward(io, b, frame, eth, ingress, vlan, now);
@@ -2224,6 +2422,747 @@ pub const Forwarder = struct {
         self.counters.forwarded += 1;
     }
 
+    fn handleIpv6(
+        self: *Forwarder,
+        io: std.Io,
+        eth: ?ethernet.Header,
+        ip: ipv6.Header,
+        ingress: types.PortId,
+        vlan: u16,
+        now: i64,
+    ) PortError!void {
+        if (ip.hop_limit == 0 or ip.dst.isUnspecified() or ip.src.isMulticast()) {
+            self.counters.dropped += 1;
+            self.counters.ipv6_dropped += 1;
+            return;
+        }
+        // An unspecified source is only legal for NDP Duplicate Address
+        // Detection; never forward it toward another link.
+        if (ip.src.isUnspecified() and
+            (ip.protocol != ipv6.Protocol.icmpv6 or !ip.dst.isMulticast()))
+        {
+            self.counters.dropped += 1;
+            self.counters.ipv6_dropped += 1;
+            return;
+        }
+
+        if (ip.dst.isMulticast()) {
+            if (ip.protocol == ipv6.Protocol.icmpv6) {
+                try self.handleIcmpv6(io, eth, ip, ingress, vlan, now);
+            } else {
+                self.counters.dropped += 1;
+                self.counters.ipv6_dropped += 1;
+            }
+            return;
+        }
+
+        // Link-local addresses are scoped to one link (RFC 4291 §2.5.6), so
+        // only accept them as local when configured on the ingress port.
+        const local_dst = if (ip.dst.isLinkLocal())
+            self.localOn6(ip.dst, ingress, vlan) != null
+        else
+            self.isLocal6(ip.dst, vlan);
+        if (local_dst) {
+            if (ip.protocol == ipv6.Protocol.icmpv6) {
+                try self.handleIcmpv6(io, eth, ip, ingress, vlan, now);
+            } else {
+                // No IPv6 local services exist in v1.0; packets for a router
+                // address are not forwarded and must not bypass input policy.
+                self.counters.dropped += 1;
+                self.counters.ipv6_dropped += 1;
+            }
+            return;
+        }
+
+        // Routers must not forward packets with a link-local source or
+        // destination to another link (RFC 4291 §2.5.6).
+        if (ip.src.isLinkLocal() or ip.dst.isLinkLocal()) {
+            self.counters.dropped += 1;
+            self.counters.ipv6_dropped += 1;
+            return;
+        }
+
+        if (self.firewall.rp_filter and !self.sourceOnIngress6(ip.src, ingress, vlan)) {
+            self.counters.dropped += 1;
+            self.counters.ipv6_dropped += 1;
+            self.counters.firewall_dropped += 1;
+            self.counters.firewall_spoofed += 1;
+            return;
+        }
+
+        const route = self.fib6.lookup(ip.dst) orelse {
+            self.counters.dropped += 1;
+            self.counters.ipv6_dropped += 1;
+            try self.sendIcmpv6Error(
+                io,
+                eth,
+                ip,
+                ingress,
+                vlan,
+                icmpv6.Type.destination_unreachable,
+                icmpv6.Code.no_route,
+                0,
+            );
+            return;
+        };
+
+        const ports = firewallPorts6(ip);
+        if (self.firewallAction6(ingress, route.port, ip, ports)) |action| {
+            switch (action) {
+                .accept => {},
+                .drop => {
+                    self.counters.dropped += 1;
+                    self.counters.ipv6_dropped += 1;
+                    self.counters.firewall_dropped += 1;
+                    return;
+                },
+                .reject => {
+                    self.counters.dropped += 1;
+                    self.counters.ipv6_dropped += 1;
+                    self.counters.firewall_dropped += 1;
+                    try self.sendIcmpv6Error(
+                        io,
+                        eth,
+                        ip,
+                        ingress,
+                        vlan,
+                        icmpv6.Type.destination_unreachable,
+                        icmpv6.Code.admin_prohibited,
+                        0,
+                    );
+                    return;
+                },
+            }
+        } else switch (self.firewall.default_forward) {
+            .accept => {},
+            .drop => {
+                self.counters.dropped += 1;
+                self.counters.ipv6_dropped += 1;
+                self.counters.firewall_dropped += 1;
+                return;
+            },
+            .reject => {
+                self.counters.dropped += 1;
+                self.counters.ipv6_dropped += 1;
+                self.counters.firewall_dropped += 1;
+                try self.sendIcmpv6Error(
+                    io,
+                    eth,
+                    ip,
+                    ingress,
+                    vlan,
+                    icmpv6.Type.destination_unreachable,
+                    icmpv6.Code.admin_prohibited,
+                    0,
+                );
+                return;
+            },
+        }
+
+        if (ip.hop_limit <= 1) {
+            self.counters.dropped += 1;
+            self.counters.ipv6_dropped += 1;
+            try self.sendIcmpv6Error(
+                io,
+                eth,
+                ip,
+                ingress,
+                vlan,
+                icmpv6.Type.time_exceeded,
+                icmpv6.Code.hop_limit_exceeded,
+                0,
+            );
+            return;
+        }
+
+        const egress = self.portById(route.port) orelse {
+            self.counters.dropped += 1;
+            self.counters.ipv6_dropped += 1;
+            return;
+        };
+        const total: usize = ip.total_len;
+        if (egress.port.info().kind == .tun) {
+            if (total > egress.port.info().mtu) {
+                self.counters.dropped += 1;
+                self.counters.ipv6_dropped += 1;
+                try self.sendIcmpv6Error(
+                    io,
+                    eth,
+                    ip,
+                    ingress,
+                    vlan,
+                    icmpv6.Type.packet_too_big,
+                    0,
+                    egress.port.info().mtu,
+                );
+                return;
+            }
+            var out: [2048]u8 = undefined;
+            if (total > out.len) {
+                self.counters.dropped += 1;
+                self.counters.ipv6_dropped += 1;
+                return;
+            }
+            @memcpy(out[0..total], ip.packet[0..total]);
+            ipv6.decrementHopLimit(out[0..total]) catch {
+                self.counters.dropped += 1;
+                self.counters.ipv6_dropped += 1;
+                return;
+            };
+            fixTransportChecksum6(out[0..total]);
+            egress.port.write(io, out[0..total]) catch {
+                self.counters.dropped += 1;
+                self.counters.ipv6_dropped += 1;
+                return;
+            };
+            self.counters.ipv6_forwarded += 1;
+            return;
+        }
+
+        if (total > egress.port.info().mtu) {
+            self.counters.dropped += 1;
+            self.counters.ipv6_dropped += 1;
+            try self.sendIcmpv6Error(
+                io,
+                eth,
+                ip,
+                ingress,
+                vlan,
+                icmpv6.Type.packet_too_big,
+                0,
+                egress.port.info().mtu,
+            );
+            return;
+        }
+
+        const next_hop = route.next_hop orelse ip.dst;
+        var neighbor: ?ndp.Entry = null;
+        var egress_port = route.port;
+        if (route.bridge) |bridge_id| {
+            if (self.ndp.getFreshAnyVlan(next_hop, route.vlan, now, ndp_ttl_ms)) |found| {
+                if (self.bridgeById(bridge_id)) |bridge| {
+                    if (bridge.contains(found.port) and
+                        egressVlan(bridge, found.port, route.vlan) != .filtered)
+                    {
+                        neighbor = found;
+                        egress_port = found.port;
+                    }
+                }
+            }
+            if (neighbor == null) {
+                try self.sendNdRequestBridge(io, bridge_id, next_hop, route.vlan);
+                if (!self.enqueuePending6(route.port, next_hop, route.vlan, ip.packet[0..total], now)) {
+                    self.counters.dropped += 1;
+                    self.counters.ipv6_dropped += 1;
+                    self.counters.pending_dropped += 1;
+                }
+                return;
+            }
+        } else {
+            neighbor = self.ndp.getFreshVlan(next_hop, route.vlan, route.port, now, ndp_ttl_ms);
+            if (neighbor == null) {
+                try self.sendNdRequest(io, route.port, next_hop, route.vlan);
+                if (!self.enqueuePending6(route.port, next_hop, route.vlan, ip.packet[0..total], now)) {
+                    self.counters.dropped += 1;
+                    self.counters.ipv6_dropped += 1;
+                    self.counters.pending_dropped += 1;
+                }
+                return;
+            }
+        }
+
+        const resolved = neighbor.?;
+        const final_egress = self.portById(egress_port) orelse {
+            self.counters.dropped += 1;
+            self.counters.ipv6_dropped += 1;
+            return;
+        };
+        if (total > final_egress.port.info().mtu) {
+            self.counters.dropped += 1;
+            self.counters.ipv6_dropped += 1;
+            try self.sendIcmpv6Error(
+                io,
+                eth,
+                ip,
+                ingress,
+                vlan,
+                icmpv6.Type.packet_too_big,
+                0,
+                final_egress.port.info().mtu,
+            );
+            return;
+        }
+
+        var out: [2048]u8 = undefined;
+        if (total > out.len) {
+            self.counters.dropped += 1;
+            self.counters.ipv6_dropped += 1;
+            return;
+        }
+        @memcpy(out[0..total], ip.packet[0..total]);
+        ipv6.decrementHopLimit(out[0..total]) catch {
+            self.counters.dropped += 1;
+            self.counters.ipv6_dropped += 1;
+            return;
+        };
+        fixTransportChecksum6(out[0..total]);
+        self.sendL2Vlan(io, egress_port, resolved.mac, ethernet.EtherType.ipv6, out[0..total], route.vlan) catch {
+            self.counters.dropped += 1;
+            self.counters.ipv6_dropped += 1;
+            return;
+        };
+        self.counters.ipv6_forwarded += 1;
+    }
+
+    fn handleIcmpv6(
+        self: *Forwarder,
+        io: std.Io,
+        eth: ?ethernet.Header,
+        ip: ipv6.Header,
+        ingress: types.PortId,
+        vlan: u16,
+        now: i64,
+    ) PortError!void {
+        if (ip.payload.len < 4) {
+            self.counters.dropped += 1;
+            self.counters.ipv6_dropped += 1;
+            return;
+        }
+        if (!icmpv6.verifyChecksum(ip.src, ip.dst, ip.payload)) {
+            self.counters.dropped += 1;
+            self.counters.ipv6_dropped += 1;
+            return;
+        }
+        const message = icmpv6.parse(ip.payload) catch {
+            self.counters.dropped += 1;
+            self.counters.ipv6_dropped += 1;
+            return;
+        };
+
+        if (message.typ == ndp.Type.neighbor_solicitation or
+            message.typ == ndp.Type.neighbor_advertisement)
+        {
+            if (ip.hop_limit != 255) {
+                self.counters.ndp_dropped += 1;
+                return;
+            }
+            if (!self.ndp_limiter.allow(now)) {
+                self.counters.ndp_rate_limited += 1;
+                return;
+            }
+            const update = ndp.parse(ip.payload) catch {
+                self.counters.ndp_dropped += 1;
+                return;
+            };
+            if (update.typ == ndp.Type.neighbor_solicitation) {
+                if (ip.src.isMulticast()) {
+                    self.counters.ndp_dropped += 1;
+                    return;
+                }
+                if (!ip.src.isUnspecified() and !ip.src.isMulticast()) {
+                    if (update.source_mac) |mac| {
+                        if (!mac.isMulticast() and !mac.isZero()) {
+                            self.learnNeighbor6(ip.src, mac, ingress, vlan, now);
+                            try self.flushPending6(io, ingress, ip.src, mac, vlan);
+                        }
+                    }
+                }
+                const local = self.localOn6(update.target, ingress, vlan) orelse return;
+                const entry = self.portById(ingress) orelse return;
+                const info = entry.port.info();
+                if (info.kind == .tun or info.mac.isZero()) return;
+                const l2 = eth orelse return;
+                const dad = ip.src.isUnspecified();
+                // DAD replies go to the all-nodes group with Solicited clear
+                // (RFC 4861 §7.2.4); all other replies are unicast.
+                const reply_mac = if (dad)
+                    ndp.allNodesMac()
+                else
+                    update.source_mac orelse l2.src;
+                if (reply_mac.isZero()) return;
+                if (!dad and reply_mac.isMulticast()) return;
+                const reply_ip = if (dad) ndp.allNodesMulticast() else ip.src;
+                const flags = ndp.Flag.router | ndp.Flag.override |
+                    (if (dad) 0 else ndp.Flag.solicited);
+
+                var msg_buf: [32]u8 = undefined;
+                const msg_len = ndp.writeNeighborAdvertisement(
+                    &msg_buf,
+                    local.prefix.addr,
+                    reply_ip,
+                    update.target,
+                    flags,
+                    info.mac,
+                ) catch return;
+                var packet: [128]u8 = undefined;
+                const packet_len = ipv6.write(
+                    &packet,
+                    local.prefix.addr,
+                    reply_ip,
+                    ipv6.Protocol.icmpv6,
+                    255,
+                    msg_buf[0..msg_len],
+                ) catch return;
+                self.sendL2Vlan(io, ingress, reply_mac, ethernet.EtherType.ipv6, packet[0..packet_len], vlan) catch return;
+                self.counters.ndp_advertisements += 1;
+                return;
+            }
+
+            if (ip.src.isUnspecified() or ip.src.isMulticast()) {
+                self.counters.ndp_dropped += 1;
+                return;
+            }
+            if (update.target.isMulticast() or update.target.isUnspecified()) return;
+            const mac = update.target_mac orelse update.source_mac orelse return;
+            if (mac.isMulticast() or mac.isZero()) return;
+            self.learnNeighbor6(update.target, mac, ingress, vlan, now);
+            try self.flushPending6(io, ingress, update.target, mac, vlan);
+            return;
+        }
+
+        if (message.typ != icmpv6.Type.echo_request) {
+            self.counters.ipv6_local_delivered += 1;
+            return;
+        }
+        if (ip.src.isUnspecified() or ip.src.isMulticast()) {
+            self.counters.dropped += 1;
+            self.counters.ipv6_dropped += 1;
+            return;
+        }
+        const local = self.local6ByAddr(ip.dst, vlan) orelse {
+            self.counters.dropped += 1;
+            self.counters.ipv6_dropped += 1;
+            return;
+        };
+        const rule_action = self.firewallAction6(ingress, null, ip, .{});
+        const input_action = rule_action orelse self.firewall.default_in;
+        switch (input_action) {
+            .accept => {},
+            .drop => {
+                self.counters.dropped += 1;
+                self.counters.ipv6_dropped += 1;
+                self.counters.firewall_dropped += 1;
+                return;
+            },
+            .reject => {
+                self.counters.dropped += 1;
+                self.counters.ipv6_dropped += 1;
+                self.counters.firewall_dropped += 1;
+                try self.sendIcmpv6Error(
+                    io,
+                    eth,
+                    ip,
+                    ingress,
+                    vlan,
+                    icmpv6.Type.destination_unreachable,
+                    icmpv6.Code.admin_prohibited,
+                    0,
+                );
+                return;
+            },
+        }
+
+        var msg_buf: [2048]u8 = undefined;
+        const msg_len = icmpv6.writeEchoReply(&msg_buf, local.prefix.addr, ip.src, ip.payload) catch {
+            self.counters.dropped += 1;
+            self.counters.ipv6_dropped += 1;
+            return;
+        };
+        var packet: [2048]u8 = undefined;
+        const packet_len = ipv6.write(
+            &packet,
+            local.prefix.addr,
+            ip.src,
+            ipv6.Protocol.icmpv6,
+            64,
+            msg_buf[0..msg_len],
+        ) catch return;
+
+        try self.sendIpv6Reply(io, eth, ingress, ip.src, packet[0..packet_len], vlan);
+        self.counters.icmpv6_echoes += 1;
+    }
+
+    fn sendIpv6Reply(
+        self: *Forwarder,
+        io: std.Io,
+        eth: ?ethernet.Header,
+        egress: types.PortId,
+        dst_ip: types.Ipv6,
+        packet: []const u8,
+        vlan: u16,
+    ) PortError!void {
+        const entry = self.portById(egress) orelse return error.NotFound;
+        if (entry.port.info().kind == .tun) {
+            try entry.port.write(io, packet);
+            return;
+        }
+        const l2 = eth orelse return error.Unsupported;
+        if (l2.src.isMulticast() or l2.src.isZero()) return error.InvalidArgument;
+        _ = dst_ip;
+        try self.sendL2Vlan(io, egress, l2.src, ethernet.EtherType.ipv6, packet, vlan);
+    }
+
+    fn sendIcmpv6Error(
+        self: *Forwarder,
+        io: std.Io,
+        eth: ?ethernet.Header,
+        ip: ipv6.Header,
+        ingress: types.PortId,
+        vlan: u16,
+        typ: u8,
+        code: u8,
+        rest: u32,
+    ) PortError!void {
+        if (ip.fragment_offset != 0) return;
+        if (ip.src.isUnspecified() or ip.src.isMulticast()) return;
+        if (ip.protocol == ipv6.Protocol.icmpv6 and ip.payload.len >= 1 and
+            ip.payload[0] < 128) return;
+
+        const local = self.local6ForPeer(ingress, ip.src, vlan) orelse return;
+        if (!self.icmp_limiter.allow(nowMs(io))) {
+            self.counters.icmp_rate_limited += 1;
+            return;
+        }
+
+        var msg_buf: [1280]u8 = undefined;
+        const msg_len = icmpv6.writeError(
+            &msg_buf,
+            local.prefix.addr,
+            ip.src,
+            typ,
+            code,
+            ip.packet,
+            rest,
+        ) catch return;
+        var packet: [1280]u8 = undefined;
+        const packet_len = ipv6.write(
+            &packet,
+            local.prefix.addr,
+            ip.src,
+            ipv6.Protocol.icmpv6,
+            64,
+            msg_buf[0..msg_len],
+        ) catch return;
+        self.sendIpv6Reply(io, eth, ingress, ip.src, packet[0..packet_len], vlan) catch return;
+        self.counters.icmpv6_errors += 1;
+    }
+
+    fn learnNeighbor6(
+        self: *Forwarder,
+        ip: types.Ipv6,
+        mac: types.Mac,
+        port: types.PortId,
+        vlan: u16,
+        now: i64,
+    ) void {
+        self.ndp.putVlan(self.gpa, ip, vlan, .{
+            .mac = mac,
+            .port = port,
+            .updated_ms = now,
+        }) catch return;
+        self.counters.ndp_learned += 1;
+    }
+
+    fn enqueuePending6(
+        self: *Forwarder,
+        port: types.PortId,
+        next_hop: types.Ipv6,
+        vlan: u16,
+        packet: []const u8,
+        now: i64,
+    ) bool {
+        if (packet.len > pending_packet_max) return false;
+        for (&self.pending6) |*slot| {
+            if (slot.used) continue;
+            slot.* = .{
+                .used = true,
+                .port = port,
+                .next_hop = next_hop,
+                .vlan = vlan,
+                .queued_ms = now,
+                .len = @intCast(packet.len),
+            };
+            @memcpy(slot.bytes[0..packet.len], packet);
+            self.counters.pending_queued += 1;
+            return true;
+        }
+        return false;
+    }
+
+    fn gcPending6(self: *Forwarder, now: i64) void {
+        for (&self.pending6) |*slot| {
+            if (!slot.used) continue;
+            if (now - slot.queued_ms < ndp_pending_ttl_ms) continue;
+            slot.used = false;
+            self.counters.pending_dropped += 1;
+        }
+    }
+
+    fn flushPending6(
+        self: *Forwarder,
+        io: std.Io,
+        port: types.PortId,
+        next_hop: types.Ipv6,
+        next_mac: types.Mac,
+        vlan: u16,
+    ) PortError!void {
+        const entry = self.portById(port) orelse return;
+        const info = entry.port.info();
+        if (info.mac.isZero()) return;
+
+        for (&self.pending6) |*slot| {
+            if (!slot.used or !slot.next_hop.eql(next_hop) or slot.vlan != vlan) continue;
+            if (!slot.port.eql(port) and !self.sameBridge(slot.port, port)) continue;
+
+            const len: usize = slot.len;
+            slot.used = false;
+            if (len > @as(usize, info.mtu)) {
+                self.counters.pending_dropped += 1;
+                continue;
+            }
+            var packet: [pending_packet_max]u8 = undefined;
+            @memcpy(packet[0..len], slot.bytes[0..len]);
+            ipv6.decrementHopLimit(packet[0..len]) catch {
+                self.counters.pending_dropped += 1;
+                continue;
+            };
+            fixTransportChecksum6(packet[0..len]);
+            self.sendL2Vlan(io, port, next_mac, ethernet.EtherType.ipv6, packet[0..len], vlan) catch {
+                self.counters.pending_dropped += 1;
+                continue;
+            };
+            self.counters.pending_flushed += 1;
+            self.counters.ipv6_forwarded += 1;
+        }
+    }
+
+    fn sendNdRequest(
+        self: *Forwarder,
+        io: std.Io,
+        egress: types.PortId,
+        target: types.Ipv6,
+        vlan: u16,
+    ) PortError!void {
+        try self.sendNdRequestLimited(io, egress, target, vlan, true);
+    }
+
+    fn sendNdRequestLimited(
+        self: *Forwarder,
+        io: std.Io,
+        egress: types.PortId,
+        target: types.Ipv6,
+        vlan: u16,
+        limit: bool,
+    ) PortError!void {
+        const entry = self.portById(egress) orelse return error.NotFound;
+        const info = entry.port.info();
+        if (info.kind == .tun or info.mac.isZero()) return;
+        if (limit and !try self.recordNdpMiss(io, target, vlan)) return;
+
+        const local = self.local6ForPeer(egress, target, vlan) orelse return;
+        const multicast = ndp.solicitedNodeMulticast(target);
+        var payload: [32]u8 = undefined;
+        const payload_len = ndp.writeNeighborSolicitation(
+            &payload,
+            local.prefix.addr,
+            multicast,
+            target,
+            info.mac,
+        ) catch return;
+        var packet: [128]u8 = undefined;
+        const packet_len = ipv6.write(
+            &packet,
+            local.prefix.addr,
+            multicast,
+            ipv6.Protocol.icmpv6,
+            255,
+            payload[0..payload_len],
+        ) catch return;
+        self.sendL2Vlan(
+            io,
+            egress,
+            solicitedNodeMac(target),
+            ethernet.EtherType.ipv6,
+            packet[0..packet_len],
+            vlan,
+        ) catch return;
+        self.counters.ndp_requests += 1;
+    }
+
+    fn recordNdpMiss(self: *Forwarder, io: std.Io, target: types.Ipv6, vlan: u16) PortError!bool {
+        const now = nowMs(io);
+        const key = ndp.Key{ .vlan = vlan, .ip = target };
+        if (self.ndp_misses.get(key)) |last| {
+            if (now - last < arp_request_interval_ms) return false;
+        }
+        if (self.ndp_misses.count() >= arp_miss_max_entries) {
+            self.ndp_misses.clearRetainingCapacity();
+        }
+        try self.ndp_misses.put(self.gpa, key, now);
+        return true;
+    }
+
+    fn sendNdRequestBridge(self: *Forwarder, io: std.Io, bridge_id: u32, target: types.Ipv6, vlan: u16) PortError!void {
+        const bridge = self.bridgeById(bridge_id) orelse return error.NotFound;
+        if (!try self.recordNdpMiss(io, target, vlan)) return;
+        for (bridge.members) |member| {
+            if (egressVlan(bridge, member, vlan) == .filtered) continue;
+            self.sendNdRequestLimited(io, member, target, vlan, false) catch {};
+        }
+    }
+
+    fn isLocal6(self: *const Forwarder, ip: types.Ipv6, vlan: u16) bool {
+        for (self.local6.items) |local| {
+            if (local.vlan == vlan and local.prefix.addr.eql(ip)) return true;
+        }
+        return false;
+    }
+
+    fn localOn6(self: *const Forwarder, ip: types.Ipv6, port: types.PortId, vlan: u16) ?LocalAddr6 {
+        for (self.local6.items) |local| {
+            if (local.port.eql(port) and local.vlan == vlan and local.prefix.addr.eql(ip)) {
+                return local;
+            }
+        }
+        return null;
+    }
+
+    fn local6ByAddr(self: *const Forwarder, ip: types.Ipv6, vlan: u16) ?LocalAddr6 {
+        for (self.local6.items) |local| {
+            if (local.vlan == vlan and local.prefix.addr.eql(ip)) return local;
+        }
+        return null;
+    }
+
+    fn local6ForPeer(
+        self: *const Forwarder,
+        port: types.PortId,
+        peer: types.Ipv6,
+        vlan: u16,
+    ) ?LocalAddr6 {
+        for (self.local6.items) |local| {
+            if (local.port.eql(port) and local.vlan == vlan and local.prefix.contains(peer)) {
+                return local;
+            }
+        }
+        for (self.local6.items) |local| {
+            if (local.port.eql(port) and local.vlan == vlan) return local;
+        }
+        return null;
+    }
+
+    fn sourceOnIngress6(
+        self: *const Forwarder,
+        src: types.Ipv6,
+        ingress: types.PortId,
+        vlan: u16,
+    ) bool {
+        if (src.isUnspecified() or src.isMulticast()) return false;
+        const route = self.fib6.lookup(src) orelse return false;
+        if (route.vlan != vlan) return false;
+        return route.port.eql(ingress) or self.sameBridge(route.port, ingress);
+    }
+
     fn handleDhcp(
         self: *Forwarder,
         io: std.Io,
@@ -3122,14 +4061,16 @@ pub const Forwarder = struct {
         for (cfg.firewall.rules) |rule| {
             var compiled = FirewallRule{
                 .action = rule.action,
+                .family = rule.family,
                 .proto = if (rule.proto) |proto| switch (proto) {
                     .tcp => ipv4.Protocol.tcp,
                     .udp => ipv4.Protocol.udp,
                     .icmp => ipv4.Protocol.icmp,
+                    .icmpv6 => ipv6.Protocol.icmpv6,
                 } else null,
-                .src = if (rule.src) |src| types.Prefix4.parse(src) catch
+                .src = if (rule.src) |src| types.IpPrefix.parse(src) catch
                     return error.InvalidArgument else null,
-                .dst = if (rule.dst) |dst| types.Prefix4.parse(dst) catch
+                .dst = if (rule.dst) |dst| types.IpPrefix.parse(dst) catch
                     return error.InvalidArgument else null,
                 .sport = rule.sport,
                 .dport = rule.dport,
@@ -3173,7 +4114,36 @@ pub const Forwarder = struct {
         ip: ipv4.Header,
         state: schema.FirewallCtState,
     ) ?schema.FirewallAction {
-        const matched = self.firewallMatch(iif, oif, ip, state) orelse return null;
+        const matched = self.firewallMatch(
+            iif,
+            oif,
+            .ipv4,
+            ip.protocol,
+            .{ .ipv4 = ip.src },
+            .{ .ipv4 = ip.dst },
+            firewallPorts(ip),
+            state,
+        ) orelse return null;
+        return matched.action;
+    }
+
+    fn firewallAction6(
+        self: *Forwarder,
+        iif: types.PortId,
+        oif: ?types.PortId,
+        ip: ipv6.Header,
+        ports: FirewallPorts,
+    ) ?schema.FirewallAction {
+        const matched = self.firewallMatch(
+            iif,
+            oif,
+            .ipv6,
+            ip.protocol,
+            .{ .ipv6 = ip.src },
+            .{ .ipv6 = ip.dst },
+            ports,
+            .new,
+        ) orelse return null;
         return matched.action;
     }
 
@@ -3181,19 +4151,26 @@ pub const Forwarder = struct {
         self: *Forwarder,
         iif: types.PortId,
         oif: ?types.PortId,
-        ip: ipv4.Header,
+        family: types.IpFamily,
+        protocol: u8,
+        src: types.IpAddr,
+        dst: types.IpAddr,
+        ports: FirewallPorts,
         state: schema.FirewallCtState,
     ) ?FirewallMatch {
-        const ports = firewallPorts(ip);
         for (self.firewall_rules.items, 0..) |*rule, index| {
+            if (rule.family != .any and rule.family != switch (family) {
+                .ipv4 => schema.FirewallFamily.ipv4,
+                .ipv6 => schema.FirewallFamily.ipv6,
+            }) continue;
             if (rule.proto) |proto| {
-                if (proto != ip.protocol) continue;
+                if (proto != protocol) continue;
             }
             if (rule.src) |prefix| {
-                if (!prefix.contains(ip.src)) continue;
+                if (!prefix.contains(src)) continue;
             }
             if (rule.dst) |prefix| {
-                if (!prefix.contains(ip.dst)) continue;
+                if (!prefix.contains(dst)) continue;
             }
             if (rule.sport) |port| {
                 if (ports.sport != port) continue;
@@ -3278,6 +4255,46 @@ pub const Forwarder = struct {
         return null;
     }
 };
+
+fn solicitedNodeMac(ip: types.Ipv6) types.Mac {
+    const bytes = ip.toBytes();
+    return .{ .bytes = .{ 0x33, 0x33, 0xff, bytes[13], bytes[14], bytes[15] } };
+}
+
+fn firewallPorts6(ip: ipv6.Header) FirewallPorts {
+    if (ip.protocol != ipv6.Protocol.tcp and ip.protocol != ipv6.Protocol.udp) return .{};
+    if (ip.fragment_offset != 0 or ip.payload.len < 4) return .{};
+    return .{
+        .sport = readU16(ip.payload, 0),
+        .dport = readU16(ip.payload, 2),
+    };
+}
+
+fn fixTransportChecksum6(packet: []u8) void {
+    const header = ipv6.parse(packet) catch return;
+    if (header.isFragment()) return;
+
+    const payload = packet[header.header_len..header.total_len];
+    switch (header.protocol) {
+        ipv6.Protocol.tcp => {
+            if (payload.len < 20) return;
+            writeU16(payload, 16, 0);
+            writeU16(payload, 16, ipv6.checksum(header.src, header.dst, header.protocol, payload));
+        },
+        ipv6.Protocol.udp => {
+            if (payload.len < 8) return;
+            const udp_len = readU16(payload, 4);
+            if (udp_len < 8 or udp_len > payload.len) return;
+            // Unlike IPv4, an IPv6 UDP checksum is mandatory; a zero value
+            // here means offload has not filled it yet, so recompute.
+            writeU16(payload, 6, 0);
+            var sum = ipv6.checksum(header.src, header.dst, header.protocol, payload[0..udp_len]);
+            if (sum == 0) sum = 0xffff;
+            writeU16(payload, 6, sum);
+        },
+        else => {},
+    }
+}
 
 /// AF_PACKET sees locally generated packets before some NICs complete checksum
 /// offload; recomputing TCP/UDP checksums keeps forwarded traffic valid. The
@@ -3723,6 +4740,19 @@ fn writeStpTestFrame(
 
 fn testIp(comptime s: []const u8) types.Ipv4 {
     return types.Ipv4.parse(s) catch unreachable;
+}
+
+fn testIp6(comptime s: []const u8) types.Ipv6 {
+    return types.Ipv6.parse(s) catch unreachable;
+}
+
+fn testPrefix6(comptime s: []const u8) types.Prefix6 {
+    return types.Prefix6.parse(s) catch unreachable;
+}
+
+fn testNet6(comptime s: []const u8) types.Prefix6 {
+    const p = testPrefix6(s);
+    return .{ .addr = p.network(), .len = p.len };
 }
 
 fn testPrefix(comptime s: []const u8) types.Prefix4 {
@@ -4559,8 +5589,8 @@ test "firewall probe reports the matching rule or default policy" {
         &parsed.config,
         .{
             .proto = ipv4.Protocol.tcp,
-            .src = testIp("10.0.1.2"),
-            .dst = testIp("10.0.2.2"),
+            .src = .{ .ipv4 = testIp("10.0.1.2") },
+            .dst = .{ .ipv4 = testIp("10.0.2.2") },
             .dport = 443,
             .iif = "lan",
             .oif = "wan",
@@ -4575,8 +5605,8 @@ test "firewall probe reports the matching rule or default policy" {
         &parsed.config,
         .{
             .proto = ipv4.Protocol.tcp,
-            .src = testIp("10.0.1.2"),
-            .dst = testIp("10.0.2.2"),
+            .src = .{ .ipv4 = testIp("10.0.1.2") },
+            .dst = .{ .ipv4 = testIp("10.0.2.2") },
             .dport = 8080,
         },
     );
@@ -4589,8 +5619,8 @@ test "firewall probe reports the matching rule or default policy" {
         &parsed.config,
         .{
             .proto = ipv4.Protocol.udp,
-            .src = testIp("10.0.1.2"),
-            .dst = testIp("10.0.2.2"),
+            .src = .{ .ipv4 = testIp("10.0.1.2") },
+            .dst = .{ .ipv4 = testIp("10.0.2.2") },
             .dport = 53,
         },
     );
@@ -4603,13 +5633,81 @@ test "firewall probe reports the matching rule or default policy" {
         &parsed.config,
         .{
             .proto = ipv4.Protocol.icmp,
-            .src = testIp("10.0.1.2"),
-            .dst = testIp("10.0.1.1"),
+            .src = .{ .ipv4 = testIp("10.0.1.2") },
+            .dst = .{ .ipv4 = testIp("10.0.1.1") },
             .hook = .input,
         },
     );
     try testing.expectEqual(@as(?usize, null), inbound.rule);
     try testing.expectEqual(schema.FirewallAction.accept, inbound.action);
+}
+
+test "firewall probe matches IPv6 families and protocols" {
+    const json =
+        \\{
+        \\  "version": 1,
+        \\  "instance": "fw-probe6",
+        \\  "ports": {
+        \\    "a": { "kind": "l2", "device": "a" },
+        \\    "b": { "kind": "l2", "device": "b" }
+        \\  },
+        \\  "interfaces": {
+        \\    "lan": { "port": "a", "addresses": ["2001:db8:1::1/64"] },
+        \\    "wan": { "port": "b", "addresses": ["2001:db8:2::1/64"] }
+        \\  },
+        \\  "firewall": {
+        \\    "rules": [
+        \\      { "action": "accept", "family": "ipv6", "proto": "icmpv6", "iif": "lan", "oif": "wan" },
+        \\      { "action": "reject", "family": "ipv6", "proto": "icmpv6" },
+        \\      { "action": "accept", "family": "any", "proto": "tcp", "dport": 443 }
+        \\    ]
+        \\  }
+        \\}
+    ;
+    var parsed = try config_parse.parse(testing.allocator, json);
+    defer parsed.deinit();
+
+    const forwarded = try Forwarder.probeFirewallConfig(
+        testing.allocator,
+        testing.io,
+        &parsed.config,
+        .{
+            .proto = 58,
+            .src = .{ .ipv6 = try types.Ipv6.parse("2001:db8:1::2") },
+            .dst = .{ .ipv6 = try types.Ipv6.parse("2001:db8:2::2") },
+            .iif = "lan",
+            .oif = "wan",
+        },
+    );
+    try testing.expectEqual(@as(?usize, 0), forwarded.rule);
+    try testing.expectEqual(schema.FirewallAction.accept, forwarded.action);
+
+    const inbound = try Forwarder.probeFirewallConfig(
+        testing.allocator,
+        testing.io,
+        &parsed.config,
+        .{
+            .proto = 58,
+            .src = .{ .ipv6 = try types.Ipv6.parse("2001:db8:2::2") },
+            .dst = .{ .ipv6 = try types.Ipv6.parse("2001:db8:1::1") },
+        },
+    );
+    try testing.expectEqual(@as(?usize, 1), inbound.rule);
+    try testing.expectEqual(schema.FirewallAction.reject, inbound.action);
+
+    const any_family = try Forwarder.probeFirewallConfig(
+        testing.allocator,
+        testing.io,
+        &parsed.config,
+        .{
+            .proto = ipv4.Protocol.tcp,
+            .src = .{ .ipv4 = testIp("10.0.1.2") },
+            .dst = .{ .ipv4 = testIp("10.0.2.2") },
+            .dport = 443,
+        },
+    );
+    try testing.expectEqual(@as(?usize, 2), any_family.rule);
+    try testing.expectEqual(schema.FirewallAction.accept, any_family.action);
 }
 
 test "icmp error rate limit drops excess replies" {
@@ -5005,6 +6103,35 @@ test "forwarder repairs offloaded udp checksums" {
     );
 }
 
+test "forwarder repairs ipv6 transport checksums" {
+    const src = testIp6("2001:db8:1::2");
+    const dst = testIp6("2001:db8:2::2");
+
+    var tcp: [20]u8 = undefined;
+    buildTcpSegment(&tcp);
+    var packet: [128]u8 = undefined;
+    const tcp_len = try ipv6.write(&packet, src, dst, ipv6.Protocol.tcp, 64, &tcp);
+    writeU16(&packet, 40 + 16, 0xdead);
+    fixTransportChecksum6(packet[0..tcp_len]);
+    try testing.expectEqual(
+        @as(u16, 0),
+        ipv6.checksum(src, dst, ipv6.Protocol.tcp, packet[40..tcp_len]),
+    );
+
+    var udp: [12]u8 = @splat(0);
+    writeU16(&udp, 0, 1234);
+    writeU16(&udp, 2, 53);
+    writeU16(&udp, 4, 12);
+    @memcpy(udp[8..12], "dns!");
+    const udp_len = try ipv6.write(&packet, src, dst, ipv6.Protocol.udp, 64, &udp);
+    writeU16(&packet, 40 + 6, 0);
+    fixTransportChecksum6(packet[0..udp_len]);
+    try testing.expectEqual(
+        @as(u16, 0),
+        ipv6.checksum(src, dst, ipv6.Protocol.udp, packet[40..udp_len]),
+    );
+}
+
 test "forwarder announces local addresses with gratuitous arp" {
     const MemoryPort = @import("../port/memory.zig").MemoryPort;
     var a: MemoryPort = undefined;
@@ -5212,6 +6339,665 @@ fn wrapIpFrame(buf: []u8, eth_dst: types.Mac, eth_src: types.Mac, ip_packet: []c
     const hlen = try ethernet.write(buf, eth_dst, eth_src, ethernet.EtherType.ipv4, null);
     @memcpy(buf[hlen..][0..ip_packet.len], ip_packet);
     return hlen + ip_packet.len;
+}
+
+fn setup6(
+    a: *@import("../port/memory.zig").MemoryPort,
+    b: *@import("../port/memory.zig").MemoryPort,
+    entries: *[2]PortEntry,
+    fwd: *Forwarder,
+) !void {
+    try setup(a, b, entries, fwd);
+    try fwd.addLocal6(testPrefix6("2001:db8:1::1/64"), port_a, 0);
+    try fwd.addLocal6(testPrefix6("2001:db8:2::1/64"), port_b, 0);
+    try fwd.addRoute6(.{
+        .prefix = testNet6("2001:db8:1::/64"),
+        .port = port_a,
+        .kind = .connected,
+    });
+    try fwd.addRoute6(.{
+        .prefix = testNet6("2001:db8:2::/64"),
+        .port = port_b,
+        .kind = .connected,
+    });
+}
+
+fn buildIcmpv6EchoFrame(
+    buf: []u8,
+    eth_dst: types.Mac,
+    eth_src: types.Mac,
+    src: types.Ipv6,
+    dst: types.Ipv6,
+    hop_limit: u8,
+    payload: []const u8,
+) !usize {
+    var msg: [1024]u8 = undefined;
+    const msg_len = try icmpv6.writeEchoRequest(&msg, src, dst, 0x1234, 1, payload);
+    var packet: [1200]u8 = undefined;
+    const packet_len = try ipv6.write(&packet, src, dst, ipv6.Protocol.icmpv6, hop_limit, msg[0..msg_len]);
+    const hlen = try ethernet.write(buf, eth_dst, eth_src, ethernet.EtherType.ipv6, null);
+    @memcpy(buf[hlen..][0..packet_len], packet[0..packet_len]);
+    return hlen + packet_len;
+}
+
+fn buildNdFrame(
+    buf: []u8,
+    eth_dst: types.Mac,
+    eth_src: types.Mac,
+    src: types.Ipv6,
+    dst: types.Ipv6,
+    target: types.Ipv6,
+    target_mac: ?types.Mac,
+    solicitation: bool,
+    hop_limit: u8,
+) !usize {
+    var msg: [64]u8 = undefined;
+    const msg_len = if (solicitation)
+        try ndp.writeNeighborSolicitation(&msg, src, dst, target, target_mac)
+    else
+        try ndp.writeNeighborAdvertisement(
+            &msg,
+            src,
+            dst,
+            target,
+            ndp.Flag.solicited | ndp.Flag.override,
+            target_mac,
+        );
+    var packet: [128]u8 = undefined;
+    const packet_len = try ipv6.write(&packet, src, dst, ipv6.Protocol.icmpv6, hop_limit, msg[0..msg_len]);
+    const hlen = try ethernet.write(buf, eth_dst, eth_src, ethernet.EtherType.ipv6, null);
+    @memcpy(buf[hlen..][0..packet_len], packet[0..packet_len]);
+    return hlen + packet_len;
+}
+
+test "ipv6 forwards through ndp and repairs the hop limit" {
+    const MemoryPort = @import("../port/memory.zig").MemoryPort;
+    var a: MemoryPort = undefined;
+    var b: MemoryPort = undefined;
+    var entries: [2]PortEntry = undefined;
+    var fwd: Forwarder = undefined;
+    try setup6(&a, &b, &entries, &fwd);
+    defer fwd.deinit();
+    defer b.deinit();
+    defer a.deinit();
+
+    try fwd.ndp.putVlan(testing.allocator, testIp6("2001:db8:2::2"), 0, .{
+        .mac = host_b_mac,
+        .port = port_b,
+        .updated_ms = nowMs(testing.io),
+    });
+
+    var frame: [512]u8 = undefined;
+    const n = try buildIcmpv6EchoFrame(
+        &frame,
+        port_a_mac,
+        host_a_mac,
+        testIp6("2001:db8:1::2"),
+        testIp6("2001:db8:2::2"),
+        64,
+        "ipv6",
+    );
+    try fwd.handle(testing.io, frame[0..n], port_a);
+
+    var out: [512]u8 = undefined;
+    const m = (try b.takeSent(&out)).?;
+    const eth = try ethernet.parse(out[0..m]);
+    try testing.expectEqual(ethernet.EtherType.ipv6, eth.ethertype);
+    try testing.expect(eth.dst.eql(host_b_mac));
+    const ip = try ipv6.parse(eth.payload);
+    try testing.expectEqual(@as(u8, 63), ip.hop_limit);
+    try testing.expect(ip.src.eql(testIp6("2001:db8:1::2")));
+    try testing.expect(ip.dst.eql(testIp6("2001:db8:2::2")));
+    try testing.expect(icmpv6.verifyChecksum(ip.src, ip.dst, ip.payload));
+    try testing.expectEqual(@as(u64, 1), fwd.counters.ipv6_forwarded);
+}
+
+test "ipv6 queues while ndp resolves and flushes on advertisement" {
+    const MemoryPort = @import("../port/memory.zig").MemoryPort;
+    var a: MemoryPort = undefined;
+    var b: MemoryPort = undefined;
+    var entries: [2]PortEntry = undefined;
+    var fwd: Forwarder = undefined;
+    try setup6(&a, &b, &entries, &fwd);
+    defer fwd.deinit();
+    defer b.deinit();
+    defer a.deinit();
+
+    var frame: [512]u8 = undefined;
+    const n = try buildIcmpv6EchoFrame(
+        &frame,
+        port_a_mac,
+        host_a_mac,
+        testIp6("2001:db8:1::2"),
+        testIp6("2001:db8:2::2"),
+        64,
+        "queued6",
+    );
+    try fwd.handle(testing.io, frame[0..n], port_a);
+
+    var out: [512]u8 = undefined;
+    const request_len = (try b.takeSent(&out)).?;
+    const request_eth = try ethernet.parse(out[0..request_len]);
+    try testing.expectEqual(ethernet.EtherType.ipv6, request_eth.ethertype);
+    const request_ip = try ipv6.parse(request_eth.payload);
+    const request = try ndp.parse(request_ip.payload);
+    try testing.expectEqual(ndp.Type.neighbor_solicitation, request.typ);
+    try testing.expect(request.target.eql(testIp6("2001:db8:2::2")));
+    try testing.expectEqual(@as(u64, 1), fwd.counters.pending_queued);
+
+    const advertisement_len = try buildNdFrame(
+        &frame,
+        port_b_mac,
+        host_b_mac,
+        testIp6("2001:db8:2::2"),
+        testIp6("2001:db8:2::1"),
+        testIp6("2001:db8:2::2"),
+        host_b_mac,
+        false,
+        255,
+    );
+    try fwd.handle(testing.io, frame[0..advertisement_len], port_b);
+
+    const forwarded_len = (try b.takeSent(&out)).?;
+    const forwarded_eth = try ethernet.parse(out[0..forwarded_len]);
+    const forwarded_ip = try ipv6.parse(forwarded_eth.payload);
+    try testing.expectEqual(@as(u8, 63), forwarded_ip.hop_limit);
+    try testing.expectEqualSlices(u8, "queued6", forwarded_ip.payload[8..]);
+    try testing.expectEqual(@as(u64, 1), fwd.counters.pending_flushed);
+    try testing.expectEqual(@as(u64, 1), fwd.counters.ipv6_forwarded);
+}
+
+test "ipv6 drops ndp below hop limit 255" {
+    const MemoryPort = @import("../port/memory.zig").MemoryPort;
+    var a: MemoryPort = undefined;
+    var b: MemoryPort = undefined;
+    var entries: [2]PortEntry = undefined;
+    var fwd: Forwarder = undefined;
+    try setup6(&a, &b, &entries, &fwd);
+    defer fwd.deinit();
+    defer b.deinit();
+    defer a.deinit();
+
+    var frame: [512]u8 = undefined;
+    const n = try buildNdFrame(
+        &frame,
+        port_a_mac,
+        host_a_mac,
+        testIp6("2001:db8:1::2"),
+        ndp.solicitedNodeMulticast(testIp6("2001:db8:1::1")),
+        testIp6("2001:db8:1::1"),
+        host_a_mac,
+        true,
+        254,
+    );
+    try fwd.handle(testing.io, frame[0..n], port_a);
+
+    var out: [512]u8 = undefined;
+    try testing.expect((try a.takeSent(&out)) == null);
+    try testing.expectEqual(@as(u64, 1), fwd.counters.ndp_dropped);
+    try testing.expectEqual(@as(u64, 0), fwd.counters.ndp_advertisements);
+    try testing.expectEqual(@as(usize, 0), fwd.ndp.map.count());
+}
+
+test "ipv6 replies to a local echo request" {
+    const MemoryPort = @import("../port/memory.zig").MemoryPort;
+    var a: MemoryPort = undefined;
+    var b: MemoryPort = undefined;
+    var entries: [2]PortEntry = undefined;
+    var fwd: Forwarder = undefined;
+    try setup6(&a, &b, &entries, &fwd);
+    defer fwd.deinit();
+    defer b.deinit();
+    defer a.deinit();
+
+    var frame: [512]u8 = undefined;
+    const n = try buildIcmpv6EchoFrame(
+        &frame,
+        port_a_mac,
+        host_a_mac,
+        testIp6("2001:db8:1::2"),
+        testIp6("2001:db8:1::1"),
+        64,
+        "ping6",
+    );
+    try fwd.handle(testing.io, frame[0..n], port_a);
+
+    var out: [512]u8 = undefined;
+    const m = (try a.takeSent(&out)).?;
+    const eth = try ethernet.parse(out[0..m]);
+    const ip = try ipv6.parse(eth.payload);
+    try testing.expect(ip.src.eql(testIp6("2001:db8:1::1")));
+    try testing.expect(ip.dst.eql(testIp6("2001:db8:1::2")));
+    try testing.expectEqual(@as(u8, icmpv6.Type.echo_reply), ip.payload[0]);
+    try testing.expect(icmpv6.verifyChecksum(ip.src, ip.dst, ip.payload));
+    try testing.expectEqual(@as(u64, 1), fwd.counters.icmpv6_echoes);
+}
+
+test "ipv6 replies to a local echo on another interface" {
+    const MemoryPort = @import("../port/memory.zig").MemoryPort;
+    var a: MemoryPort = undefined;
+    var b: MemoryPort = undefined;
+    var entries: [2]PortEntry = undefined;
+    var fwd: Forwarder = undefined;
+    try setup6(&a, &b, &entries, &fwd);
+    defer fwd.deinit();
+    defer b.deinit();
+    defer a.deinit();
+
+    var frame: [512]u8 = undefined;
+    const n = try buildIcmpv6EchoFrame(
+        &frame,
+        port_a_mac,
+        host_a_mac,
+        testIp6("2001:db8:1::2"),
+        testIp6("2001:db8:2::1"),
+        64,
+        "cross",
+    );
+    try fwd.handle(testing.io, frame[0..n], port_a);
+
+    var out: [512]u8 = undefined;
+    const m = (try a.takeSent(&out)).?;
+    const eth = try ethernet.parse(out[0..m]);
+    const ip = try ipv6.parse(eth.payload);
+    try testing.expect(ip.src.eql(testIp6("2001:db8:2::1")));
+    try testing.expect(ip.dst.eql(testIp6("2001:db8:1::2")));
+    try testing.expectEqual(@as(u8, icmpv6.Type.echo_reply), ip.payload[0]);
+    try testing.expectEqual(@as(u64, 1), fwd.counters.icmpv6_echoes);
+    try testing.expectEqual(@as(u64, 0), fwd.counters.ipv6_forwarded);
+}
+
+test "ipv6 answers duplicate address detection" {
+    const MemoryPort = @import("../port/memory.zig").MemoryPort;
+    var a: MemoryPort = undefined;
+    var b: MemoryPort = undefined;
+    var entries: [2]PortEntry = undefined;
+    var fwd: Forwarder = undefined;
+    try setup6(&a, &b, &entries, &fwd);
+    defer fwd.deinit();
+    defer b.deinit();
+    defer a.deinit();
+
+    const target = testIp6("2001:db8:1::1");
+    const multicast = ndp.solicitedNodeMulticast(target);
+    var frame: [512]u8 = undefined;
+    const n = try buildNdFrame(
+        &frame,
+        solicitedNodeMac(target),
+        host_a_mac,
+        types.Ipv6.unspecified,
+        multicast,
+        target,
+        null,
+        true,
+        255,
+    );
+    try fwd.handle(testing.io, frame[0..n], port_a);
+
+    var out: [512]u8 = undefined;
+    const m = (try a.takeSent(&out)).?;
+    const eth = try ethernet.parse(out[0..m]);
+    try testing.expect(eth.dst.eql(ndp.allNodesMac()));
+    const ip = try ipv6.parse(eth.payload);
+    try testing.expect(ip.src.eql(target));
+    try testing.expect(ip.dst.eql(ndp.allNodesMulticast()));
+    const message = try ndp.parse(ip.payload);
+    try testing.expectEqual(ndp.Type.neighbor_advertisement, message.typ);
+    try testing.expect(message.target.eql(target));
+    try testing.expect(message.target_mac.?.eql(port_a_mac));
+    try testing.expectEqual(@as(u32, ndp.Flag.router | ndp.Flag.override), message.flags);
+    try testing.expectEqual(@as(u64, 1), fwd.counters.ndp_advertisements);
+    try testing.expectEqual(@as(u64, 0), fwd.counters.ndp_dropped);
+}
+
+test "ipv6 does not forward link-local traffic across links" {
+    const MemoryPort = @import("../port/memory.zig").MemoryPort;
+    var a: MemoryPort = undefined;
+    var b: MemoryPort = undefined;
+    var entries: [2]PortEntry = undefined;
+    var fwd: Forwarder = undefined;
+    try setup6(&a, &b, &entries, &fwd);
+    defer fwd.deinit();
+    defer b.deinit();
+    defer a.deinit();
+    try fwd.addRoute6(.{
+        .prefix = testNet6("fe80::/64"),
+        .port = port_b,
+        .kind = .connected,
+    });
+
+    var frame: [512]u8 = undefined;
+    var n = try buildIcmpv6EchoFrame(
+        &frame,
+        port_a_mac,
+        host_a_mac,
+        testIp6("2001:db8:1::2"),
+        testIp6("fe80::2"),
+        64,
+        "local-dst",
+    );
+    try fwd.handle(testing.io, frame[0..n], port_a);
+    try testing.expectEqual(@as(usize, 0), b.queuedTx());
+
+    n = try buildIcmpv6EchoFrame(
+        &frame,
+        port_a_mac,
+        host_a_mac,
+        testIp6("fe80::2"),
+        testIp6("2001:db8:2::2"),
+        64,
+        "local-src",
+    );
+    try fwd.handle(testing.io, frame[0..n], port_a);
+    try testing.expectEqual(@as(usize, 0), b.queuedTx());
+    try testing.expectEqual(@as(u64, 2), fwd.counters.ipv6_dropped);
+    try testing.expectEqual(@as(u64, 2), fwd.counters.dropped);
+}
+
+test "ipv6 answers echo on a link-local address" {
+    const MemoryPort = @import("../port/memory.zig").MemoryPort;
+    var a: MemoryPort = undefined;
+    var b: MemoryPort = undefined;
+    var entries: [2]PortEntry = undefined;
+    var fwd: Forwarder = undefined;
+    try setup6(&a, &b, &entries, &fwd);
+    defer fwd.deinit();
+    defer b.deinit();
+    defer a.deinit();
+    try fwd.addLocal6(testPrefix6("fe80::1/64"), port_a, 0);
+
+    var frame: [512]u8 = undefined;
+    const n = try buildIcmpv6EchoFrame(
+        &frame,
+        port_a_mac,
+        host_a_mac,
+        testIp6("fe80::2"),
+        testIp6("fe80::1"),
+        64,
+        "link-local",
+    );
+    try fwd.handle(testing.io, frame[0..n], port_a);
+
+    var out: [512]u8 = undefined;
+    const m = (try a.takeSent(&out)).?;
+    const eth = try ethernet.parse(out[0..m]);
+    const ip = try ipv6.parse(eth.payload);
+    try testing.expect(ip.src.eql(testIp6("fe80::1")));
+    try testing.expect(ip.dst.eql(testIp6("fe80::2")));
+    try testing.expectEqual(@as(u8, icmpv6.Type.echo_reply), ip.payload[0]);
+    try testing.expectEqual(@as(u64, 1), fwd.counters.icmpv6_echoes);
+}
+
+test "ipv6 emits time exceeded when the hop limit expires" {
+    const MemoryPort = @import("../port/memory.zig").MemoryPort;
+    var a: MemoryPort = undefined;
+    var b: MemoryPort = undefined;
+    var entries: [2]PortEntry = undefined;
+    var fwd: Forwarder = undefined;
+    try setup6(&a, &b, &entries, &fwd);
+    defer fwd.deinit();
+    defer b.deinit();
+    defer a.deinit();
+
+    try fwd.ndp.putVlan(testing.allocator, testIp6("2001:db8:1::2"), 0, .{
+        .mac = host_a_mac,
+        .port = port_a,
+        .updated_ms = nowMs(testing.io),
+    });
+
+    var frame: [512]u8 = undefined;
+    const n = try buildIcmpv6EchoFrame(
+        &frame,
+        port_a_mac,
+        host_a_mac,
+        testIp6("2001:db8:1::2"),
+        testIp6("2001:db8:2::2"),
+        1,
+        "expired",
+    );
+    try fwd.handle(testing.io, frame[0..n], port_a);
+
+    var out: [512]u8 = undefined;
+    const m = (try a.takeSent(&out)).?;
+    const eth = try ethernet.parse(out[0..m]);
+    const ip = try ipv6.parse(eth.payload);
+    try testing.expectEqual(@as(u8, icmpv6.Type.time_exceeded), ip.payload[0]);
+    try testing.expectEqual(@as(u8, icmpv6.Code.hop_limit_exceeded), ip.payload[1]);
+    try testing.expect(ip.dst.eql(testIp6("2001:db8:1::2")));
+    try testing.expect(icmpv6.verifyChecksum(ip.src, ip.dst, ip.payload));
+    try testing.expectEqual(@as(u64, 1), fwd.counters.icmpv6_errors);
+    try testing.expectEqual(@as(usize, 0), b.queuedTx());
+}
+
+test "ipv6 emits packet too big for an oversized egress" {
+    const MemoryPort = @import("../port/memory.zig").MemoryPort;
+    var a: MemoryPort = undefined;
+    var b: MemoryPort = undefined;
+    var entries: [2]PortEntry = undefined;
+    var fwd: Forwarder = undefined;
+    try setup6(&a, &b, &entries, &fwd);
+    defer fwd.deinit();
+    defer b.deinit();
+    defer a.deinit();
+    b.mtu = 1280;
+
+    const payload: [1250]u8 = @splat('x');
+    var msg: [1300]u8 = undefined;
+    const msg_len = try icmpv6.writeEchoRequest(
+        &msg,
+        testIp6("2001:db8:1::2"),
+        testIp6("2001:db8:2::2"),
+        1,
+        1,
+        &payload,
+    );
+    var packet: [1300]u8 = undefined;
+    const packet_len = try ipv6.write(
+        &packet,
+        testIp6("2001:db8:1::2"),
+        testIp6("2001:db8:2::2"),
+        ipv6.Protocol.icmpv6,
+        64,
+        msg[0..msg_len],
+    );
+    var frame: [1400]u8 = undefined;
+    const hlen = try ethernet.write(&frame, port_a_mac, host_a_mac, ethernet.EtherType.ipv6, null);
+    @memcpy(frame[hlen..][0..packet_len], packet[0..packet_len]);
+    try fwd.handle(testing.io, frame[0 .. hlen + packet_len], port_a);
+
+    var out: [1400]u8 = undefined;
+    const m = (try a.takeSent(&out)).?;
+    const eth = try ethernet.parse(out[0..m]);
+    const ip = try ipv6.parse(eth.payload);
+    try testing.expectEqual(@as(u8, icmpv6.Type.packet_too_big), ip.payload[0]);
+    try testing.expectEqual(@as(u32, 1280), std.mem.readInt(u32, ip.payload[4..8], .big));
+    try testing.expect(icmpv6.verifyChecksum(ip.src, ip.dst, ip.payload));
+    try testing.expectEqual(@as(u64, 1), fwd.counters.icmpv6_errors);
+    try testing.expectEqual(@as(usize, 0), b.queuedTx());
+}
+
+test "ipv6 drops local non-icmpv6 traffic" {
+    const MemoryPort = @import("../port/memory.zig").MemoryPort;
+    var a: MemoryPort = undefined;
+    var b: MemoryPort = undefined;
+    var entries: [2]PortEntry = undefined;
+    var fwd: Forwarder = undefined;
+    try setup6(&a, &b, &entries, &fwd);
+    defer fwd.deinit();
+    defer b.deinit();
+    defer a.deinit();
+
+    const udp: [8]u8 = @splat(0);
+    var packet: [128]u8 = undefined;
+    const packet_len = try ipv6.write(
+        &packet,
+        testIp6("2001:db8:1::2"),
+        testIp6("2001:db8:1::1"),
+        ipv6.Protocol.udp,
+        64,
+        &udp,
+    );
+
+    var frame: [256]u8 = undefined;
+    const hlen = try ethernet.write(&frame, port_a_mac, host_a_mac, ethernet.EtherType.ipv6, null);
+    @memcpy(frame[hlen..][0..packet_len], packet[0..packet_len]);
+    try fwd.handle(testing.io, frame[0 .. hlen + packet_len], port_a);
+
+    var out: [256]u8 = undefined;
+    try testing.expect((try a.takeSent(&out)) == null);
+    try testing.expectEqual(@as(u64, 1), fwd.counters.ipv6_dropped);
+}
+
+test "ipv6 forwards from a tun port to an l2 port" {
+    const MemoryPort = @import("../port/memory.zig").MemoryPort;
+    var a: MemoryPort = undefined;
+    var b: MemoryPort = undefined;
+    var entries: [2]PortEntry = undefined;
+    var fwd: Forwarder = undefined;
+    try setup6(&a, &b, &entries, &fwd);
+    defer fwd.deinit();
+    defer b.deinit();
+    defer a.deinit();
+
+    a.kind = .tun;
+    try fwd.ndp.putVlan(testing.allocator, testIp6("2001:db8:2::2"), 0, .{
+        .mac = host_b_mac,
+        .port = port_b,
+        .updated_ms = nowMs(testing.io),
+    });
+
+    const udp: [8]u8 = @splat(0);
+    var packet: [128]u8 = undefined;
+    const packet_len = try ipv6.write(
+        &packet,
+        testIp6("2001:db8:1::2"),
+        testIp6("2001:db8:2::2"),
+        ipv6.Protocol.udp,
+        64,
+        &udp,
+    );
+    try fwd.handle(testing.io, packet[0..packet_len], port_a);
+
+    var out: [256]u8 = undefined;
+    const out_len = (try b.takeSent(&out)).?;
+    const eth = try ethernet.parse(out[0..out_len]);
+    try testing.expectEqual(ethernet.EtherType.ipv6, eth.ethertype);
+    const forwarded = try ipv6.parse(eth.payload);
+    try testing.expectEqual(@as(u8, 63), forwarded.hop_limit);
+    try testing.expect(forwarded.dst.eql(testIp6("2001:db8:2::2")));
+    try testing.expectEqual(@as(u64, 1), fwd.counters.ipv6_forwarded);
+}
+
+test "ipv6 forwards from an l2 port to a tun port" {
+    const MemoryPort = @import("../port/memory.zig").MemoryPort;
+    var a: MemoryPort = undefined;
+    var b: MemoryPort = undefined;
+    var entries: [2]PortEntry = undefined;
+    var fwd: Forwarder = undefined;
+    try setup6(&a, &b, &entries, &fwd);
+    defer fwd.deinit();
+    defer b.deinit();
+    defer a.deinit();
+
+    b.kind = .tun;
+    const udp: [8]u8 = @splat(0);
+    var packet: [128]u8 = undefined;
+    const packet_len = try ipv6.write(
+        &packet,
+        testIp6("2001:db8:1::2"),
+        testIp6("2001:db8:2::2"),
+        ipv6.Protocol.udp,
+        64,
+        &udp,
+    );
+    var frame: [256]u8 = undefined;
+    const hlen = try ethernet.write(&frame, port_a_mac, host_a_mac, ethernet.EtherType.ipv6, null);
+    @memcpy(frame[hlen..][0..packet_len], packet[0..packet_len]);
+    try fwd.handle(testing.io, frame[0 .. hlen + packet_len], port_a);
+
+    var out: [256]u8 = undefined;
+    const out_len = (try b.takeSent(&out)).?;
+    try testing.expectEqual(@as(u8, 0x60), out[0]);
+    const forwarded = try ipv6.parse(out[0..out_len]);
+    try testing.expectEqual(@as(u8, 63), forwarded.hop_limit);
+    try testing.expectEqual(@as(u64, 1), fwd.counters.ipv6_forwarded);
+}
+
+test "ipv6 drops multicast and forwarded unspecified sources" {
+    const MemoryPort = @import("../port/memory.zig").MemoryPort;
+    var a: MemoryPort = undefined;
+    var b: MemoryPort = undefined;
+    var entries: [2]PortEntry = undefined;
+    var fwd: Forwarder = undefined;
+    try setup6(&a, &b, &entries, &fwd);
+    defer fwd.deinit();
+    defer b.deinit();
+    defer a.deinit();
+
+    const udp: [8]u8 = @splat(0);
+    var frame: [256]u8 = undefined;
+    const multicast_src = try ipv6.write(
+        frame[14..],
+        testIp6("ff02::1"),
+        testIp6("2001:db8:2::2"),
+        ipv6.Protocol.udp,
+        64,
+        &udp,
+    );
+    _ = try ethernet.write(&frame, port_a_mac, host_a_mac, ethernet.EtherType.ipv6, null);
+    try fwd.handle(testing.io, frame[0 .. 14 + multicast_src], port_a);
+    try testing.expectEqual(@as(u64, 1), fwd.counters.ipv6_dropped);
+
+    const unspecified_src = try ipv6.write(
+        frame[14..],
+        types.Ipv6.unspecified,
+        testIp6("2001:db8:2::2"),
+        ipv6.Protocol.udp,
+        64,
+        &udp,
+    );
+    _ = try ethernet.write(&frame, port_a_mac, host_a_mac, ethernet.EtherType.ipv6, null);
+    try fwd.handle(testing.io, frame[0 .. 14 + unspecified_src], port_a);
+    try testing.expectEqual(@as(u64, 2), fwd.counters.ipv6_dropped);
+
+    var out: [256]u8 = undefined;
+    try testing.expect((try b.takeSent(&out)) == null);
+}
+
+test "ipv6 default forward drop is enforced" {
+    const MemoryPort = @import("../port/memory.zig").MemoryPort;
+    var a: MemoryPort = undefined;
+    var b: MemoryPort = undefined;
+    var entries: [2]PortEntry = undefined;
+    var fwd: Forwarder = undefined;
+    try setup6(&a, &b, &entries, &fwd);
+    defer fwd.deinit();
+    defer b.deinit();
+    defer a.deinit();
+
+    fwd.firewall.default_forward = .drop;
+    try fwd.ndp.putVlan(testing.allocator, testIp6("2001:db8:2::2"), 0, .{
+        .mac = host_b_mac,
+        .port = port_b,
+        .updated_ms = nowMs(testing.io),
+    });
+
+    var frame: [512]u8 = undefined;
+    const n = try buildIcmpv6EchoFrame(
+        &frame,
+        port_a_mac,
+        host_a_mac,
+        testIp6("2001:db8:1::2"),
+        testIp6("2001:db8:2::2"),
+        64,
+        "denied",
+    );
+    try fwd.handle(testing.io, frame[0..n], port_a);
+
+    var out: [512]u8 = undefined;
+    try testing.expect((try b.takeSent(&out)) == null);
+    try testing.expectEqual(@as(u64, 1), fwd.counters.ipv6_dropped);
+    try testing.expectEqual(@as(u64, 1), fwd.counters.firewall_dropped);
 }
 
 fn buildDhcpPayload(
