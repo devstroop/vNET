@@ -216,7 +216,9 @@ test "ipv6 rejects payload lengths that overflow header fields" {
 
 test "ipv6 walks hop-by-hop and destination options" {
     var packet: [128]u8 = undefined;
-    _ = try write(&packet, testSrc(), testDst(), Protocol.hop_by_hop, 64, &[_]u8{0} ** 24);
+    var options: [24]u8 = undefined;
+    @memset(&options, 0);
+    _ = try write(&packet, testSrc(), testDst(), Protocol.hop_by_hop, 64, &options);
     packet[40] = Protocol.destination_options;
     packet[41] = 0;
     packet[48] = Protocol.tcp;
