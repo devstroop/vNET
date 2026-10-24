@@ -577,7 +577,7 @@ vrouter validate <config.json>
 vrouter port list
 vrouter status [-c] <config.json>
 vrouter up [-c <config>]
-vrouter doctor [-c <config>]
+vrouter doctor [--repair] [-c <config>]
 vrouter nat list [-c <config>]
 vrouter nat add|del masquerade --out <iface|port> [-c <config>]
 vrouter nat add|del port-forward --proto tcp|udp --ext-port <n> [--to <ip:port>] [--in <name>] [-c <config>]
@@ -666,8 +666,14 @@ NAT edits are recorded in the config file and not in this journal:
   next `vrouter down` cleans it up.
 - `/run` is used because host state is recreated per boot; persisting a journal
   across a reboot would reference state that no longer exists.
-- PID locking and read-only diagnostics landed with R7. Crash reconciliation
-  and `vrouter doctor --repair` land with R9a; pending/applied status, sequence
+- `vrouter doctor` is read-only and works with the daemon running or after a
+  crash. `vrouter doctor --repair` refuses while a daemon is live, replays the
+  journal inverses, preserves unmanaged state, and leaves records in place if a
+  mutation still fails. Malformed trailing records are copied to
+  `<instance>.journal.quarantine.<timestamp>` before repair; malformed records
+  followed by valid ones are ambiguous and refuse repair without mutation.
+- PID locking and read-only diagnostics landed with R7; crash reconciliation
+  and `vrouter doctor --repair` land with R9a. Pending/applied status, sequence
   numbers and batch apply remain future control-plane work (ADR-006).
 - The journal never contains secrets.
 

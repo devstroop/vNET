@@ -215,7 +215,7 @@ and packaged without waiting for host integration.
 
 - [x] IPv6 forwarding + NDP (ADR-013); RA/DHCPv6 deferred to v1.1.
 - [ ] Fuzzing: all parsers 72 h clean; CI fuzz smoke.
-- [ ] Crash/kill -9 recovery tests; journal replay; `vrouter doctor --repair`.
+- [x] Crash/kill -9 recovery tests; journal replay; `vrouter doctor --repair`.
 - [ ] Performance: hit budgets in CORE-SCOPE §12 on a named reference host.
 - [ ] 24 h soak with flaps, live NAT edits and service restarts.
 - [ ] Packaging: `.deb`/`.rpm`/AppImage, systemd unit and release workflow.

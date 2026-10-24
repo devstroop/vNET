@@ -43,6 +43,7 @@ bash scripts/test_route.sh
 bash scripts/test_tun.sh
 bash scripts/test_ipv6.sh
 bash scripts/test_journal.sh
+bash scripts/test_crash.sh
 bash scripts/nat_matrix.sh
 bash scripts/test_dhcp.sh
 bash scripts/test_dns.sh
@@ -81,6 +82,7 @@ vrouter route add <dst> [via <ip>] dev <dev> [-c <config>]
 vrouter nat add|del masquerade --out <iface|port> [-c <config>]
 vrouter nat add|del port-forward --proto tcp|udp --ext-port <n> [--to <ip:port>] [--in <name>] [-c <config>]
 vrouter down [-c <config>]
+vrouter doctor [--repair] [-c <config>]
 vrouter journal [-c <config>]
 vrouter dhcp status [-c <config>]
 vrouter dns query <name> [-c <config>]

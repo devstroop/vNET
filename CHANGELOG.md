@@ -8,6 +8,13 @@ All notable changes to vRouter are documented here. The format follows
 
 ### Added
 
+- **Crash recovery:** `vrouter doctor` is now read-only but works after a
+  daemon crash, and `vrouter doctor --repair` replays journal inverses while
+  refusing to run against a live daemon. Malformed journal tails are quarantined
+  to `<instance>.journal.quarantine.<timestamp>`; malformed records before valid
+  ones refuse repair without mutating host state. `scripts/test_crash.sh` covers
+  kill -9, dry-run, live-daemon refusal, unmanaged-state preservation, and
+  malformed-journal handling.
 - **Live NAT updates (ADR-014):** `vrouter nat add|del masquerade` and
   `vrouter nat add|del port-forward` validate and atomically save the config,
   apply the complete desired NAT tables over the protocol-v2 `nat.apply`

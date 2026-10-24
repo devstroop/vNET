@@ -35,6 +35,7 @@ bash scripts/test_route.sh     # IPv4 forwarding (ping + TCP)
 bash scripts/test_tun.sh       # TUN ingress/egress (ICMP + TCP)
 bash scripts/test_ipv6.sh      # IPv6 forwarding/NDP (ping + TCP)
 bash scripts/test_journal.sh   # iface/route journal + vrouter down
+bash scripts/test_crash.sh     # kill -9, journal replay, doctor --repair
 bash scripts/nat_matrix.sh     # NAT/port-forward matrix (R3+)
 bash scripts/test_firewall.sh  # ordered rules/default drop (R6)
 bash scripts/test_vlan.sh      # 802.1Q access/trunk + SVI isolation (R5)
