@@ -99,6 +99,39 @@ pub fn build(b: *std.Build) void {
             .root_module = daemon_mod,
         });
         b.installArtifact(daemon);
+
+        const web_mod = b.createModule(.{
+            .root_source_file = b.path("src/web/root.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "vrouter", .module = core_mod },
+            },
+        });
+        web_mod.addImport("build_options", core_options_mod);
+
+        const web_exe_mod = b.createModule(.{
+            .root_source_file = b.path("exec/vrouterweb/main.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "web", .module = web_mod },
+                .{ .name = "build_options", .module = core_options_mod },
+            },
+        });
+        const web_exe = b.addExecutable(.{
+            .name = "vrouterweb",
+            .root_module = web_exe_mod,
+        });
+        const web_step = b.step("web", "Build the read-only web admin preview");
+        web_step.dependOn(&b.addInstallArtifact(web_exe, .{}).step);
+
+        const web_tests = b.addTest(.{
+            .root_module = web_mod,
+        });
+        const run_web_tests = b.addRunArtifact(web_tests);
+        const web_test_step = b.step("web-test", "Run web admin preview tests");
+        web_test_step.dependOn(&run_web_tests.step);
     }
 
     const test_mod = b.createModule(.{
