@@ -6,9 +6,6 @@ vRouter attaches network interfaces, forwards Ethernet, IPv4 and IPv6 traffic,
 and provides NAT, DHCP, DNS, and journal-backed host configuration. It runs as a
 daemon with a command-line interface and exposes a C ABI for embedded hosts.
 
-> **Renamed:** vRouter was previously vNAT. The 0.1.0 release changes binary,
-> ABI and default path names; see [ADR-012](docs/adr/012-project-rename.md).
-
 ## Capabilities
 
 - AF_PACKET L2 ports and TUN/TAP L3 ports
