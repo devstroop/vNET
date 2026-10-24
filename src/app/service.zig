@@ -16,6 +16,9 @@ const control_state = @import("../control/state.zig");
 const firewall_counters = @import("../control/firewall_counters.zig");
 const netlink = @import("../port/linux/netlink.zig");
 
+const port_rx_budget = 256;
+const idle_poll_ms = 1;
+
 pub const Timestamp = if (@sizeOf(usize) >= 8) u64 else u32;
 
 pub fn timestamp(ms: i64) Timestamp {
@@ -246,6 +249,8 @@ pub fn run(
 
     const apply_buf = try gpa.alloc(u8, control_server.max_request_bytes);
     defer gpa.free(apply_buf);
+    const poll_fds = try gpa.alloc(std.posix.pollfd, port_entries.len);
+    defer gpa.free(poll_fds);
     var buf: [2048]u8 = undefined;
     var netlink_tick: u8 = 0;
     var lease_save_ms = nowMs(io);
@@ -331,7 +336,7 @@ pub fn run(
         var did_work = false;
         for (port_entries) |entry| {
             var budget: usize = 0;
-            while (budget < 64) : (budget += 1) {
+            while (budget < port_rx_budget) : (budget += 1) {
                 const maybe_frame = entry.port.read(io, &buf) catch |err| {
                     logger.debug("read {s}: {s}", .{ entry.config_name, @errorName(err) });
                     break;
@@ -345,7 +350,20 @@ pub fn run(
         }
 
         if (!did_work) {
-            std.Io.sleep(io, std.Io.Duration.fromMilliseconds(1), .awake) catch break;
+            var poll_count: usize = 0;
+            for (port_entries) |entry| {
+                const fd = entry.port.pollFd() orelse continue;
+                poll_fds[poll_count] = .{ .fd = fd, .events = std.posix.POLL.IN, .revents = 0 };
+                poll_count += 1;
+            }
+            if (poll_count == 0) {
+                std.Io.sleep(io, std.Io.Duration.fromMilliseconds(1), .awake) catch break;
+            } else {
+                _ = std.posix.poll(poll_fds[0..poll_count], idle_poll_ms) catch |err| {
+                    logger.debug("poll: {s}", .{@errorName(err)});
+                    std.Io.sleep(io, std.Io.Duration.fromMilliseconds(1), .awake) catch break;
+                };
+            }
         }
     }
 

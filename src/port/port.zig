@@ -62,6 +62,7 @@ pub const Port = struct {
     pub const VTable = struct {
         read: *const fn (ctx: *anyopaque, io: std.Io, buf: []u8) PortError!?usize,
         write: *const fn (ctx: *anyopaque, io: std.Io, frame: []const u8) PortError!void,
+        pollFd: *const fn (ctx: *anyopaque) ?std.posix.fd_t,
         info: *const fn (ctx: *anyopaque) PortInfo,
         stats: *const fn (ctx: *anyopaque) Stats,
         refresh: *const fn (ctx: *anyopaque, io: std.Io) PortError!void,
@@ -78,6 +79,12 @@ pub const Port = struct {
 
     pub fn write(self: Port, io: std.Io, frame: []const u8) PortError!void {
         return self.vtable.write(self.ctx, io, frame);
+    }
+
+    /// Returns a descriptor that becomes readable when `read` may return a
+    /// frame, or null for ports without a pollable fd (in-memory tests).
+    pub fn pollFd(self: Port) ?std.posix.fd_t {
+        return self.vtable.pollFd(self.ctx);
     }
 
     pub fn info(self: Port) PortInfo {

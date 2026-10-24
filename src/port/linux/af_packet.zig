@@ -328,6 +328,7 @@ fn setPromiscuous(fd: sys.fd_t, ifindex: u32) PortError!void {
 const vtable = port_mod.Port.VTable{
     .read = vRead,
     .write = vWrite,
+    .pollFd = vPollFd,
     .info = vInfo,
     .stats = vStats,
     .refresh = vRefresh,
@@ -346,6 +347,11 @@ fn vWrite(ctx: *anyopaque, io: std.Io, frame: []const u8) PortError!void {
     _ = io;
     const self: *AfPacketPort = @ptrCast(@alignCast(ctx));
     return self.writeImpl(frame);
+}
+
+fn vPollFd(ctx: *anyopaque) ?std.posix.fd_t {
+    const self: *AfPacketPort = @ptrCast(@alignCast(ctx));
+    return if (self.closed or !self.link_up) null else self.fd;
 }
 
 fn vInfo(ctx: *anyopaque) port_mod.PortInfo {
