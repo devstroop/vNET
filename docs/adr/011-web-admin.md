@@ -1,6 +1,6 @@
 # ADR-011 — Optional local web admin
 
-- **Status:** Accepted (post-v1, R10)
+- **Status:** Accepted (post-v1, R10; amended 2026-10-24)
 - **Date:** 2026-10-24
 
 ## Context
@@ -34,10 +34,13 @@ Add an **optional, post-v1 local web admin for Linux**:
    runs as an unprivileged service account in the `vrouter` group and uses the
    control socket (`0660`, peer credentials). Read and write capabilities are
    distinct API scopes; a read-only deployment must not receive write access.
-3. **Server-rendered HTMX.** The UI is server-rendered HTML with templates and
-   assets embedded via `@embedFile`. HTMX is vendored and version-pinned; no
-   CDN, Node runtime, package manager or frontend build step. Plain CSS and
-   progressive enhancement only; no SPA framework.
+3. **Server-rendered HTMX.** *(Amended 2026-10-24: the preview now uses a
+   Vite/React/shadcn SPA built at package time; see the amendment below. The
+   original HTMX constraint is retained here as decision history.)* The UI is
+   server-rendered HTML with templates and assets embedded via `@embedFile`.
+   HTMX is vendored and version-pinned; no CDN, Node runtime, package manager or
+   frontend build step. Plain CSS and progressive enhancement only; no SPA
+   framework.
 4. **HTTP transport.** Default to `127.0.0.1` or a Unix socket. A wildcard or
    LAN bind is explicit opt-in and must sit behind TLS termination (Caddy,
    nginx or equivalent). The initial web adapter does not need to implement TLS
@@ -63,6 +66,27 @@ Add an **optional, post-v1 local web admin for Linux**:
    traversal, template escaping, session fixation, rate limits) get
    Playwright coverage using the `webapp-testing` skill.
 
+## Amendment — 2026-10-24: Vite/React/shadcn SPA
+
+The first read-only implementation used server-rendered HTML. It did not meet
+the requested admin UX and was harder to maintain than a component-based UI.
+The preview now uses **Vite + React + TypeScript + Tailwind CSS + shadcn**,
+built at package time and served as static assets by the same unprivileged Zig
+process. This amends decision 3 only:
+
+- Node.js is a **build-time** dependency; the appliance ships built static
+  assets and does not need a Node runtime.
+- The Zig process still never mutates host state. It serves the SPA, static
+  assets and a small same-origin JSON API backed by the Unix control socket.
+- Assets are installed by `zig build web` under `zig-out/share/vrouter-web`;
+  `--assets` selects the directory at runtime.
+- CSP remains `self`-only with no inline scripts and no CDN.
+- Privilege separation, authentication, loopback binding, read-only-first,
+  origin/host validation and CSRF requirements are unchanged.
+- The "Next.js / React SPA" alternative below was rejected for the original
+  appliance constraints. The amended preview accepts React as a build-time
+  dependency while keeping the runtime single-binary and Node-free.
+
 ## Consequences
 
 - Linux operators get an optional browser workflow without adding a Node
@@ -78,10 +102,11 @@ Add an **optional, post-v1 local web admin for Linux**:
 
 ## Alternatives
 
-- **Next.js / React SPA:** rejected for the appliance. It adds a Node runtime,
-  a build pipeline, a larger dependency surface and an unnecessary client-side
-  state layer. It could be appropriate for a future hosted multi-router
-  controller, which is explicitly out of scope.
+- **Next.js / React SPA:** rejected for the original appliance constraints. It
+  adds a build pipeline and a larger dependency surface. The 2026-10-24
+  amendment accepts React as a build-time-only dependency while keeping the
+  appliance runtime Node-free. A hosted multi-router controller remains out of
+  scope.
 - **Embed the HTTP server in `vrouterd`:** rejected. It would put browser parsing
   and session state in the privileged daemon.
 - **HTMX from a CDN:** rejected. Offline deployments cannot depend on a third

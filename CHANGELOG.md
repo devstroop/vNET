@@ -9,9 +9,11 @@ All notable changes to vRouter are documented here. The format follows
 ### Added
 
 - **Read-only web admin preview (post-v1, ADR-011):** opt-in `vrouterweb`
-  built with `zig build web`. It binds loopback only, authenticates with an
-  Argon2id password and server-side sessions, validates `Host`/`Origin`, and
-  renders status, NAT and conntrack from the Unix control socket. It is
+  built with `zig build web`. The Zig process serves a Vite/React/shadcn SPA
+  and a same-origin JSON API backed by the Unix control socket. It binds
+  loopback only, authenticates with an Argon2id password and server-side
+  sessions, validates `Host`/`Origin`, and exposes status, NAT and conntrack
+  without host mutations. `--assets` selects the built frontend directory. It is
   read-only, excluded from the default build, and not part of the 0.2.0 scope.
   See `docs/WEB.md`.
 - **Crash recovery:** `vrouter doctor` is now read-only but works after a

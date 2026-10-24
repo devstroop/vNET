@@ -241,7 +241,8 @@ Prerequisites: v1.0 shipped, the R7 control socket is stable, and read/write
 authorization scopes exist. v1 scope does not change (ADR-011).
 
 - [ ] `vrouter-web`: unprivileged Unix-socket client, Zig HTTP server, embedded
-      templates and static assets, vendored/pinned HTMX; no Node, no CDN.
+      Vite/React/shadcn static assets built at package time; no Node runtime on
+      the appliance, no CDN.
 - [ ] Loopback/Unix-socket defaults; explicit LAN bind; TLS reverse-proxy docs.
 - [ ] Auth/session (PAM or Argon2id), CSRF, Origin/Host checks, strict CSP,
       rate limits and an audit log for writes.
@@ -340,7 +341,7 @@ or bypass the control socket; v1 CLI/API behavior is unchanged.
 | 8 | Optional userspace 802.1D STP | Accepted — ADR-008 (R5) |
 | 9 | Kernel bridge offload with a veth trunk | Accepted — ADR-009 (R5) |
 | 10 | Embedded C ABI and host fd injection | Accepted — ADR-010 (R7 foundation) |
-| 11 | Optional local web admin via HTMX | Accepted — ADR-011 (R10, post-v1) |
+| 11 | Optional local web admin via React/shadcn SPA | Accepted — ADR-011 (R10, post-v1; amended) |
 | 12 | Rename vNAT to vRouter | Accepted — ADR-012 |
 | 13 | IPv6 core in v1.0; services/NAT66 in v1.1 | Accepted — ADR-013 |
 | 14 | Config-backed live NAT updates | Accepted — ADR-014 |

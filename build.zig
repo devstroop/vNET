@@ -126,6 +126,17 @@ pub fn build(b: *std.Build) void {
         const web_step = b.step("web", "Build the read-only web admin preview");
         web_step.dependOn(&b.addInstallArtifact(web_exe, .{}).step);
 
+        const web_install = b.addSystemCommand(&.{ "npm", "ci", "--prefix", "web", "--no-audit", "--no-fund" });
+        const web_build = b.addSystemCommand(&.{ "npm", "run", "build", "--prefix", "web" });
+        web_build.step.dependOn(&web_install.step);
+        const web_assets = b.addInstallDirectory(.{
+            .source_dir = b.path("web/dist"),
+            .install_dir = .prefix,
+            .install_subdir = "share/vrouter-web",
+        });
+        web_assets.step.dependOn(&web_build.step);
+        web_step.dependOn(&web_assets.step);
+
         const web_tests = b.addTest(.{
             .root_module = web_mod,
         });

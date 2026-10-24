@@ -17,7 +17,7 @@ the contract for any agent working in this repo.
 | Executables | `exec/` | `vrouter`, `vrouterd`; `vrouter-web` post-v1 |
 | C ABI | `src/ffi.zig`, `include/vrouter.h` | for Android/iOS/desktop hosts |
 | Control plane | `src/control/` | config diff, journal, unix socket API |
-| Web admin (post-v1) | `src/web/`, `exec/vrouterweb/` | Zig HTTP, server-rendered HTMX, Unix-socket client |
+| Web admin (post-v1) | `src/web/`, `web/`, `exec/vrouterweb/` | Zig JSON API + Vite/React/shadcn SPA, Unix-socket client |
 | Tests | `test/` | unit, netns, fuzz, Android smoke |
 
 ## Commands
@@ -30,6 +30,8 @@ zig build test -Dtest-filter=ipv4
 zig build fuzz --fuzz=10K      # parser fuzz campaign (iterations per target)
 zig build shared-lib           # .so
 zig build static-lib -Dtarget=aarch64-linux-android
+zig build web                  # web admin preview (Node 22+; builds web/)
+cd web && npm run dev          # Vite dev server on 127.0.0.1:5173
 bash scripts/test_netns.sh     # Linux L2/hotplug topology tests
 bash scripts/test_route.sh     # IPv4 forwarding (ping + TCP)
 bash scripts/test_tun.sh       # TUN ingress/egress (ICMP + TCP)
