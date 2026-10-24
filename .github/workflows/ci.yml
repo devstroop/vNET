@@ -69,6 +69,7 @@ jobs:
       - run: sudo env "PATH=$PATH" "ZIG=$(command -v zig)" bash scripts/test_route.sh
       - run: sudo env "PATH=$PATH" "ZIG=$(command -v zig)" bash scripts/test_tun.sh
       - run: sudo env "PATH=$PATH" "ZIG=$(command -v zig)" bash scripts/test_journal.sh
+      - run: sudo env "PATH=$PATH" "ZIG=$(command -v zig)" bash scripts/test_crash.sh
       - run: sudo env "PATH=$PATH" "ZIG=$(command -v zig)" bash scripts/nat_matrix.sh
       - run: sudo env "PATH=$PATH" "ZIG=$(command -v zig)" bash scripts/test_firewall.sh
       - run: sudo env "PATH=$PATH" "ZIG=$(command -v zig)" bash scripts/test_vlan.sh

@@ -613,9 +613,14 @@ fn doctorCommand(init: std.process.Init, args: []const []const u8) !void {
     const io = init.io;
     const gpa = init.gpa;
     const cfg = splitConfig(args);
-    if (cfg.rest.len != 0) {
-        try usage(io);
-        std.process.exit(2);
+    var repair = false;
+    for (cfg.rest) |arg| {
+        if (std.mem.eql(u8, arg, "--repair")) {
+            repair = true;
+        } else {
+            try usage(io);
+            std.process.exit(2);
+        }
     }
 
     var parsed = loadConfig(io, gpa, cfg.path) catch |err| {
@@ -630,62 +635,139 @@ fn doctorCommand(init: std.process.Init, args: []const []const u8) !void {
         try printErr(io, gpa, "fail: control socket path is too long\n", .{});
         std.process.exit(1);
     };
-
-    const socket_stat = std.Io.Dir.cwd().statFile(io, path, .{}) catch |err| {
-        try printErr(io, gpa, "fail: socket {s}: {s}\n", .{ path, @errorName(err) });
+    const locked = daemonLockHeld(io, gpa, path) catch |err| {
+        try printErr(io, gpa, "fail: daemon lock at {s}: {s}\n", .{ path, @errorName(err) });
         std.process.exit(1);
     };
-    if (socket_stat.kind != .unix_domain_socket) {
-        try printErr(io, gpa, "fail: {s} is not a unix socket\n", .{path});
-        std.process.exit(1);
-    }
-    try print(io, gpa, "ok: socket {s} mode={o}\n", .{
-        path,
-        @intFromEnum(socket_stat.permissions) & 0o777,
-    });
 
-    var response = queryStatus(io, gpa, path) catch |err| {
-        try printErr(io, gpa, "fail: daemon {s}: {s}\n", .{ path, @errorName(err) });
-        std.process.exit(1);
-    };
-    defer response.deinit();
-    if (!response.value.ok) {
-        try printErr(io, gpa, "fail: daemon: {s}: {s}\n", .{
-            response.value.error_code orelse "error",
-            response.value.message orelse "request failed",
+    var daemon_pid: ?u32 = null;
+    if (std.Io.Dir.cwd().statFile(io, path, .{})) |socket_stat| {
+        if (socket_stat.kind != .unix_domain_socket) {
+            try printErr(io, gpa, "fail: {s} is not a unix socket\n", .{path});
+            std.process.exit(1);
+        }
+        try print(io, gpa, "ok: socket {s} mode={o}\n", .{
+            path,
+            @intFromEnum(socket_stat.permissions) & 0o777,
         });
+
+        if (queryStatus(io, gpa, path)) |response| {
+            var status = response;
+            defer status.deinit();
+            if (!status.value.ok) {
+                try printErr(io, gpa, "fail: daemon: {s}: {s}\n", .{
+                    status.value.error_code orelse "error",
+                    status.value.message orelse "request failed",
+                });
+                std.process.exit(1);
+            }
+            const info = status.value.status.?;
+            if (!std.mem.eql(u8, info.instance, parsed.config.instance)) {
+                try printErr(io, gpa, "fail: daemon instance '{s}' does not match config '{s}'\n", .{
+                    info.instance,
+                    parsed.config.instance,
+                });
+                std.process.exit(1);
+            }
+            daemon_pid = info.pid;
+            try print(io, gpa, "ok: daemon pid={d} version={s} uptime={d}ms ports={d}\n", .{
+                info.pid,
+                info.version,
+                info.uptime_ms,
+                info.ports,
+            });
+        } else |err| switch (err) {
+            error.FileNotFound, error.ConnectionRefused => {
+                if (locked) {
+                    try printErr(io, gpa, "fail: daemon lock is held but {s} is not responding\n", .{path});
+                    std.process.exit(1);
+                }
+                try print(io, gpa, "ok: daemon not running (stale socket)\n", .{});
+            },
+            else => {
+                try printErr(io, gpa, "fail: daemon {s}: {s}\n", .{ path, @errorName(err) });
+                std.process.exit(1);
+            },
+        }
+    } else |err| switch (err) {
+        error.FileNotFound => {
+            if (locked) {
+                try printErr(io, gpa, "fail: daemon lock is held but {s} is missing\n", .{path});
+                std.process.exit(1);
+            }
+            try print(io, gpa, "ok: daemon not running\n", .{});
+        },
+        else => {
+            try printErr(io, gpa, "fail: socket {s}: {s}\n", .{ path, @errorName(err) });
+            std.process.exit(1);
+        },
+    }
+
+    if (repair and (locked or daemon_pid != null)) {
+        try printErr(io, gpa, "vrouter: daemon is running or starting; stop vrouterd first\n", .{});
         std.process.exit(1);
     }
-    const status = response.value.status.?;
-    if (!std.mem.eql(u8, status.instance, parsed.config.instance)) {
-        try printErr(io, gpa, "fail: daemon instance '{s}' does not match config '{s}'\n", .{
-            status.instance,
-            parsed.config.instance,
-        });
-        std.process.exit(1);
-    }
-    try print(io, gpa, "ok: daemon pid={d} version={s} uptime={d}ms ports={d}\n", .{
-        status.pid,
-        status.version,
-        status.uptime_ms,
-        status.ports,
-    });
 
     var host = openHost(init, &parsed) catch |err| {
         try printErr(io, gpa, "fail: journal: {s}\n", .{@errorName(err)});
         std.process.exit(1);
     };
     defer host.deinit();
-    const contents = host.journalContents() catch |err| {
-        try printErr(io, gpa, "fail: journal: {s}\n", .{@errorName(err)});
+
+    if (!repair) {
+        const health = host.journalHealth() catch |err| {
+            try printErr(io, gpa, "fail: journal: {s}\n", .{@errorName(err)});
+            std.process.exit(1);
+        };
+        if (health.entries == 0) {
+            try print(io, gpa, "ok: journal empty\n", .{});
+        } else {
+            try print(io, gpa, "ok: journal entries={d} valid={d} malformed={d}\n", .{
+                health.entries,
+                health.valid,
+                health.malformed,
+            });
+            if (health.malformed != 0 and !health.malformed_tail) {
+                try printErr(io, gpa, "fail: journal is malformed before valid records; repair it manually\n", .{});
+                std.process.exit(1);
+            }
+            if (health.malformed_tail) {
+                try print(io, gpa, "warn: malformed journal tail; `vrouter doctor --repair` will quarantine it\n", .{});
+            }
+            try print(io, gpa, "ok: journal pending={d} (dry run; pass --repair to replay)\n", .{
+                health.valid,
+            });
+        }
+        return;
+    }
+
+    var result = host.repair() catch |err| {
+        if (err == error.InvalidJournal) {
+            try printErr(io, gpa, "fail: journal is malformed before valid records; refusing to repair\n", .{});
+        } else {
+            try printErr(io, gpa, "fail: repair: {s}\n", .{@errorName(err)});
+        }
         std.process.exit(1);
     };
-    if (contents) |text| {
-        defer gpa.free(text);
-        const lines = std.mem.count(u8, text, "\n");
-        try print(io, gpa, "ok: journal entries={d}\n", .{lines});
+    defer result.deinit(gpa);
+
+    if (result.quarantine_path) |quarantine_path| {
+        try print(io, gpa, "ok: quarantined {d} malformed record(s) at {s}\n", .{
+            result.quarantined,
+            quarantine_path,
+        });
+    }
+    if (result.failed != 0) {
+        try printErr(io, gpa, "vrouter: restored {d}, failed {d}; journal retained\n", .{
+            result.restored,
+            result.failed,
+        });
+        std.process.exit(1);
+    }
+    if (result.restored == 0) {
+        try print(io, gpa, "ok: no journaled state\n", .{});
     } else {
-        try print(io, gpa, "ok: journal empty\n", .{});
+        try print(io, gpa, "ok: restored {d} operation(s)\n", .{result.restored});
     }
 }
 
@@ -2103,7 +2185,7 @@ fn usage(io: std.Io) !void {
         \\  vrouter port list
         \\  vrouter status [-c] <config.json>
         \\  vrouter up [-c <config>]
-        \\  vrouter doctor [-c <config>]
+        \\  vrouter doctor [--repair] [-c <config>]
         \\  vrouter nat list [-c <config>]
         \\  vrouter nat add|del masquerade --out <iface|port> [-c <config>]
         \\  vrouter nat add|del port-forward --proto tcp|udp --ext-port <n> [--to <ip:port>] [--in <name>] [-c <config>]

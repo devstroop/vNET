@@ -19,6 +19,25 @@ pub const DownResult = struct {
     failed: usize = 0,
 };
 
+pub const JournalHealth = struct {
+    entries: usize = 0,
+    valid: usize = 0,
+    malformed: usize = 0,
+    malformed_tail: bool = false,
+};
+
+pub const RepairResult = struct {
+    restored: usize = 0,
+    failed: usize = 0,
+    quarantined: usize = 0,
+    quarantine_path: ?[]u8 = null,
+
+    pub fn deinit(self: *RepairResult, gpa: std.mem.Allocator) void {
+        if (self.quarantine_path) |path| gpa.free(path);
+        self.* = undefined;
+    }
+};
+
 pub const Host = struct {
     io: std.Io,
     gpa: std.mem.Allocator,
@@ -258,6 +277,70 @@ pub const Host = struct {
         return result;
     }
 
+    pub fn journalHealth(self: *Host) !JournalHealth {
+        const contents_opt = try self.store.contents(self.io);
+        const contents = contents_opt orelse return .{};
+        defer self.gpa.free(contents);
+
+        var scan = try scanJournal(self.gpa, contents);
+        defer scan.deinit(self.gpa);
+        return .{
+            .entries = scan.lines.items.len,
+            .valid = scan.lines.items.len - scan.invalid,
+            .malformed = scan.invalid,
+            .malformed_tail = scan.malformedTail(),
+        };
+    }
+
+    /// Replays the journal after a crash. A malformed suffix is quarantined so
+    /// the valid prefix can still be repaired; malformed records followed by
+    /// valid ones are ambiguous and refuse repair.
+    pub fn repair(self: *Host) !RepairResult {
+        const contents_opt = try self.store.contents(self.io);
+        const contents = contents_opt orelse return .{};
+        defer self.gpa.free(contents);
+
+        var scan = try scanJournal(self.gpa, contents);
+        defer scan.deinit(self.gpa);
+
+        if (scan.first_invalid != null and !scan.malformedTail()) {
+            return error.InvalidJournal;
+        }
+
+        var result: RepairResult = .{};
+        var index = scan.first_invalid orelse scan.lines.items.len;
+        while (index > 0) {
+            index -= 1;
+            var parsed = journal.parseLine(self.gpa, scan.lines.items[index]) catch {
+                result.failed += 1;
+                continue;
+            };
+            defer parsed.deinit();
+            const op = journal.toOp(parsed.value) catch {
+                result.failed += 1;
+                continue;
+            };
+            self.applyInverse(op) catch {
+                result.failed += 1;
+                continue;
+            };
+            result.restored += 1;
+        }
+        if (result.failed != 0) return result;
+
+        if (scan.first_invalid) |start| {
+            const stamp_ms = std.Io.Clock.now(.real, self.io).toMilliseconds();
+            result.quarantine_path = try self.store.quarantine(
+                self.io,
+                scan.lines.items[start..],
+                stamp_ms,
+            );
+            result.quarantined = scan.invalid;
+        }
+        try self.store.clear(self.io);
+        return result;
+    }
+
     fn applyInverse(self: *Host, op: journal.Op) !void {
         switch (op) {
             .addr_add => |address| {
@@ -337,6 +420,50 @@ pub const Host = struct {
         return contents_opt orelse try self.gpa.alloc(u8, 0);
     }
 };
+
+const JournalScan = struct {
+    lines: std.ArrayListUnmanaged([]const u8) = .empty,
+    first_invalid: ?usize = null,
+    invalid: usize = 0,
+
+    fn deinit(self: *JournalScan, gpa: std.mem.Allocator) void {
+        self.lines.deinit(gpa);
+    }
+
+    fn malformedTail(self: *const JournalScan) bool {
+        const start = self.first_invalid orelse return false;
+        return start + self.invalid == self.lines.items.len;
+    }
+};
+
+fn scanJournal(gpa: std.mem.Allocator, contents: []const u8) !JournalScan {
+    var scan: JournalScan = .{};
+    errdefer scan.deinit(gpa);
+
+    var it = std.mem.splitScalar(u8, contents, '\n');
+    while (it.next()) |line| {
+        if (line.len == 0) continue;
+        try scan.lines.append(gpa, line);
+    }
+
+    for (scan.lines.items, 0..) |line, index| {
+        var parsed = journal.parseLine(gpa, line) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => {
+                if (scan.first_invalid == null) scan.first_invalid = index;
+                scan.invalid += 1;
+                continue;
+            },
+        };
+        defer parsed.deinit();
+        _ = journal.toOp(parsed.value) catch {
+            if (scan.first_invalid == null) scan.first_invalid = index;
+            scan.invalid += 1;
+            continue;
+        };
+    }
+    return scan;
+}
 
 fn linkExists(dev: []const u8) !bool {
     _ = iface_mod.ifindex(dev) catch |err| switch (err) {
@@ -475,4 +602,62 @@ test "down keeps the journal when a record cannot be parsed" {
     const contents = (try host.journalContents()).?;
     defer testing.allocator.free(contents);
     try testing.expectEqualStrings("not json\n", contents);
+}
+
+test "repair quarantines a malformed tail" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const store = try journal.Store.init(testing.allocator, tmp.dir, "test", false);
+    var host = Host{ .io = testing.io, .gpa = testing.allocator, .store = store };
+    defer host.deinit();
+
+    try tmp.dir.writeFile(testing.io, .{
+        .sub_path = "test.journal",
+        .data = "{\"op\":\"addr_add\",\"dev\":\"vrnope0\",\"cidr\":\"10.0.0.1/24\"}\nbad\n",
+    });
+
+    const health = try host.journalHealth();
+    try testing.expectEqual(@as(usize, 2), health.entries);
+    try testing.expectEqual(@as(usize, 1), health.valid);
+    try testing.expectEqual(@as(usize, 1), health.malformed);
+    try testing.expect(health.malformed_tail);
+
+    var result = try host.repair();
+    defer result.deinit(testing.allocator);
+    try testing.expectEqual(@as(usize, 1), result.restored);
+    try testing.expectEqual(@as(usize, 0), result.failed);
+    try testing.expectEqual(@as(usize, 1), result.quarantined);
+    try testing.expect(result.quarantine_path != null);
+
+    const quarantine = try tmp.dir.readFileAlloc(
+        testing.io,
+        result.quarantine_path.?,
+        testing.allocator,
+        .limited(1024),
+    );
+    defer testing.allocator.free(quarantine);
+    try testing.expectEqualStrings("bad\n", quarantine);
+    try testing.expect((try host.journalContents()) == null);
+}
+
+test "repair refuses a malformed record before a valid one" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const store = try journal.Store.init(testing.allocator, tmp.dir, "test", false);
+    var host = Host{ .io = testing.io, .gpa = testing.allocator, .store = store };
+    defer host.deinit();
+
+    const data = "not json\n{\"op\":\"link\",\"dev\":\"vrnope0\",\"up\":true}\n";
+    try tmp.dir.writeFile(testing.io, .{
+        .sub_path = "test.journal",
+        .data = data,
+    });
+
+    try testing.expectError(error.InvalidJournal, host.repair());
+
+    const contents = (try host.journalContents()).?;
+    defer testing.allocator.free(contents);
+    try testing.expectEqualStrings(data, contents);
 }

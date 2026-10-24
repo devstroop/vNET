@@ -118,6 +118,7 @@ vrouter/
     ├── test_route.sh
     ├── test_ipv6.sh
     ├── test_journal.sh
+    ├── test_crash.sh
     ├── test_offload.sh
     ├── nat_matrix.sh
     └── perf.sh
@@ -444,7 +445,7 @@ throughput or latency claim is made without that report and its host details.
 | NAT matrix | Emulated EIM/EDM, hairpin, port-forward, exhaustion |
 | DHCP/DNS | Client emulators; lease persistence across restart |
 | Security/privilege | Journal rollback, default-deny policy, netns isolation |
-| Crash safety | kill -9, reboot simulation, `vrouter doctor` |
+| Crash safety | kill -9, journal replay, `vrouter doctor --repair` (`scripts/test_crash.sh`) |
 | Android | Emulator (VPN mode), rooted device (root mode) |
 | Performance | `iperf3`, `pktgen`, 64 B and 1500 B, multi-flow |
 

@@ -392,6 +392,56 @@ pub const Store = struct {
             else => return err,
         };
     }
+
+    /// Writes malformed records to a side file so repair can proceed without
+    /// discarding evidence. The returned name is owned by the caller.
+    pub fn quarantine(
+        self: *Store,
+        io: std.Io,
+        lines: []const []const u8,
+        stamp_ms: i64,
+    ) ![]u8 {
+        var out: std.ArrayListUnmanaged(u8) = .empty;
+        defer out.deinit(self.gpa);
+        for (lines) |line| {
+            try out.appendSlice(self.gpa, line);
+            try out.append(self.gpa, '\n');
+        }
+
+        var attempt: u32 = 0;
+        while (attempt < 100) : (attempt += 1) {
+            const name = if (attempt == 0)
+                try std.fmt.allocPrint(self.gpa, "{s}.quarantine.{d}", .{ self.name, stamp_ms })
+            else
+                try std.fmt.allocPrint(self.gpa, "{s}.quarantine.{d}.{d}", .{
+                    self.name,
+                    stamp_ms,
+                    attempt,
+                });
+            self.writeQuarantine(io, name, out.items) catch |err| switch (err) {
+                error.PathAlreadyExists => {
+                    self.gpa.free(name);
+                    continue;
+                },
+                else => {
+                    self.gpa.free(name);
+                    return err;
+                },
+            };
+            return name;
+        }
+        return error.PathAlreadyExists;
+    }
+
+    fn writeQuarantine(self: *Store, io: std.Io, name: []const u8, data: []const u8) !void {
+        var atomic = try self.dir.createFileAtomic(io, name, .{
+            .permissions = std.Io.File.Permissions.fromMode(0o600),
+        });
+        defer atomic.deinit(io);
+        try atomic.file.writeStreamingAll(io, data);
+        try atomic.file.sync(io);
+        try atomic.link(io);
+    }
 };
 
 pub fn ownsAddress(
