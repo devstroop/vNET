@@ -120,6 +120,30 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_unit_tests.step);
 
+    // Fuzz tests live in their own artifact so `-fno-error-tracing` can work
+    // around the Zig 0.16 fuzz test runner's StackTrace type mismatch without
+    // weakening diagnostics for the normal unit suite.
+    const fuzz_mod = b.createModule(.{
+        .root_source_file = b.path("fuzz.zig"),
+        .target = target,
+        .optimize = optimize,
+        .error_tracing = false,
+    });
+    fuzz_mod.addImport("build_options", core_options_mod);
+
+    // The self-hosted backend used by Debug emits no coverage counters, which
+    // makes `--fuzz` abort with "pcs_len was zero". LLVM provides the counters.
+    const fuzz_tests = b.addTest(.{
+        .root_module = fuzz_mod,
+        .filters = test_filters,
+        .use_llvm = true,
+    });
+    const run_fuzz_tests = b.addRunArtifact(fuzz_tests);
+    test_step.dependOn(&run_fuzz_tests.step);
+
+    const fuzz_step = b.step("fuzz", "Run parser fuzz targets (pass --fuzz=N)");
+    fuzz_step.dependOn(&run_fuzz_tests.step);
+
     const ffi_smoke_mod = b.createModule(.{
         .target = target,
         .optimize = optimize,

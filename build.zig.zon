@@ -12,6 +12,7 @@
         "include",
         "test",
         "test.zig",
+        "fuzz.zig",
         "examples",
         "scripts",
         "LICENSE",

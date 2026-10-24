@@ -15,7 +15,7 @@ jobs:
       - uses: mlugg/setup-zig@v2
         with:
           version: 0.16.0
-      - run: zig fmt --check build.zig build.zig.zon src test.zig exec
+      - run: zig fmt --check build.zig build.zig.zon fuzz.zig src test.zig exec
 
   test:
     runs-on: ubuntu-latest
@@ -28,6 +28,16 @@ jobs:
       - run: zig build test
       - run: zig build
       - run: for f in examples/*.json; do ./zig-out/bin/vrouter validate "$f"; done
+
+  fuzz:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+      - run: test "$(zig version)" = "0.16.0"
+      - run: zig build fuzz --fuzz=10K
 
   cross:
     runs-on: ubuntu-latest

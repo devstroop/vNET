@@ -139,6 +139,12 @@ test "ethernet write enforces space" {
     try testing.expectError(error.NoSpace, write(&small, mac_a, mac_b, EtherType.ipv4, null));
 }
 
+test "ethernet write normalizes vlan priority" {
+    var frame: [18]u8 = undefined;
+    _ = try write(&frame, mac_a, mac_b, EtherType.ipv4, 0xa064);
+    try testing.expectEqual(@as(u16, 0x0064), readU16(&frame, 14));
+}
+
 test "ethernet broadcast and multicast helpers" {
     try testing.expect(types.Mac.broadcast.isBroadcast());
     try testing.expect(types.Mac.broadcast.isMulticast());

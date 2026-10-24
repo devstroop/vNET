@@ -146,7 +146,8 @@ pub const Frame = struct {
 
 ### 3.2 VLAN
 
-- 802.1Q parse/insert; TPID 0x8100 (0x88A8 optional later).
+- 802.1Q parse/insert; TPID 0x8100 (0x88A8 optional later). PCP/DEI are
+  not modeled; egress tags carry the VID with priority 0.
 - Per-port `pvid` (untagged ingress VLAN), `tagged` set and
   `storm_control`.
 - Trunk ports carry multiple VLANs; access ports carry one.

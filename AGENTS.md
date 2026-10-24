@@ -25,8 +25,9 @@ the contract for any agent working in this repo.
 ```bash
 zig build                      # debug build
 zig build --release=fast       # release
-zig build test                 # unit tests
+zig build test                 # unit tests + fuzz corpus smoke
 zig build test -Dtest-filter=ipv4
+zig build fuzz --fuzz=10K      # parser fuzz campaign (iterations per target)
 zig build shared-lib           # .so
 zig build static-lib -Dtarget=aarch64-linux-android
 bash scripts/test_netns.sh     # Linux L2/hotplug topology tests
