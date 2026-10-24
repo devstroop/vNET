@@ -38,7 +38,7 @@ bash scripts/nat_matrix.sh     # NAT/port-forward matrix (R3+)
 bash scripts/test_firewall.sh  # ordered rules/default drop (R6)
 bash scripts/test_vlan.sh      # 802.1Q access/trunk + SVI isolation (R5)
 bash scripts/test_offload.sh   # kernel-bridge offload parity (R5)
-bash scripts/perf.sh           # throughput smoke (R9)
+bash scripts/perf.sh           # throughput smoke (R9a)
 ```
 
 Always run `zig build test`. For port/forwarding changes, also run

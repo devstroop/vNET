@@ -602,7 +602,7 @@ Planned with their milestones:
 
 ```
 vrouter bridge create lan                   # R5
-vrouter pcap --iface lan --write cap.pcap   # R9
+vrouter pcap --iface lan --write cap.pcap   # post-0.2.0
 ```
 
 JSON output (`--json`) is planned. Exit codes are stable.
@@ -665,8 +665,9 @@ NAT edits are recorded in the config file and not in this journal:
   next `vrouter down` cleans it up.
 - `/run` is used because host state is recreated per boot; persisting a journal
   across a reboot would reference state that no longer exists.
-- Pending/applied status, sequence numbers, batch apply, PID locking and
-  crash reconciliation land with the R7 control plane (ADR-006).
+- PID locking and read-only diagnostics landed with R7. Crash reconciliation
+  and `vrouter doctor --repair` land with R9a; pending/applied status, sequence
+  numbers and batch apply remain future control-plane work (ADR-006).
 - The journal never contains secrets.
 
 ### 9.5 C ABI (Android / future desktop)

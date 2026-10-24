@@ -1,15 +1,5 @@
 const std = @import("std");
-
-const build_zon = @embedFile("build.zig.zon");
-
-fn parseVersion(comptime zon: []const u8) []const u8 {
-    const marker = ".version = \"";
-    const start = (std.mem.indexOf(u8, zon, marker) orelse
-        @compileError("build.zig.zon is missing .version")) + marker.len;
-    const end = std.mem.indexOfScalarPos(u8, zon, start, '"') orelse
-        @compileError("build.zig.zon version string is unterminated");
-    return zon[start..end];
-}
+const build_zon = @import("build.zig.zon");
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
@@ -23,7 +13,9 @@ pub fn build(b: *std.Build) void {
     const is_android = is_linux and
         (target_abi == .android or target_abi == .androideabi);
 
-    const version = comptime parseVersion(build_zon);
+    const version = build_zon.version;
+    const semantic_version = comptime std.SemanticVersion.parse(version) catch
+        @compileError("build.zig.zon version is not semantic");
 
     const core_options = b.addOptions();
     core_options.addOption([]const u8, "version", version);
@@ -61,7 +53,7 @@ pub fn build(b: *std.Build) void {
         .linkage = .dynamic,
         .name = "vrouter",
         .root_module = ffi_mod,
-        .version = .{ .major = 0, .minor = 1, .patch = 0 },
+        .version = semantic_version,
     });
     shared_lib.linker_allow_shlib_undefined = true;
     b.installArtifact(shared_lib);

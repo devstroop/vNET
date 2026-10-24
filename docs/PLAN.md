@@ -14,7 +14,8 @@ Vertical-slice order:
 ```
 R0 skeleton ─▶ R1 ports ─▶ R2 IPv4 forwarding ─▶ R3 NAT/conntrack
    ─▶ R4 DHCP/DNS ─▶ R5 L2 bridge ─▶ R6 firewall
-   ─▶ R7 Android VPN ─▶ R8 Android root ─▶ R9 IPv6 + hardening + v1.0
+   ─▶ R9a Linux hardening + 0.2.0 ─▶ R7 Android VPN ─▶ R8 Android root
+                                      └─▶ R9b Android release + v1.0
                                       └─▶ R10 optional web admin (post-v1)
 ```
 
@@ -53,7 +54,7 @@ creates TUN/TAP devices, and observes a link event through `vrouterd`.
 
 ### R2 — IPv4 forwarding (3–4 weeks)
 
-- [x] Ethernet + IPv4 parsers/builders (bounds-checked; fuzz target in R9).
+- [x] Ethernet + IPv4 parsers/builders (bounds-checked; fuzz target in R9a).
 - [x] ARP cache, request/reply, learning, gratuitous ARP, and on-demand
       probing with a 32-packet pending queue; proxy ARP and periodic refresh
       are deferred.
@@ -98,7 +99,7 @@ ICMP frag-needed is implemented). None block the exit criterion.
       translation and live add/delete/rollback/restart persistence are covered
       by `scripts/nat_matrix.sh`.
 
-**Status: COMPLETE for v0.2.0; the 1 h churn gate moves to the R9 soak.**
+**Status: COMPLETE for v0.2.0; the 1 h churn gate moves to the R9a 24 h soak.**
 Conntrack, SNAT/masquerade, DNAT/port forwarding, hairpin NAT, live NAT
 mutations and incremental rewrites are in the datapath (`src/nat/`,
 `src/l3/forward.zig`). Masquerade on a DHCP uplink is installed when the client
@@ -106,7 +107,7 @@ binds. Fragments and unrelated or non-echo ICMP on SNAT egress are dropped
 (counted) rather than leaked.
 
 **Exit:** LAN hosts reach an external network through vRouter's NAT; inbound port
-forward works; conntrack survives 1 h churn (validated in R9).
+forward works; conntrack survives 1 h churn (validated in R9a).
 
 ### R4 — DHCP + DNS services (3–4 weeks)
 
@@ -203,21 +204,36 @@ tunnel works; survives Wi-Fi↔LTE.
       restore on exit.
 - [ ] Experimental NFQUEUE interception (Strategy 2) behind a flag.
 - [ ] Hotspot + USB tethering tests with a real client.
-- [ ] `vrouter doctor --repair` for crash recovery.
 
 **Exit:** A tethered laptop gets DHCP from vRouter and reaches the internet
 through vRouter's NAT; uninstall/stop restores tethering.
 
-### R9 — IPv6, hardening, release (3–4 weeks)
+### R9a — Linux hardening and 0.2.0 (2–3 weeks)
+
+The Linux preview ships before Android so the portable core can be hardened
+and packaged without waiting for host integration.
 
 - [x] IPv6 forwarding + NDP (ADR-013); RA/DHCPv6 deferred to v1.1.
-- [ ] Fuzzing: all parsers 72 h clean.
-- [ ] Crash/kill -9 recovery tests; journal replay.
-- [ ] Performance: hit budgets in CORE-SCOPE §12.
-- [ ] 7-day soak with flaps.
-- [ ] Packaging: `.deb`/`.rpm`/AppImage, APK/AAB, systemd unit.
-- [ ] Docs: quickstart, config reference, Android modes, troubleshooting.
+- [ ] Fuzzing: all parsers 72 h clean; CI fuzz smoke.
+- [ ] Crash/kill -9 recovery tests; journal replay; `vrouter doctor --repair`.
+- [ ] Performance: hit budgets in CORE-SCOPE §12 on a named reference host.
+- [ ] 24 h soak with flaps, live NAT edits and service restarts.
+- [ ] Packaging: `.deb`/`.rpm`/AppImage, systemd unit and release workflow.
+- [ ] Docs: quickstart, config reference, troubleshooting, performance report.
+- [ ] v0.2.0 Linux preview.
+
+**Exit:** A fresh package install passes the quickstart; the 24 h soak,
+performance budgets and fuzz campaign are green; `vrouter down` restores the
+host.
+
+### R9b — Android release and v1.0 (1–2 weeks after R7/R8)
+
+- [ ] APK/AAB packaging for Mode A; root build flavor for Mode B.
+- [ ] Android emulator and physical-device release matrix.
+- [ ] Android soak, rollback and network-change verification.
 - [ ] v1.0.0.
+
+Post-v1 hardening: 7-day soak and multi-OEM root coverage.
 
 ### R10 — Optional Linux web admin (post-v1, 2–3 weeks)
 
@@ -252,8 +268,9 @@ or bypass the control socket; v1 CLI/API behavior is unchanged.
 | R6 Firewall | 2–3 | 24 |
 | R7 Android VPN | 3–4 | 28 |
 | R8 Android root | 3–4 | 32 |
-| R9 Hardening/release | 3–4 | 36 |
-| R10 Optional web admin (post-v1) | 2–3 | 38–39 |
+| R9a Linux hardening/0.2.0 | 2–3 | 35 |
+| R9b Android release/v1.0 | 1–2 | 37 |
+| R10 Optional web admin (post-v1) | 2–3 | 39–40 |
 
 ≈8–9 months solo for a polished Linux+Android v1. A usable Linux router
 (R0–R4) lands at ~4 months. Two people compress R1–R6 by ~35%.
