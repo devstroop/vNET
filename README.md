@@ -108,12 +108,14 @@ Contributor rules: `AGENTS.md`.
 ## Implementation Status
 
 - R0-R6: complete, including live NAT add/del and incremental checksum
-  rewrites for the v0.2.0 Linux preview
+  rewrites
+- R9a (current): Linux 0.2.0 preview; IPv6 core complete (ADR-013), with
+  fuzzing, crash recovery, performance, 24 h soak, packaging and release work
+  remaining
 - R7: Linux control socket and C ABI foundation complete; Android
   JNI/VpnService host and proxy NAT pending
 - R8: planned
-- R9: IPv6 core complete (ADR-013); hardening, fuzzing and release work
-  remaining
+- R9b: Android release and v1.0, after R7/R8
 - R10 (post-v1): optional local web admin via HTMX and the Unix-socket API
   (ADR-011)
 

@@ -416,8 +416,9 @@ Wintun/Npcap, IP Helper, WFP/New-NetNat.
 
 ## 9. Performance
 
-Performance targets are deferred to R9. `scripts/perf.sh` is a smoke test only;
-no throughput or latency claim is made before R9.
+Performance targets are measured in R9a for the Linux 0.2.0 preview.
+`scripts/perf.sh` produces the reproducible baseline and release report; no
+throughput or latency claim is made without that report and its host details.
 
 - Batch reads/writes (`recvmmsg`/`sendmmsg`, AF_PACKET rings).
 - Per-core buffer pools; no allocation in `read → forward → write`.
