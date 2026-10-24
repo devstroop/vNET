@@ -79,6 +79,22 @@ expect_no_route() {
         die "route $1 via $2 still present"
     fi
 }
+expect_addr6() {
+    ip -6 -brief addr show "$dev" | grep -q "$1" || die "expected address $1 on $dev"
+}
+expect_no_addr6() {
+    if ip -6 -brief addr show "$dev" | grep -q "$1"; then
+        die "address $1 still present on $dev"
+    fi
+}
+expect_route6() {
+    ip -6 route show "$1" | grep -q "$2" || die "expected IPv6 route $1 via $2"
+}
+expect_no_route6() {
+    if ip -6 route show "$1" | grep -q "$2"; then
+        die "IPv6 route $1 via $2 still present"
+    fi
+}
 expect_link() {
     local state
     state="$(ip -brief link show "$dev" | awk '{print $2}')"
@@ -103,13 +119,22 @@ expect_route 10.98.0.0/24 "10.99.0.2"
 "$BIN/vrouter" route del 10.98.0.0/24 via 10.99.0.2 dev "$dev" metric 50 -c "$CFG"
 expect_no_route 10.98.0.0/24 "10.99.0.2"
 
+log "IPv6 address and route"
+"$BIN/vrouter" iface set "$dev" 2001:db8:99::1/64 -c "$CFG"
+expect_addr6 2001:db8:99::1/64
+"$BIN/vrouter" route add 2001:db8:98::/48 via 2001:db8:99::2 dev "$dev" metric 50 -c "$CFG"
+expect_route6 2001:db8:98::/48 "2001:db8:99::2"
+
 log "journal contents"
 "$BIN/vrouter" journal -c "$CFG" | grep -q '"route_del"' || die "journal missing route_del"
+"$BIN/vrouter" journal -c "$CFG" | grep -q '2001:db8:98::/48' || die "journal missing IPv6 route"
 
 log "rollback"
 "$BIN/vrouter" down -c "$CFG"
 expect_no_addr 10.99.0.1/24
 expect_no_route 10.98.0.0/24 "10.99.0.2"
+expect_no_addr6 2001:db8:99::1/64
+expect_no_route6 2001:db8:98::/48 "2001:db8:99::2"
 expect_link UP
 [ ! -f "$VROUTER_RUN_DIR/journal-test.journal" ] || die "journal not cleared"
 "$BIN/vrouter" down -c "$CFG" | grep -q "no journaled state" || die "second down not a no-op"

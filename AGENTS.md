@@ -32,6 +32,7 @@ zig build static-lib -Dtarget=aarch64-linux-android
 bash scripts/test_netns.sh     # Linux L2/hotplug topology tests
 bash scripts/test_route.sh     # IPv4 forwarding (ping + TCP)
 bash scripts/test_tun.sh       # TUN ingress/egress (ICMP + TCP)
+bash scripts/test_ipv6.sh      # IPv6 forwarding/NDP (ping + TCP)
 bash scripts/test_journal.sh   # iface/route journal + vrouter down
 bash scripts/nat_matrix.sh     # NAT/port-forward matrix (R3+)
 bash scripts/test_firewall.sh  # ordered rules/default drop (R6)
@@ -42,7 +43,7 @@ bash scripts/perf.sh           # throughput smoke (R9)
 
 Always run `zig build test`. For port/forwarding changes, also run
 `scripts/test_netns.sh` and the relevant `scripts/test_route.sh` /
-`scripts/test_tun.sh`.
+`scripts/test_tun.sh` / `scripts/test_ipv6.sh`.
 
 ## Non-negotiable rules
 
@@ -112,6 +113,7 @@ Always run `zig build test`. For port/forwarding changes, also run
 
 - New parser: round-trip + malformed-input fuzz target.
 - New forwarding behavior: golden packet vectors + the relevant netns scripts.
+- IPv6 change: run `scripts/test_ipv6.sh` (NDP, ping6, TCP checksum repair).
 - NAT change: run `scripts/nat_matrix.sh` (SNAT, DNAT, hairpin, ICMP,
   fragments) and attach results.
 - New host mutation: journal inverse + rollback test.

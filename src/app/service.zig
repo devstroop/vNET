@@ -227,11 +227,13 @@ pub fn run(
         logger.info("control socket={s}", .{control_path.?});
     }
 
-    logger.info("started instance={s} ports={d} local={d} routes={d}", .{
+    logger.info("started instance={s} ports={d} local={d} local6={d} routes={d} routes6={d}", .{
         cfg.instance,
         manager.count(),
         forwarder.local.items.len,
+        forwarder.local6.items.len,
         forwarder.fib.count(),
+        forwarder.fib6.count(),
     });
 
     if (options.runtime) |runtime| {
@@ -382,6 +384,21 @@ pub fn run(
             forwarder.counters.stp_invalid,
         },
     );
+    logger.info(
+        "ipv6 forwarded={d} local={d} drop={d} ndp={d}/{d}/{d}/{d}/{d} icmpv6={d}/{d}",
+        .{
+            forwarder.counters.ipv6_forwarded,
+            forwarder.counters.ipv6_local_delivered,
+            forwarder.counters.ipv6_dropped,
+            forwarder.counters.ndp_requests,
+            forwarder.counters.ndp_advertisements,
+            forwarder.counters.ndp_learned,
+            forwarder.counters.ndp_rate_limited,
+            forwarder.counters.ndp_dropped,
+            forwarder.counters.icmpv6_errors,
+            forwarder.counters.icmpv6_echoes,
+        },
+    );
 }
 
 fn nowMs(io: std.Io) i64 {
@@ -429,6 +446,16 @@ fn buildSnapshot(
             .stp_bpdus_tx = forwarder.counters.stp_bpdus_tx,
             .stp_filtered = forwarder.counters.stp_filtered,
             .stp_invalid = forwarder.counters.stp_invalid,
+            .ipv6_forwarded = forwarder.counters.ipv6_forwarded,
+            .ipv6_local_delivered = forwarder.counters.ipv6_local_delivered,
+            .ipv6_dropped = forwarder.counters.ipv6_dropped,
+            .ndp_requests = forwarder.counters.ndp_requests,
+            .ndp_advertisements = forwarder.counters.ndp_advertisements,
+            .ndp_learned = forwarder.counters.ndp_learned,
+            .ndp_rate_limited = forwarder.counters.ndp_rate_limited,
+            .ndp_dropped = forwarder.counters.ndp_dropped,
+            .icmpv6_errors = forwarder.counters.icmpv6_errors,
+            .icmpv6_echoes = forwarder.counters.icmpv6_echoes,
         },
     };
 
@@ -505,6 +532,7 @@ fn saveFirewallCounters(
         .icmp_rate_limited = forwarder.counters.icmp_rate_limited,
         .arp_rate_limited = forwarder.counters.arp_rate_limited,
         .dhcp_rate_limited = forwarder.counters.dhcp_rate_limited,
+        .ndp_rate_limited = forwarder.counters.ndp_rate_limited,
     });
 }
 

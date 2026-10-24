@@ -44,7 +44,7 @@ const config_keys = [_][]const u8{
 const log_keys = [_][]const u8{ "level", "format" };
 const port_keys = [_][]const u8{ "kind", "device", "create", "mtu", "pvid", "tagged", "storm_control" };
 const bridge_keys = [_][]const u8{ "ports", "stp", "vlan_aware", "offload" };
-const interface_keys = [_][]const u8{ "bridge", "port", "address", "vlan" };
+const interface_keys = [_][]const u8{ "bridge", "port", "address", "addresses", "vlan" };
 const route_keys = [_][]const u8{ "dst", "via", "dev", "metric", "table" };
 const nat_keys = [_][]const u8{ "masquerade", "port_forward" };
 const masquerade_keys = [_][]const u8{"out"};
@@ -58,9 +58,9 @@ const dns_keys = [_][]const u8{ "upstreams", "cache", "listen", "max_entries", "
 const firewall_keys = [_][]const u8{
     "default_in", "default_forward", "default_out", "rp_filter", "rate_limit", "rules",
 };
-const firewall_rate_keys = [_][]const u8{ "icmp", "arp", "dhcp" };
+const firewall_rate_keys = [_][]const u8{ "icmp", "arp", "dhcp", "ndp" };
 const firewall_rule_keys = [_][]const u8{
-    "action", "proto", "src", "dst", "sport", "dport", "iif", "oif", "ct_state",
+    "action", "family", "proto", "src", "dst", "sport", "dport", "iif", "oif", "ct_state",
 };
 
 fn parseRoot(a: std.mem.Allocator, value: std.json.Value) ConfigError!schema.Config {
@@ -171,18 +171,19 @@ fn parseInterfaces(a: std.mem.Allocator, value: *const std.json.Value) ConfigErr
     while (it.next()) |entry| {
         const name = try a.dupe(u8, entry.key_ptr.*);
         if (name.len == 0) return error.InvalidValue;
-        try out.put(a, name, try parseInterface(entry.value_ptr));
+        try out.put(a, name, try parseInterface(a, entry.value_ptr));
     }
     return out;
 }
 
-fn parseInterface(value: *const std.json.Value) ConfigError!schema.InterfaceConfig {
+fn parseInterface(a: std.mem.Allocator, value: *const std.json.Value) ConfigError!schema.InterfaceConfig {
     const obj = try asObject(value);
     try onlyKeys(obj, &interface_keys);
     return .{
         .bridge = try optString(obj, "bridge"),
         .port = try optString(obj, "port"),
         .address = try optString(obj, "address"),
+        .addresses = if (field(obj, "addresses")) |v| try parseStringArray(a, v) else &.{},
         .vlan = if (field(obj, "vlan")) |v| try asInt(u16, v) else null,
     };
 }
@@ -342,6 +343,7 @@ fn parseFirewallRate(value: *const std.json.Value) ConfigError!schema.FirewallRa
         .icmp = try optInt(u32, obj, "icmp", default.icmp),
         .arp = try optInt(u32, obj, "arp", default.arp),
         .dhcp = try optInt(u32, obj, "dhcp", default.dhcp),
+        .ndp = try optInt(u32, obj, "ndp", default.ndp),
     };
 }
 
@@ -350,6 +352,7 @@ fn parseFirewallRule(a: std.mem.Allocator, value: *const std.json.Value) ConfigE
     try onlyKeys(obj, &firewall_rule_keys);
     return .{
         .action = try reqEnum(schema.FirewallAction, obj, "action"),
+        .family = try optEnum(schema.FirewallFamily, obj, "family", .ipv4),
         .proto = if (field(obj, "proto")) |v| blk: {
             const s = switch (v.*) {
                 .string => |x| x,
@@ -625,6 +628,32 @@ test "parses firewall rate limits and rejects unknown keys" {
         \\  "firewall": { "rate_limit": { "dns": 10 } } }
     ;
     try std.testing.expectError(error.UnknownField, parse(std.testing.allocator, bad));
+}
+
+test "parses IPv6 interfaces, routes, firewall families and NDP limits" {
+    const input =
+        \\{ "version": 1, "instance": "x",
+        \\  "ports": { "p": { "kind": "l3", "device": "tun0", "create": "tun" } },
+        \\  "interfaces": { "lan0": {
+        \\    "port": "p",
+        \\    "addresses": ["2001:db8:1::1/64", "10.1.0.1/24"] } },
+        \\  "routes": [ { "dst": "2001:db8:2::/64", "dev": "lan0" } ],
+        \\  "firewall": {
+        \\    "rate_limit": { "ndp": 0 },
+        \\    "rules": [
+        \\      { "action": "accept", "family": "ipv6", "proto": "icmpv6",
+        \\        "src": "2001:db8:1::/64" }
+        \\    ] } }
+    ;
+    var parsed = try parse(std.testing.allocator, input);
+    defer parsed.deinit();
+    const cfg = &parsed.config;
+    try std.testing.expectEqual(@as(usize, 2), cfg.interfaces.get("lan0").?.addresses.len);
+    try std.testing.expectEqualStrings("2001:db8:1::1/64", cfg.interfaces.get("lan0").?.addresses[0]);
+    try std.testing.expectEqual(@as(usize, 1), cfg.routes.len);
+    try std.testing.expectEqual(@as(u32, 0), cfg.firewall.rate_limit.ndp);
+    try std.testing.expectEqual(schema.FirewallFamily.ipv6, cfg.firewall.rules[0].family);
+    try std.testing.expectEqual(schema.Proto.icmpv6, cfg.firewall.rules[0].proto.?);
 }
 
 test "rejects invalid firewall values" {

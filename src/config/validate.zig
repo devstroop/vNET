@@ -39,8 +39,28 @@ fn validateFirewall(cfg: *const schema.Config) ConfigError!void {
 
     if (cfg.firewall.rules.len > 4096) return error.InvalidValue;
     for (cfg.firewall.rules) |rule| {
-        if (rule.src) |src| _ = types.Prefix4.parse(src) catch return error.InvalidValue;
-        if (rule.dst) |dst| _ = types.Prefix4.parse(dst) catch return error.InvalidValue;
+        var src_family: ?types.IpFamily = null;
+        var dst_family: ?types.IpFamily = null;
+        if (rule.src) |src| {
+            const prefix = types.IpPrefix.parse(src) catch return error.InvalidValue;
+            if (!firewallFamilyAllows(rule.family, prefix.family())) return error.InvalidValue;
+            src_family = prefix.family();
+        }
+        if (rule.dst) |dst| {
+            const prefix = types.IpPrefix.parse(dst) catch return error.InvalidValue;
+            if (!firewallFamilyAllows(rule.family, prefix.family())) return error.InvalidValue;
+            dst_family = prefix.family();
+        }
+        if (src_family != null and dst_family != null and src_family.? != dst_family.?) {
+            return error.InvalidValue;
+        }
+        if (rule.proto) |proto| {
+            switch (proto) {
+                .icmp => if (rule.family == .ipv6) return error.InvalidValue,
+                .icmpv6 => if (rule.family == .ipv4) return error.InvalidValue,
+                .tcp, .udp => {},
+            }
+        }
         if (rule.sport != null or rule.dport != null) {
             if (rule.proto != .tcp and rule.proto != .udp) return error.InvalidValue;
         }
@@ -48,12 +68,21 @@ fn validateFirewall(cfg: *const schema.Config) ConfigError!void {
         if (rule.dport) |port| if (port == 0) return error.InvalidValue;
         if (rule.iif) |name| try validateFirewallIface(cfg, name);
         if (rule.oif) |name| try validateFirewallIface(cfg, name);
+        if (rule.ct_state.len != 0 and rule.family != .ipv4) return error.InvalidValue;
         for (rule.ct_state, 0..) |state, i| {
             for (rule.ct_state[0..i]) |seen| {
                 if (seen == state) return error.InvalidValue;
             }
         }
     }
+}
+
+fn firewallFamilyAllows(rule: schema.FirewallFamily, actual: types.IpFamily) bool {
+    return switch (rule) {
+        .any => true,
+        .ipv4 => actual == .ipv4,
+        .ipv6 => actual == .ipv6,
+    };
 }
 
 fn validateFirewallIface(cfg: *const schema.Config, name: []const u8) ConfigError!void {
@@ -201,19 +230,41 @@ fn validateInterfaces(cfg: *const schema.Config) ConfigError!void {
             if (portInAnyBridge(cfg, port)) return error.InvalidValue;
             if (itf.vlan != null) return error.InvalidValue;
         }
+        var has_ipv6 = false;
         if (itf.address) |address| {
             if (!std.mem.eql(u8, address, "dhcp")) {
                 _ = types.Prefix4.parse(address) catch return error.InvalidValue;
             }
+        }
+        for (itf.addresses) |address| {
+            if (std.mem.eql(u8, address, "dhcp")) return error.InvalidValue;
+            const prefix = types.IpPrefix.parse(address) catch return error.InvalidValue;
+            if (prefix.family() == .ipv6) has_ipv6 = true;
+        }
+        if (has_ipv6) try validateIpv6Mtu(cfg, itf);
+    }
+}
+
+fn validateIpv6Mtu(cfg: *const schema.Config, itf: schema.InterfaceConfig) ConfigError!void {
+    if (itf.port) |port_name| {
+        const port = cfg.ports.getPtr(port_name) orelse return error.UndefinedReference;
+        if (port.mtu) |mtu| if (mtu < 1280) return error.InvalidValue;
+    }
+    if (itf.bridge) |bridge_name| {
+        const bridge = cfg.bridges.getPtr(bridge_name) orelse return error.UndefinedReference;
+        for (bridge.ports) |port_name| {
+            const port = cfg.ports.getPtr(port_name) orelse return error.UndefinedReference;
+            if (port.mtu) |mtu| if (mtu < 1280) return error.InvalidValue;
         }
     }
 }
 
 fn validateRoutes(cfg: *const schema.Config) ConfigError!void {
     for (cfg.routes) |route| {
-        _ = types.Prefix4.parse(route.dst) catch return error.InvalidValue;
+        const dst = types.IpPrefix.parse(route.dst) catch return error.InvalidValue;
         if (route.via) |via| {
-            _ = types.Ipv4.parse(via) catch return error.InvalidValue;
+            const next_hop = types.IpAddr.parse(via) catch return error.InvalidValue;
+            if (next_hop.family() != dst.family()) return error.InvalidValue;
         }
         const dev = route.dev orelse return error.InvalidValue;
         if (!cfg.ports.contains(dev) and !cfg.interfaces.contains(dev)) {
@@ -221,6 +272,13 @@ fn validateRoutes(cfg: *const schema.Config) ConfigError!void {
         }
         if (cfg.ports.contains(dev) and portInAnyBridge(cfg, dev)) {
             return error.InvalidValue;
+        }
+        if (dst.family() == .ipv6) {
+            if (cfg.ports.getPtr(dev)) |port| {
+                if (port.mtu) |mtu| if (mtu < 1280) return error.InvalidValue;
+            } else if (cfg.interfaces.getPtr(dev)) |itf| {
+                try validateIpv6Mtu(cfg, itf.*);
+            }
         }
     }
 }
@@ -239,7 +297,7 @@ fn validateNat(cfg: *const schema.Config) ConfigError!void {
     }
 
     for (cfg.nat.port_forward) |f| {
-        if (f.proto == .icmp) return error.InvalidValue;
+        if (f.proto != .tcp and f.proto != .udp) return error.InvalidValue;
         if (f.ext_port == 0) return error.InvalidValue;
         const to = types.parseIpPort(f.to) catch return error.InvalidValue;
         if (to.ip.isUnspecified() or to.ip.isMulticast() or
@@ -729,6 +787,109 @@ test "accepts valid firewall rules" {
     var parsed = try @import("parse.zig").parse(std.testing.allocator, input);
     defer parsed.deinit();
     try validate(&parsed.config);
+}
+
+test "accepts IPv6 interfaces and routes" {
+    const input =
+        \\{ "version": 1, "instance": "x",
+        \\  "ports": { "p": { "kind": "l3", "device": "tun0", "create": "tun" } },
+        \\  "interfaces": { "lan0": {
+        \\    "port": "p",
+        \\    "addresses": ["2001:db8:1::1/64"] } },
+        \\  "routes": [
+        \\    { "dst": "2001:db8:2::/64", "dev": "lan0" },
+        \\    { "dst": "2001:db8:3::/64", "via": "2001:db8:1::2", "dev": "lan0" }
+        \\  ] }
+    ;
+    var parsed = try @import("parse.zig").parse(std.testing.allocator, input);
+    defer parsed.deinit();
+    try validate(&parsed.config);
+}
+
+test "rejects IPv6 configuration with an undersized MTU" {
+    const input =
+        \\{ "version": 1, "instance": "x",
+        \\  "ports": { "p": { "kind": "l3", "device": "tun0", "create": "tun", "mtu": 1000 } },
+        \\  "interfaces": { "lan0": {
+        \\    "port": "p",
+        \\    "addresses": ["2001:db8:1::1/64"] } } }
+    ;
+    var parsed = try @import("parse.zig").parse(std.testing.allocator, input);
+    defer parsed.deinit();
+    try std.testing.expectError(error.InvalidValue, validate(&parsed.config));
+}
+
+test "rejects IPv6 routes on an undersized MTU" {
+    const input =
+        \\{ "version": 1, "instance": "x",
+        \\  "ports": { "p": { "kind": "l3", "device": "tun0", "create": "tun", "mtu": 1000 } },
+        \\  "routes": [ { "dst": "2001:db8::/64", "dev": "p" } ] }
+    ;
+    var parsed = try @import("parse.zig").parse(std.testing.allocator, input);
+    defer parsed.deinit();
+    try std.testing.expectError(error.InvalidValue, validate(&parsed.config));
+}
+
+test "rejects IPv6 routes with an IPv4 next hop" {
+    const input =
+        \\{ "version": 1, "instance": "x",
+        \\  "ports": { "p": { "kind": "l3", "device": "tun0", "create": "tun" } },
+        \\  "routes": [ { "dst": "2001:db8::/64", "via": "10.0.0.1", "dev": "p" } ] }
+    ;
+    var parsed = try @import("parse.zig").parse(std.testing.allocator, input);
+    defer parsed.deinit();
+    try std.testing.expectError(error.InvalidValue, validate(&parsed.config));
+}
+
+test "validates firewall family against addresses and protocols" {
+    const valid =
+        \\{ "version": 1, "instance": "x",
+        \\  "firewall": { "rules": [
+        \\    { "action": "accept", "family": "ipv6", "proto": "icmpv6" },
+        \\    { "action": "accept", "family": "any", "proto": "tcp",
+        \\      "src": "2001:db8::/32", "dport": 443 }
+        \\  ] } }
+    ;
+    var parsed_valid = try @import("parse.zig").parse(std.testing.allocator, valid);
+    defer parsed_valid.deinit();
+    try validate(&parsed_valid.config);
+
+    const bad_address =
+        \\{ "version": 1, "instance": "x",
+        \\  "firewall": { "rules": [
+        \\    { "action": "drop", "family": "ipv4", "src": "2001:db8::/32" } ] } }
+    ;
+    var parsed_address = try @import("parse.zig").parse(std.testing.allocator, bad_address);
+    defer parsed_address.deinit();
+    try std.testing.expectError(error.InvalidValue, validate(&parsed_address.config));
+
+    const mixed_families =
+        \\{ "version": 1, "instance": "x",
+        \\  "firewall": { "rules": [
+        \\    { "action": "drop", "family": "any",
+        \\      "src": "2001:db8::/32", "dst": "10.0.0.0/8" } ] } }
+    ;
+    var parsed_mixed = try @import("parse.zig").parse(std.testing.allocator, mixed_families);
+    defer parsed_mixed.deinit();
+    try std.testing.expectError(error.InvalidValue, validate(&parsed_mixed.config));
+
+    const bad_ct =
+        \\{ "version": 1, "instance": "x",
+        \\  "firewall": { "rules": [
+        \\    { "action": "accept", "family": "ipv6", "ct_state": "new" } ] } }
+    ;
+    var parsed_ct = try @import("parse.zig").parse(std.testing.allocator, bad_ct);
+    defer parsed_ct.deinit();
+    try std.testing.expectError(error.InvalidValue, validate(&parsed_ct.config));
+
+    const bad_proto =
+        \\{ "version": 1, "instance": "x",
+        \\  "firewall": { "rules": [
+        \\    { "action": "accept", "family": "ipv4", "proto": "icmpv6" } ] } }
+    ;
+    var parsed_proto = try @import("parse.zig").parse(std.testing.allocator, bad_proto);
+    defer parsed_proto.deinit();
+    try std.testing.expectError(error.InvalidValue, validate(&parsed_proto.config));
 }
 
 test "rejects invalid firewall rules" {

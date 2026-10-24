@@ -193,15 +193,17 @@ Per bridge/port: rx/tx frames, bytes, flooded, learned, aged, drops
 - Route sources: connected, static, DHCP/client, kernel (import mode).
 - Policy: source-based rules (`from`, `iif`, `mark`) evaluated before the FIB.
 - TTL / hop-limit decrement; drop if 0/1 and send ICMP Time Exceeded.
-- ICMP: destination unreachable, fragmentation needed (with PMTU), echo
-  reply, parameter problem.
+- ICMP/ICMPv6: destination unreachable, time exceeded, fragmentation
+  needed/packet too big (with PMTU) and echo reply.
 - No router-on-a-stick special case needed; SVIs are just interfaces.
 
 ### 4.2 Neighbor discovery
 
 - ARP (IPv4): cache with reachable/stale/probe states, `arp_accept`,
   proxy ARP, gratuitous ARP on address/port change.
-- NDP (IPv6): neighbor cache, router/neighbor advertisements (v1.1).
+- NDP (IPv6): neighbor cache, solicited-node multicast, neighbor
+  solicitation/advertisement, bounded pending queue. Router advertisements are
+  v1.1 (ADR-013).
 - Static neighbors for constrained links.
 - Neighbor table exposed via status and flushed on port loss.
 
@@ -210,7 +212,10 @@ Per bridge/port: rx/tx frames, bytes, flooded, learned, aged, drops
 - Forward fragments without reassembly by default.
 - MSS clamping on TCP SYN/SYN-ACK when `mtu.clamp = true` (recommended).
 - Generate ICMP Fragmentation Needed with the correct next-hop MTU.
+- Never fragment IPv6 in the router; generate ICMPv6 Packet Too Big where
+  possible and drop + count otherwise.
 - Never emit a frame larger than the egress MTU; drop + count otherwise.
+- An interface with an IPv6 address or route requires MTU >= 1280.
 - Validated MTUs are capped at 1600 bytes by the current 2048-byte userspace
   frame buffers; jumbo-frame configs are rejected instead of silently
   truncating.
@@ -219,8 +224,9 @@ Per bridge/port: rx/tx frames, bytes, flooded, learned, aged, drops
 ### 4.4 Multicast / broadcast
 
 - IPv4 broadcast → L2 broadcast on the egress bridge.
-- IPv6 multicast → mapped multicast MAC.
-- IGMP/MLD snooping: out of scope v1; flood multicast.
+- IPv6 multicast: NDP/ICMPv6 control to the mapped multicast MAC; general
+  multicast routing and MLD snooping are v1.1.
+- IGMP snooping: out of scope v1; IPv4 multicast is flooded.
 
 ### 4.5 Interfaces (logical)
 
@@ -228,7 +234,7 @@ Per bridge/port: rx/tx frames, bytes, flooded, learned, aged, drops
 - `vlan.<parent>.<id>` for routed VLANs without a bridge — v1.1.
 - Loopback/link-local handling (127.0.0.0/8, ::1, fe80::/10).
 
-### 4.6 R2 implementation notes (current)
+### 4.6 Implementation notes (current)
 
 - Static interface addresses create connected routes; static routes use `via`
   and `dev`.
@@ -246,8 +252,16 @@ Per bridge/port: rx/tx frames, bytes, flooded, learned, aged, drops
   On a neighbor miss, up to 32 packets are queued for 1 s and flushed when the
   ARP reply arrives; overflow/expiry drops are counted. Proxy ARP and periodic
   neighbor refresh are not enabled yet.
-- TUN/L3 ports carry bare IPv4 in both directions. Local echo and ICMP errors
-  are written back as bare IP; TUN ingress can be routed to L2 or TUN egress.
+- TUN/L3 ports carry bare IPv4 or IPv6 in both directions. Local echo and ICMP
+  errors are written back as bare IP; TUN ingress can be routed to L2 or TUN
+  egress.
+- IPv6 neighbors are learned from NS/NA and unsolicited NAs. On a miss, up to
+  32 packets are queued for 1 s; incoming NDP messages are bounded by
+  `firewall.rate_limit.ndp` and generated requests are limited per unresolved
+  target.
+- IPv6 forwarding repairs TCP/UDP checksums, enforces the hop limit and
+  supports IPv6 static/connected routes. There is no IPv6 conntrack or NAT in
+  v1.0.
 - `vrouter iface`/`vrouter route` mutations are journaled under `$VROUTER_RUN_DIR` and
   restored by `vrouter down` (§9.4).
 
@@ -343,10 +357,11 @@ preservation across restarts.
 
 ### 6.1 Rules
 
-Ordered, first-match. Implemented match fields: `iif`, `oif` (port, interface
-or bridge name), `src`, `dst`, `proto`, `sport`, `dport`, `ct_state`.
-Implementing actions: `accept`, `drop`, `reject` (ICMP admin-prohibited).
-`mark`, `dscp`, `log`, and NAT actions remain future work.
+Ordered, first-match. Implemented match fields: `family` (`ipv4` default,
+`ipv6`, `any`), `iif`, `oif` (port, interface or bridge name), `src`, `dst`,
+`proto` (`tcp`, `udp`, `icmp`, `icmpv6`), `sport`, `dport`, `ct_state`
+(IPv4 only). Implementing actions: `accept`, `drop`, `reject` (ICMP/ICMPv6
+admin-prohibited). `mark`, `dscp`, `log`, and NAT actions remain future work.
 
 - Default policy: `inbound: drop`, `forward: drop`, `outbound: accept`
   (configurable; this is a router, not a transparent bridge). The default
@@ -360,12 +375,12 @@ Implementing actions: `accept`, `drop`, `reject` (ICMP admin-prohibited).
   dropped.
 - Conntrack integration: a conntrack match accepts established/related flows
   when no rule matches; rules may still target them by `ct_state`.
-- Stateful by default for TCP/UDP; stateless option per rule is not yet
-  exposed in config.
+- Stateful by default for IPv4 TCP/UDP; IPv6 rules are stateless and reject
+  `ct_state`. A per-rule stateless option is not yet exposed in config.
 - Control-plane rate limits (`firewall.rate_limit`) are token buckets, one
-  second of burst: `icmp` for generated ICMP errors, `arp` for ARP frames and
-  `dhcp` for DHCP server requests. `0` disables a limit; excess packets are
-  dropped and counted.
+  second of burst: `icmp` for generated ICMP errors, `arp` for ARP frames,
+  `ndp` for NDP messages and `dhcp` for DHCP server requests. `0` disables a
+  limit; excess packets are dropped and counted.
 - `vrouter firewall test` evaluates a synthetic packet against the ordered rules
   offline (same compiler as the datapath) and prints the match.
 - `vrouterd` rewrites `<run>/<instance>.firewall.json` atomically every 5 s and
@@ -443,11 +458,14 @@ machine-checked configs live in `examples/`):
     "lan-br": { "ports": ["lan"], "vlan_aware": true, "stp": true }
   },
   "interfaces": {
-    "lan0": { "bridge": "lan-br", "address": "10.10.0.1/24", "vlan": 10 },
-    "wan0": { "port": "uplink", "address": "dhcp" }
+    "lan0": { "bridge": "lan-br", "address": "10.10.0.1/24", "vlan": 10,
+              "addresses": ["2001:db8:10::1/64", "10.10.1.1/24"] },
+    "wan0": { "port": "uplink", "address": "dhcp",
+              "addresses": ["2001:db8:1::2/64"] }
   },
   "routes": [
-    { "dst": "0.0.0.0/0", "via": "192.168.1.1", "dev": "wan0" }
+    { "dst": "0.0.0.0/0", "via": "192.168.1.1", "dev": "wan0" },
+    { "dst": "2001:db8:20::/48", "via": "2001:db8:1::1", "dev": "wan0" }
   ],
   "nat": {
     "masquerade": [{ "out": "wan0" }],
@@ -477,11 +495,13 @@ machine-checked configs live in `examples/`):
     "default_in": "drop",
     "default_forward": "drop",
     "rp_filter": true,
-    "rate_limit": { "icmp": 100, "arp": 512, "dhcp": 100 },
+    "rate_limit": { "icmp": 100, "arp": 512, "dhcp": 100, "ndp": 256 },
     "rules": [
       { "action": "accept", "proto": "tcp", "iif": "lan0", "oif": "wan0",
         "src": "10.10.0.0/24", "dport": 443, "ct_state": "new" },
-      { "action": "drop", "proto": "icmp", "src": "10.10.0.0/24" }
+      { "action": "drop", "proto": "icmp", "src": "10.10.0.0/24" },
+      { "action": "accept", "family": "ipv6", "proto": "icmpv6",
+        "src": "2001:db8:10::/64" }
     ]
   }
 }
@@ -498,15 +518,21 @@ Rules for config:
 - `bridges.<name>.offload = "kernel"` enables the Linux kernel bridge backend;
   see §3.3. The backend is Linux-only; startup fails rather than silently
   falling back to userspace.
+- `interfaces.<name>.address` remains IPv4 CIDR or `"dhcp"`;
+  `interfaces.<name>.addresses` adds more IPv4 CIDRs and IPv6 CIDRs for a
+  dual-stack interface. `"dhcp"` is invalid in `addresses`.
+- `routes[].dst` and `via` are family-checked; an IPv6 destination requires an
+  IPv6 next hop (or `dev` only). IPv6-enabled ports need MTU >= 1280.
 - `firewall.rules` is evaluated in order before the default policy. Each rule
-  may match `proto`, `src`/`dst` CIDRs, `sport`/`dport` (TCP/UDP only),
-  `iif`/`oif` (port, interface or bridge name) and `ct_state`, and applies
-  `accept`, `drop` or `reject`. `firewall.rate_limit` sets per-second caps for
-  generated ICMP errors, ARP and DHCP requests (zero disables).
+  may match `family` (`ipv4` default, `ipv6`, `any`), `proto` (`tcp`, `udp`,
+  `icmp`, `icmpv6`), `src`/`dst` CIDRs, `sport`/`dport` (TCP/UDP only),
+  `iif`/`oif` (port, interface or bridge name) and `ct_state` (IPv4 only), and
+  applies `accept`, `drop` or `reject`. `firewall.rate_limit` sets per-second
+  caps for generated ICMP errors, ARP, DHCP and NDP requests (zero disables).
 - Unknown keys are errors (catches typos).
 - Version 1 grows by adding *optional* keys in the milestone that implements
-  them (R4 DHCP/DNS, R5 VLAN/STP, R6 firewall); existing keys never change
-  meaning.
+  them (R4 DHCP/DNS, R5 VLAN/STP, R6 firewall, R9 IPv6); existing keys never
+  change meaning.
 - Validation before any mutation; all-or-nothing apply.
 - `vrouter up` currently validates the config, starts `vrouterd` and waits for the
   control socket; the journaled config diff/apply path remains R7 work. R2
@@ -554,6 +580,7 @@ vrouter dns query example.com
 vrouter firewall list [-c <config>]
 vrouter firewall counters [-c <config>]
 vrouter firewall test --proto tcp --src 10.0.0.2 --dst 1.1.1.1 --dport 443 [--iif lan0] [-c <config>]
+vrouter firewall test --proto icmpv6 --src 2001:db8:1::2 --dst 2001:db8:2::2
 ```
 
 `vrouter down` refuses while the matching daemon is live; stop `vrouterd` first.
@@ -663,6 +690,7 @@ Rules:
 | Userspace bridge | ✅ | ❌ | ✅ |
 | Kernel bridge offload | ✅ | ❌ | ⚠️ (kernel support varies) |
 | IPv4 routing | ✅ | ✅ (on-device) | ✅ |
+| IPv6 routing (core) | ✅ (ADR-013) | ❌ (v1.1) | ❌ (v1.1) |
 | NAT (SNAT/DNAT) | ✅ | ✅ (app traffic) | ✅ |
 | DHCP server | ✅ | ❌* | ✅ |
 | DNS forwarder | ✅ | ✅ | ✅ |
@@ -707,7 +735,9 @@ workers, buffer pools, batch processing, optional AF_XDP (post-v1).
   post-v1, ADR-011).
 - Overlay/P2P/VPN protocols (future uplink port).
 - Dynamic routing protocols.
-- IPv6 RA/DHCPv6 (v1.1), NAT64.
+- IPv6 router advertisements/SLAAC/DHCPv6 (v1.1), NAT66/NAT64, IPv6
+  conntrack and MLD snooping. Linux IPv6 forwarding and NDP are in v1.0
+  (ADR-013).
 - ALGs, captive portal, 802.1X, QoS shaping.
 - macOS/Windows.
 - Clustering/HA.

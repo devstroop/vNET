@@ -1177,11 +1177,19 @@ fn bridgeCommand(init: std.process.Init, args: []const []const u8) !void {
             const iface = iface_entry.value_ptr.*;
             if (iface.bridge) |bridge_name| {
                 if (!std.mem.eql(u8, bridge_name, name)) continue;
-                try print(io, gpa, "  svi {s:<11} vlan={d} address={s}\n", .{
+                try print(io, gpa, "  svi {s:<11} vlan={d} address={s}", .{
                     iface_name,
                     iface.vlan orelse 1,
                     iface.address orelse "-",
                 });
+                if (iface.addresses.len != 0) {
+                    try print(io, gpa, " addresses=", .{});
+                    for (iface.addresses, 0..) |address, address_i| {
+                        if (address_i != 0) try print(io, gpa, ",", .{});
+                        try print(io, gpa, "{s}", .{address});
+                    }
+                }
+                try print(io, gpa, "\n", .{});
             }
         }
     }
@@ -1367,13 +1375,15 @@ fn firewallCommand(init: std.process.Init, args: []const []const u8) !void {
         @tagName(firewall.default_out),
         if (firewall.rp_filter) "on" else "off",
     });
-    try print(io, gpa, "rate-limit: icmp={d}/s arp={d}/s dhcp={d}/s\n", .{
+    try print(io, gpa, "rate-limit: icmp={d}/s arp={d}/s dhcp={d}/s ndp={d}/s\n", .{
         firewall.rate_limit.icmp,
         firewall.rate_limit.arp,
         firewall.rate_limit.dhcp,
+        firewall.rate_limit.ndp,
     });
     for (firewall.rules, 0..) |rule, i| {
         try print(io, gpa, "{d}: {s}", .{ i + 1, @tagName(rule.action) });
+        if (rule.family != .ipv4) try print(io, gpa, " family={s}", .{@tagName(rule.family)});
         if (rule.proto) |proto| try print(io, gpa, " proto={s}", .{@tagName(proto)});
         if (rule.src) |src| try print(io, gpa, " src={s}", .{src});
         if (rule.dst) |dst| try print(io, gpa, " dst={s}", .{dst});
@@ -1431,13 +1441,14 @@ fn firewallCounters(init: std.process.Init, path: []const u8) !void {
     try print(
         io,
         gpa,
-        "policy: dropped={d} spoofed={d} rate-limit={d}/{d}/{d}\n",
+        "policy: dropped={d} spoofed={d} rate-limit={d}/{d}/{d}/{d}\n",
         .{
             value.firewall_dropped,
             value.firewall_spoofed,
             value.icmp_rate_limited,
             value.arp_rate_limited,
             value.dhcp_rate_limited,
+            value.ndp_rate_limited,
         },
     );
 }
@@ -1447,8 +1458,8 @@ fn firewallTest(init: std.process.Init, path: []const u8, args: []const []const 
     const gpa = init.gpa;
 
     var proto: ?u8 = null;
-    var src: ?vrouter.types.Ipv4 = null;
-    var dst: ?vrouter.types.Ipv4 = null;
+    var src: ?vrouter.types.IpAddr = null;
+    var dst: ?vrouter.types.IpAddr = null;
     var sport: ?u16 = null;
     var dport: ?u16 = null;
     var iif: ?[]const u8 = null;
@@ -1474,12 +1485,12 @@ fn firewallTest(init: std.process.Init, path: []const u8, args: []const []const 
                 std.process.exit(2);
             };
         } else if (std.mem.eql(u8, flag, "--src")) {
-            src = vrouter.types.Ipv4.parse(value) catch {
+            src = vrouter.types.IpAddr.parse(value) catch {
                 try printErr(io, gpa, "vrouter: firewall test: invalid source '{s}'\n", .{value});
                 std.process.exit(2);
             };
         } else if (std.mem.eql(u8, flag, "--dst")) {
-            dst = vrouter.types.Ipv4.parse(value) catch {
+            dst = vrouter.types.IpAddr.parse(value) catch {
                 try printErr(io, gpa, "vrouter: firewall test: invalid destination '{s}'\n", .{value});
                 std.process.exit(2);
             };
@@ -1516,6 +1527,14 @@ fn firewallTest(init: std.process.Init, path: []const u8, args: []const []const 
 
     if (proto == null or src == null or dst == null) {
         try printErr(io, gpa, "vrouter: firewall test requires --proto, --src and --dst\n", .{});
+        std.process.exit(2);
+    }
+    if (src.?.family() != dst.?.family()) {
+        try printErr(io, gpa, "vrouter: firewall test: --src and --dst must use the same address family\n", .{});
+        std.process.exit(2);
+    }
+    if (src.?.family() == .ipv6 and state != .new) {
+        try printErr(io, gpa, "vrouter: firewall test: connection state applies to IPv4 only\n", .{});
         std.process.exit(2);
     }
     if ((sport != null or dport != null) and proto != 6 and proto != 17) {
@@ -1560,6 +1579,7 @@ fn parseProto(text: []const u8) ?u8 {
     if (std.mem.eql(u8, text, "tcp")) return 6;
     if (std.mem.eql(u8, text, "udp")) return 17;
     if (std.mem.eql(u8, text, "icmp")) return 1;
+    if (std.mem.eql(u8, text, "icmpv6")) return 58;
     return null;
 }
 
@@ -1757,7 +1777,7 @@ fn usage(io: std.Io) !void {
         \\  vrouter doctor [-c <config>]
         \\  vrouter nat list [-c <config>]
         \\  vrouter conntrack list [--state new|established|closing] [--limit <n>] [-c <config>]
-        \\  vrouter iface set|del <dev> <cidr> [-c <config>]
+        \\  vrouter iface set|del <dev> <cidr|ipv6-cidr> [-c <config>]
         \\  vrouter iface up|down <dev> [-c <config>]
         \\  vrouter route add|del <dst> [via <ip>] dev <dev> [metric <n>] [table <n>] [-c <config>]
         \\  vrouter down [-c <config>]
@@ -1765,7 +1785,7 @@ fn usage(io: std.Io) !void {
         \\  vrouter bridge list [-c <config>]
         \\  vrouter firewall list [-c <config>]
         \\  vrouter firewall counters [-c <config>]
-        \\  vrouter firewall test --proto tcp|udp|icmp --src <ip> --dst <ip> [--sport <n>] [--dport <n>] [--iif <name>] [--oif <name>] [--state new|established|related|invalid] [--hook input|forward|output] [-c <config>]
+        \\  vrouter firewall test --proto tcp|udp|icmp|icmpv6 --src <ip> --dst <ip> [--sport <n>] [--dport <n>] [--iif <name>] [--oif <name>] [--state new|established|related|invalid] [--hook input|forward|output] [-c <config>]
         \\  vrouter selftest l2 <inject> <port-a> <port-b> <recv>
         \\  vrouter selftest tun|tap <name>
         \\  vrouter help

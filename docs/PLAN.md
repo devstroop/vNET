@@ -207,7 +207,7 @@ through vRouter's NAT; uninstall/stop restores tethering.
 
 ### R9 — IPv6, hardening, release (3–4 weeks)
 
-- [ ] IPv6 forwarding + NDP; RA/DHCPv6 (v1.1 cut line if time-boxed).
+- [x] IPv6 forwarding + NDP (ADR-013); RA/DHCPv6 deferred to v1.1.
 - [ ] Fuzzing: all parsers 72 h clean.
 - [ ] Crash/kill -9 recovery tests; journal replay.
 - [ ] Performance: hit budgets in CORE-SCOPE §12.

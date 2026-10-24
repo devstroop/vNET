@@ -32,6 +32,16 @@ pub const Counters = struct {
     stp_bpdus_tx: u64 = 0,
     stp_filtered: u64 = 0,
     stp_invalid: u64 = 0,
+    ipv6_forwarded: u64 = 0,
+    ipv6_local_delivered: u64 = 0,
+    ipv6_dropped: u64 = 0,
+    ndp_requests: u64 = 0,
+    ndp_advertisements: u64 = 0,
+    ndp_learned: u64 = 0,
+    ndp_rate_limited: u64 = 0,
+    ndp_dropped: u64 = 0,
+    icmpv6_errors: u64 = 0,
+    icmpv6_echoes: u64 = 0,
 };
 
 pub const Snat = struct {
