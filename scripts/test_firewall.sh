@@ -79,7 +79,8 @@ cat > "$CFG" <<'JSON'
       { "action": "drop", "proto": "icmp", "src": "10.0.1.2/32" },
       { "action": "accept", "proto": "icmp" },
       { "action": "accept", "proto": "tcp", "dport": 8080, "iif": "lan", "oif": "wan" },
-      { "action": "reject", "proto": "tcp", "dport": 8081 }
+      { "action": "reject", "proto": "tcp", "dport": 8081 },
+      { "action": "accept", "family": "ipv6", "proto": "icmpv6" }
     ]
   }
 }
@@ -95,8 +96,10 @@ echo "$out" | grep -q "rule 4: reject" || die "expected rule 4 reject, got: $out
 ok "ordered match, default and reject"
 
 out="$("$BIN/vrouter" firewall list -c "$CFG")" || die "firewall list failed"
-echo "$out" | grep -q "rate-limit: icmp=100/s arp=512/s dhcp=100/s" ||
+echo "$out" | grep -q "rate-limit: icmp=100/s arp=512/s dhcp=100/s ndp=256/s" ||
     die "firewall list missing rate limits, got: $out"
+echo "$out" | grep -q "5: accept family=ipv6 proto=icmpv6" ||
+    die "firewall list missing IPv6 rule, got: $out"
 
 log "topology"
 ip link set lo up
