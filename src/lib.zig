@@ -15,6 +15,7 @@ pub const config_schema = @import("config/schema.zig");
 pub const config_parse = @import("config/parse.zig");
 pub const config_validate = @import("config/validate.zig");
 pub const config_write = @import("config/write.zig");
+pub const config_store = @import("config/store.zig");
 
 pub const port = @import("port/port.zig");
 pub const memory_port = @import("port/memory.zig");
