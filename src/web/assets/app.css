@@ -137,10 +137,6 @@ h3 { font-size: 1rem; }
   color: var(--sidebar-text); background: rgb(45 212 191 / 0.12);
   border-color: rgb(45 212 191 / 0.18);
 }
-.nav-link.is-active::before {
-  content: ""; width: 6px; height: 6px; margin-right: 9px; border-radius: 50%;
-  background: var(--accent); box-shadow: 0 0 0 4px rgb(45 212 191 / 0.12);
-}
 .sidebar-foot {
   margin-top: auto; display: flex; align-items: center; gap: 8px;
   padding: 10px 12px; border: 1px solid rgb(255 255 255 / 0.08);
