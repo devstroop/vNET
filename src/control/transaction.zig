@@ -334,3 +334,168 @@ fn syncParent(io: std.Io, path: []const u8) !void {
     defer dir.close(io);
     try dir.sync(io);
 }
+
+test "resolvePending commits, audits once, and records restart" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir = try tmp.dir.realPath(std.testing.io, &path_buf);
+    const state_dir = path_buf[0..dir];
+
+    const before = config_store.Revision.compute("before");
+    const after = config_store.Revision.compute("after");
+    const tx: [transaction_hex_len]u8 = @splat('a');
+    const audit_id: [transaction_hex_len]u8 = @splat('b');
+    var affected: config_apply.Affected = .{};
+    affected.add(.ports);
+
+    const entry: Entry = .{
+        .transaction = tx[0..],
+        .audit_id = audit_id[0..],
+        .op = "config.apply",
+        .instance = "test",
+        .revision_before = before.slice(),
+        .revision_after = after.slice(),
+        .affected = affected,
+        .restart_required = true,
+        .actor = .{ .uid = 1000, .pid = 42 },
+        .ts_ms = 1234,
+    };
+    try writePending(std.testing.io, std.testing.allocator, state_dir, entry);
+
+    var pending = (try loadPending(std.testing.io, std.testing.allocator, state_dir)).?;
+    defer pending.deinit();
+    try std.testing.expectEqual(Resolution.committed, try resolvePending(
+        std.testing.io,
+        std.testing.allocator,
+        state_dir,
+        after,
+        &pending,
+    ));
+    try std.testing.expectError(
+        error.FileNotFound,
+        tmp.dir.statFile(std.testing.io, pending_file, .{}),
+    );
+    try std.testing.expect(try restartPending(std.testing.io, std.testing.allocator, state_dir));
+
+    const audit = try tmp.dir.readFileAlloc(std.testing.io, audit_file, std.testing.allocator, .limited(8192));
+    defer std.testing.allocator.free(audit);
+    try std.testing.expect(std.mem.indexOf(u8, audit, "\"transaction\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, audit, "\"restart_required\":true") != null);
+
+    try std.testing.expectEqual(Resolution.committed, try resolvePending(
+        std.testing.io,
+        std.testing.allocator,
+        state_dir,
+        after,
+        &pending,
+    ));
+    const audit_again = try tmp.dir.readFileAlloc(std.testing.io, audit_file, std.testing.allocator, .limited(8192));
+    defer std.testing.allocator.free(audit_again);
+    try std.testing.expectEqualStrings(audit, audit_again);
+
+    try clearRestartPending(std.testing.io, std.testing.allocator, state_dir);
+    try std.testing.expect(!try restartPending(std.testing.io, std.testing.allocator, state_dir));
+}
+
+test "resolvePending marks an uncommitted transaction as rolled back" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir = try tmp.dir.realPath(std.testing.io, &path_buf);
+    const state_dir = path_buf[0..dir];
+
+    const before = config_store.Revision.compute("before");
+    const after = config_store.Revision.compute("after");
+    const tx: [transaction_hex_len]u8 = @splat('c');
+    const audit_id: [transaction_hex_len]u8 = @splat('d');
+    var affected: config_apply.Affected = .{};
+    affected.add(.nat);
+
+    const entry: Entry = .{
+        .transaction = tx[0..],
+        .audit_id = audit_id[0..],
+        .op = "config.apply",
+        .instance = "test",
+        .revision_before = before.slice(),
+        .revision_after = after.slice(),
+        .affected = affected,
+        .restart_required = true,
+        .actor = .{ .uid = 1000, .pid = 43 },
+        .ts_ms = 1235,
+    };
+    try writePending(std.testing.io, std.testing.allocator, state_dir, entry);
+
+    var pending = (try loadPending(std.testing.io, std.testing.allocator, state_dir)).?;
+    defer pending.deinit();
+    try std.testing.expectEqual(Resolution.rolled_back, try resolvePending(
+        std.testing.io,
+        std.testing.allocator,
+        state_dir,
+        before,
+        &pending,
+    ));
+    try std.testing.expectError(
+        error.FileNotFound,
+        tmp.dir.statFile(std.testing.io, pending_file, .{}),
+    );
+    try std.testing.expect(!try restartPending(std.testing.io, std.testing.allocator, state_dir));
+
+    const audit = try tmp.dir.readFileAlloc(std.testing.io, audit_file, std.testing.allocator, .limited(8192));
+    defer std.testing.allocator.free(audit);
+    try std.testing.expect(std.mem.indexOf(u8, audit, "\"restart_required\":false") != null);
+    try std.testing.expect(std.mem.indexOf(u8, audit, "\"affected\":[\"nat\"]") != null);
+}
+
+test "resolvePending rejects a revision that matches neither side" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir = try tmp.dir.realPath(std.testing.io, &path_buf);
+    const state_dir = path_buf[0..dir];
+
+    const before = config_store.Revision.compute("before");
+    const after = config_store.Revision.compute("after");
+    const other = config_store.Revision.compute("other");
+    const tx: [transaction_hex_len]u8 = @splat('e');
+    const audit_id: [transaction_hex_len]u8 = @splat('f');
+
+    const entry: Entry = .{
+        .transaction = tx[0..],
+        .audit_id = audit_id[0..],
+        .op = "config.apply",
+        .instance = "test",
+        .revision_before = before.slice(),
+        .revision_after = after.slice(),
+        .affected = .{},
+        .restart_required = true,
+        .actor = .{ .uid = 1000, .pid = 44 },
+        .ts_ms = 1236,
+    };
+    try writePending(std.testing.io, std.testing.allocator, state_dir, entry);
+
+    var pending = (try loadPending(std.testing.io, std.testing.allocator, state_dir)).?;
+    defer pending.deinit();
+    try std.testing.expectError(error.RevisionMismatch, resolvePending(
+        std.testing.io,
+        std.testing.allocator,
+        state_dir,
+        other,
+        &pending,
+    ));
+    _ = try tmp.dir.statFile(std.testing.io, pending_file, .{});
+}
+
+test "loadPending rejects corrupt transaction records" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir = try tmp.dir.realPath(std.testing.io, &path_buf);
+    const state_dir = path_buf[0..dir];
+
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = pending_file, .data = "{not json" });
+    try std.testing.expectError(
+        error.CorruptPending,
+        loadPending(std.testing.io, std.testing.allocator, state_dir),
+    );
+}
