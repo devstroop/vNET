@@ -8,6 +8,15 @@ All notable changes to vRouter are documented here. The format follows
 
 ### Added
 
+- **Control protocol v3 (ADR-015):** request-versioned envelopes keep v2
+  response shapes byte-compatible while v3 `status` adds `protocol_version`,
+  `config_revision`, `restart_pending`, `config_writable` and
+  `restart_supported`. The daemon owns the config bytes through a revisioned
+  `ConfigStore`, and v3-only `config.get` returns the current document,
+  revision, source path and writability. Config-sized work runs on a dedicated
+  worker, and the client accepts 16 MiB config responses. v3 list reads expose
+  ports, bridges, interfaces, routes, DHCP, DNS and firewall configuration from
+  the current on-disk document.
 - **Read-only web admin preview (post-v1, ADR-011):** opt-in `vrouterweb`
   built with `zig build web`. The Zig process serves server-rendered HTMX 4.0.0
   pages and fragments with embedded assets, plus a same-origin JSON API backed

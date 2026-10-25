@@ -1,7 +1,6 @@
 const std = @import("std");
 const vrouter = @import("vrouter");
 
-const max_config_bytes = 4 * 1024 * 1024;
 const default_config = "/etc/vrouter/vrouter.json";
 
 var stop = std.atomic.Value(bool).init(false);
@@ -41,12 +40,9 @@ fn run(init: std.process.Init) !void {
         return error.InvalidArgument;
     }
 
-    const source = try std.Io.Dir.cwd().readFileAlloc(
-        io,
-        path,
-        gpa,
-        .limited(max_config_bytes),
-    );
+    var store = try vrouter.config_store.Store.open(io, gpa, path);
+    defer store.deinit();
+    const source = try store.readAlloc();
     defer gpa.free(source);
 
     var parsed = try vrouter.config_parse.parse(gpa, source);
@@ -64,6 +60,7 @@ fn run(init: std.process.Init) !void {
     const run_dir = init.environ_map.get("VROUTER_RUN_DIR") orelse "/run/vrouter";
     try vrouter.app_service.run(io, gpa, &parsed.config, &stop, .{
         .state_dir = run_dir,
+        .config_store = &store,
     });
 }
 

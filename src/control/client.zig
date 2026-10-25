@@ -7,7 +7,9 @@ const unix = @import("unix.zig");
 
 const max_request_bytes = 64 * 1024;
 const max_response_bytes = 128 * 1024;
+const max_config_response_bytes: usize = 16 * 1024 * 1024;
 const response_timeout_ms = 5_000;
+const config_response_timeout_ms = 30_000;
 
 pub const Client = struct {
     io: std.Io,
@@ -47,7 +49,7 @@ pub const Client = struct {
     pub fn call(self: *Client, request: protocol.Request) !std.json.Parsed(protocol.Response) {
         var request_buf: [max_request_bytes]u8 = undefined;
         var request_writer: std.Io.Writer = .fixed(&request_buf);
-        try std.json.Stringify.value(request, .{}, &request_writer);
+        try std.json.Stringify.value(request, .{ .emit_null_optional_fields = false }, &request_writer);
         try request_writer.writeByte('\n');
 
         var socket_buf: [4096]u8 = undefined;
@@ -55,13 +57,15 @@ pub const Client = struct {
         try stream_writer.interface.writeAll(request_writer.buffered());
         try stream_writer.interface.flush();
 
-        const response_buf = try self.gpa.alloc(u8, max_response_bytes);
+        const is_config = std.mem.eql(u8, request.op, "config.get");
+        const response_limit: usize = if (is_config) max_config_response_bytes else max_response_bytes;
+        const response_buf = try self.gpa.alloc(u8, response_limit);
         defer self.gpa.free(response_buf);
         const line = (try transport.readLine(
             self.io,
             self.stream.socket.handle,
             response_buf,
-            response_timeout_ms,
+            if (is_config) config_response_timeout_ms else response_timeout_ms,
         )) orelse return error.ConnectionClosed;
 
         return std.json.parseFromSlice(protocol.Response, self.gpa, line, .{

@@ -2,6 +2,7 @@
 
 const std = @import("std");
 const schema = @import("../config/schema.zig");
+const config_store = @import("../config/store.zig");
 const types = @import("../types.zig");
 const log = @import("../log.zig");
 const manager_mod = @import("../port/manager.zig");
@@ -36,8 +37,10 @@ pub const ReadyFn = *const fn (ctx: ?*anyopaque) void;
 
 pub const Options = struct {
     state_dir: ?[]const u8 = "/run/vrouter",
+    config_store: ?*config_store.Store = null,
     allow_host_changes: bool = true,
     enable_monitor: bool = true,
+    restart_supported: bool = false,
     injected: []const manager_mod.InjectedPort = &.{},
     runtime: ?*Runtime = null,
     on_ready: ?ReadyFn = null,
@@ -62,7 +65,10 @@ pub fn run(
     if (options.state_dir) |state_dir| {
         const path = try std.fs.path.join(gpa, &.{ state_dir, "control.sock" });
         control_path = path;
-        control = try control_server.Server.init(io, gpa, path, .{});
+        control = try control_server.Server.init(io, gpa, path, .{
+            .config_store = options.config_store,
+            .restart_supported = options.restart_supported,
+        });
     }
 
     var host: ?control_host.Host = null;
