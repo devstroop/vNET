@@ -299,6 +299,67 @@ pub fn unifiedDiff(
     return out.toOwnedSlice();
 }
 
+pub const restart_ttl_ms: i64 = 5 * 60 * 1000;
+pub const boot_id_len = 16;
+
+pub const RestartTokenState = enum {
+    ok,
+    missing,
+    expired,
+};
+
+/// One outstanding restart token. Tokens are process-local: a successful
+/// daemon start discards them with the process, so a stale token can never
+/// authorize a restart after a reboot.
+pub const RestartToken = struct {
+    active: bool = false,
+    token: [token_hex_len]u8 = undefined,
+    transaction: [64]u8 = undefined,
+    revision_after: config_store.Revision = undefined,
+    boot_id: [boot_id_len]u8 = undefined,
+    expires_ms: i64 = 0,
+
+    pub fn issue(
+        self: *RestartToken,
+        io: std.Io,
+        transaction: [64]u8,
+        revision_after: config_store.Revision,
+        boot_id: [boot_id_len]u8,
+        now_ms: i64,
+    ) ![]const u8 {
+        var raw: [token_hex_len / 2]u8 = undefined;
+        try io.randomSecure(&raw);
+        self.token = std.fmt.bytesToHex(raw, .lower);
+        self.transaction = transaction;
+        self.revision_after = revision_after;
+        self.boot_id = boot_id;
+        self.expires_ms = now_ms + restart_ttl_ms;
+        self.active = true;
+        return self.token[0..];
+    }
+
+    pub fn validate(
+        self: *RestartToken,
+        token: []const u8,
+        boot_id: [boot_id_len]u8,
+        now_ms: i64,
+    ) RestartTokenState {
+        if (!self.active) return .missing;
+        if (now_ms > self.expires_ms) {
+            self.active = false;
+            return .expired;
+        }
+        if (token.len != token_hex_len) return .missing;
+        if (!std.mem.eql(u8, self.token[0..], token)) return .missing;
+        if (!std.mem.eql(u8, self.boot_id[0..], boot_id[0..])) return .missing;
+        return .ok;
+    }
+
+    pub fn clear(self: *RestartToken) void {
+        self.active = false;
+    }
+};
+
 pub const Confirm = struct {
     active: bool = false,
     token: [token_hex_len]u8 = undefined,
@@ -481,6 +542,35 @@ test "analyze reports NAT as live and structural as restart-required" {
     defer ports_change.deinit();
     try std.testing.expect(ports_change.affected.contains(.ports));
     try std.testing.expect(ports_change.restart_required);
+}
+
+test "restart token is boot bound, expiring and one-shot" {
+    var restart: RestartToken = .{};
+    const revision = config_store.Revision.compute("{}");
+    const transaction = [_]u8{'a'} ** 64;
+    const boot_id = [_]u8{7} ** boot_id_len;
+    const token = try restart.issue(
+        std.testing.io,
+        transaction,
+        revision,
+        boot_id,
+        @as(i64, 1_000),
+    );
+    var copy: [token_hex_len]u8 = undefined;
+    @memcpy(&copy, token);
+
+    var wrong_boot = boot_id;
+    wrong_boot[0] = 9;
+    try std.testing.expectEqual(RestartTokenState.missing, restart.validate(&copy, wrong_boot, 1_001));
+    try std.testing.expectEqual(RestartTokenState.ok, restart.validate(&copy, boot_id, 1_001));
+    restart.clear();
+    try std.testing.expectEqual(RestartTokenState.missing, restart.validate(&copy, boot_id, 1_002));
+
+    _ = try restart.issue(std.testing.io, transaction, revision, boot_id, 2_000);
+    try std.testing.expectEqual(
+        RestartTokenState.expired,
+        restart.validate(&copy, boot_id, 2_000 + restart_ttl_ms + 1),
+    );
 }
 
 test "confirm is revision and diff bound and one-shot" {

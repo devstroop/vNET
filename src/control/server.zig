@@ -8,6 +8,7 @@ const config_parse = @import("../config/parse.zig");
 const config_store = @import("../config/store.zig");
 const config_apply = @import("config_apply.zig");
 const transaction = @import("transaction.zig");
+const journal = @import("journal.zig");
 const protocol = @import("protocol.zig");
 const read_model = @import("read_model.zig");
 const state = @import("state.zig");
@@ -23,6 +24,12 @@ const client_timeout_ms = 2_000;
 const default_conntrack_limit = 100;
 const max_apply_error = 256;
 const config_queue_capacity = 4;
+const audit_tail_bytes = 512 * 1024;
+const journal_tail_bytes = 512 * 1024;
+const audit_default_limit = 100;
+const journal_default_limit = 100;
+const audit_max_limit = 500;
+const journal_max_limit = 500;
 
 pub const Options = struct {
     mode: u32 = 0o660,
@@ -82,6 +89,10 @@ pub const Server = struct {
     state_dir: []u8,
     restart_pending: bool = false,
     restart_supported: bool = false,
+    restart_token: config_apply.RestartToken = .{},
+    boot_id: [config_apply.boot_id_len]u8 = undefined,
+    restart_requested: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    stop_requested: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     confirm: config_apply.Confirm = .{},
     idempotency: config_apply.Idempotency = .{},
 
@@ -98,6 +109,8 @@ pub const Server = struct {
         errdefer gpa.free(config_jobs);
         const state_dir = try gpa.dupe(u8, options.state_dir);
         errdefer gpa.free(state_dir);
+        var boot_id: [config_apply.boot_id_len]u8 = undefined;
+        try io.randomSecure(&boot_id);
         const persisted_restart = if (options.state_dir.len != 0)
             transaction.restartPending(io, gpa, options.state_dir) catch false
         else
@@ -155,6 +168,7 @@ pub const Server = struct {
             .state_dir = state_dir,
             .restart_pending = options.restart_pending or persisted_restart,
             .restart_supported = options.restart_supported,
+            .boot_id = boot_id,
         };
     }
 
@@ -241,6 +255,17 @@ pub const Server = struct {
 
     pub fn markStarted(self: *Server) void {
         self.restart_pending = false;
+        self.restart_token.clear();
+        self.restart_requested.store(false, .release);
+        self.stop_requested.store(false, .release);
+    }
+
+    pub fn restartRequested(self: *const Server) bool {
+        return self.restart_requested.load(.acquire);
+    }
+
+    pub fn stopRequested(self: *const Server) bool {
+        return self.stop_requested.load(.acquire);
     }
 
     pub fn publish(self: *Server, snapshot: *const state.Snapshot) void {
@@ -345,6 +370,22 @@ pub const Server = struct {
 
         if (std.mem.eql(u8, parsed.value.op, "nat.apply")) {
             self.handleNatApply(stream, parsed.value, line);
+            return;
+        }
+        if (std.mem.eql(u8, parsed.value.op, "daemon.restart")) {
+            self.handleDaemonRestart(stream, parsed.value, credentials.uid, credentials.pid);
+            return;
+        }
+        if (std.mem.eql(u8, parsed.value.op, "daemon.stop")) {
+            self.handleDaemonStop(stream, parsed.value, credentials.uid, credentials.pid);
+            return;
+        }
+        if (std.mem.eql(u8, parsed.value.op, "audit.list")) {
+            self.handleAuditList(stream, parsed.value);
+            return;
+        }
+        if (std.mem.eql(u8, parsed.value.op, "journal.list")) {
+            self.handleJournalList(stream, parsed.value);
             return;
         }
 
@@ -821,6 +862,8 @@ pub const Server = struct {
                             snapshot.restart_required,
                             snapshot.revision,
                             "",
+                            self.restartSupported(),
+                            self.currentRestartToken(snapshot.transaction[0..]),
                         );
                         return;
                     },
@@ -859,7 +902,18 @@ pub const Server = struct {
         std.crypto.hash.sha2.Sha256.hash(change.proposal.bytes, &proposal_hash, .{});
 
         if (change.affected.count() == 0) {
-            self.sendConfigApplied(stream, request, null, .noop, change.affected, false, config.revision, "");
+            self.sendConfigApplied(
+                stream,
+                request,
+                null,
+                .noop,
+                change.affected,
+                false,
+                config.revision,
+                "",
+                false,
+                null,
+            );
             return;
         }
 
@@ -871,6 +925,8 @@ pub const Server = struct {
             self.sendError(stream, request.id, request.op, "confirm_required", "confirmation is invalid or expired");
             return;
         }
+        // A newer config write supersedes any outstanding restart authority.
+        self.restart_token.clear();
 
         var held = store.lock() catch |err| {
             self.sendError(stream, request.id, request.op, "internal", @errorName(err));
@@ -929,6 +985,20 @@ pub const Server = struct {
             self.restart_pending = true;
             transaction.writeRestartPending(self.io, self.gpa, self.state_dir, entry) catch {};
         }
+        var restart_token_buf: [config_apply.token_hex_len]u8 = undefined;
+        var restart_token_value: ?[]const u8 = null;
+        if (change.restart_required and self.restart_supported) {
+            if (self.restart_token.issue(
+                self.io,
+                transaction_id,
+                next_revision,
+                self.boot_id,
+                now,
+            )) |issued| {
+                @memcpy(&restart_token_buf, issued);
+                restart_token_value = restart_token_buf[0..];
+            } else |_| {}
+        }
         const result: config_apply.Result = if (change.restart_required) .restart_required else .applied;
         self.idempotency.record(
             idempotency_key,
@@ -949,7 +1019,237 @@ pub const Server = struct {
             change.restart_required,
             next_revision,
             "",
+            self.restart_supported,
+            restart_token_value,
         );
+    }
+
+    const Tail = struct {
+        data: []u8,
+        truncated: bool,
+    };
+
+    fn readFileTail(self: *Server, path: []const u8, max_bytes: usize) !?Tail {
+        var file = std.Io.Dir.cwd().openFile(self.io, path, .{}) catch |err| switch (err) {
+            error.FileNotFound => return null,
+            else => return err,
+        };
+        defer file.close(self.io);
+        const stat = try file.stat(self.io);
+        const offset: u64 = if (stat.size > max_bytes) stat.size - max_bytes else 0;
+        const length: usize = @intCast(stat.size - offset);
+        if (length == 0) return .{ .data = try self.gpa.alloc(u8, 0), .truncated = offset != 0 };
+        const data = try self.gpa.alloc(u8, length);
+        errdefer self.gpa.free(data);
+        const got = try file.readPositionalAll(self.io, data, offset);
+        var result = data[0..got];
+        if (offset != 0) {
+            const newline = std.mem.indexOfScalar(u8, result, '\n') orelse {
+                self.gpa.free(data);
+                return .{ .data = try self.gpa.alloc(u8, 0), .truncated = true };
+            };
+            result = result[newline + 1 ..];
+        }
+        if (result.len == data.len) return .{ .data = data, .truncated = offset != 0 };
+        const copy = try self.gpa.dupe(u8, result);
+        self.gpa.free(data);
+        return .{ .data = copy, .truncated = offset != 0 };
+    }
+
+    fn handleAuditList(self: *Server, stream: std.Io.net.Stream, request: protocol.Request) void {
+        var out: std.Io.Writer.Allocating = .init(self.gpa);
+        defer out.deinit();
+        self.writeAuditResponse(&out.writer, request) catch |err| {
+            self.sendError(stream, request.id, request.op, "internal", @errorName(err));
+            return;
+        };
+        self.sendBuffer(stream, out.written());
+    }
+
+    fn writeAuditResponse(self: *Server, writer: *std.Io.Writer, request: protocol.Request) !void {
+        const limit = @min(request.limit orelse audit_default_limit, audit_max_limit);
+        const path = try std.fs.path.join(self.gpa, &.{ self.state_dir, transaction.audit_file });
+        defer self.gpa.free(path);
+        const tail = try self.readFileTail(path, audit_tail_bytes);
+        defer if (tail) |value| self.gpa.free(value.data);
+
+        var entries: std.ArrayListUnmanaged(std.json.Parsed(protocol.AuditEntry)) = .empty;
+        defer {
+            for (entries.items) |*entry| entry.deinit();
+            entries.deinit(self.gpa);
+        }
+        var total: u32 = 0;
+        var malformed: u32 = 0;
+        if (tail) |value| {
+            var lines = std.mem.splitScalar(u8, value.data, '\n');
+            while (lines.next()) |line| {
+                if (line.len == 0) continue;
+                total += 1;
+                const parsed = std.json.parseFromSlice(protocol.AuditEntry, self.gpa, line, .{
+                    .ignore_unknown_fields = true,
+                }) catch {
+                    malformed += 1;
+                    continue;
+                };
+                entries.append(self.gpa, parsed) catch {
+                    var failed = parsed;
+                    failed.deinit();
+                    return error.OutOfMemory;
+                };
+            }
+        }
+        const first = if (entries.items.len > limit) entries.items.len - limit else 0;
+        const returned: u32 = @intCast(entries.items.len - first);
+
+        var json: std.json.Stringify = .{ .writer = writer };
+        try json.beginObject();
+        try writeField(&json, "ok", true);
+        try writeOptionalId(&json, request.id);
+        try writeField(&json, "op", request.op);
+        try writeField(&json, "protocol_version", protocol.version);
+        try json.objectField("audit");
+        try json.beginObject();
+        try writeField(&json, "instance", self.snapshot.instance);
+        try writeField(&json, "path", path);
+        try writeField(&json, "total", total);
+        try writeField(&json, "returned", returned);
+        try writeField(&json, "malformed", malformed);
+        try writeField(&json, "truncated", if (tail) |value| value.truncated else false);
+        try json.objectField("entries");
+        try json.beginArray();
+        for (entries.items[first..]) |entry| try json.write(entry.value);
+        try json.endArray();
+        try json.endObject();
+        try json.endObject();
+        try writer.writeByte('\n');
+    }
+
+    fn handleJournalList(self: *Server, stream: std.Io.net.Stream, request: protocol.Request) void {
+        var out: std.Io.Writer.Allocating = .init(self.gpa);
+        defer out.deinit();
+        self.writeJournalResponse(&out.writer, request) catch |err| {
+            self.sendError(stream, request.id, request.op, "internal", @errorName(err));
+            return;
+        };
+        self.sendBuffer(stream, out.written());
+    }
+
+    const StoredJournalLine = struct {
+        index: u64,
+        raw: []const u8,
+        parsed: ?std.json.Parsed(journal.Wire),
+        valid: bool,
+
+        fn deinit(self: *StoredJournalLine) void {
+            if (self.parsed) |*value| value.deinit();
+        }
+    };
+
+    fn writeJournalResponse(self: *Server, writer: *std.Io.Writer, request: protocol.Request) !void {
+        const limit = @min(request.limit orelse journal_default_limit, journal_max_limit);
+        const name = try std.fmt.allocPrint(self.gpa, "{s}.journal", .{self.snapshot.instance});
+        defer self.gpa.free(name);
+        const path = try std.fs.path.join(self.gpa, &.{ self.state_dir, name });
+        defer self.gpa.free(path);
+        const tail = try self.readFileTail(path, journal_tail_bytes);
+        defer if (tail) |value| self.gpa.free(value.data);
+
+        var entries: std.ArrayListUnmanaged(StoredJournalLine) = .empty;
+        defer {
+            for (entries.items) |*entry| entry.deinit();
+            entries.deinit(self.gpa);
+        }
+        var total: u32 = 0;
+        var valid: u32 = 0;
+        var malformed: u32 = 0;
+        var last_valid = true;
+        if (tail) |value| {
+            var lines = std.mem.splitScalar(u8, value.data, '\n');
+            while (lines.next()) |line| {
+                if (line.len == 0) continue;
+                total += 1;
+                var parsed = journal.parseLine(self.gpa, line) catch {
+                    malformed += 1;
+                    last_valid = false;
+                    try appendJournalLine(self.gpa, &entries, limit, .{
+                        .index = total,
+                        .raw = line,
+                        .parsed = null,
+                        .valid = false,
+                    });
+                    continue;
+                };
+                _ = journal.toOp(parsed.value) catch {
+                    parsed.deinit();
+                    malformed += 1;
+                    last_valid = false;
+                    try appendJournalLine(self.gpa, &entries, limit, .{
+                        .index = total,
+                        .raw = line,
+                        .parsed = null,
+                        .valid = false,
+                    });
+                    continue;
+                };
+                valid += 1;
+                last_valid = true;
+                try appendJournalLine(self.gpa, &entries, limit, .{
+                    .index = total,
+                    .raw = line,
+                    .parsed = parsed,
+                    .valid = true,
+                });
+            }
+        }
+
+        var json: std.json.Stringify = .{ .writer = writer };
+        try json.beginObject();
+        try writeField(&json, "ok", true);
+        try writeOptionalId(&json, request.id);
+        try writeField(&json, "op", request.op);
+        try writeField(&json, "protocol_version", protocol.version);
+        try json.objectField("journal");
+        try json.beginObject();
+        try writeField(&json, "instance", self.snapshot.instance);
+        try writeField(&json, "path", path);
+        try writeField(&json, "entries", total);
+        try writeField(&json, "valid", valid);
+        try writeField(&json, "malformed", malformed);
+        try writeField(&json, "malformed_tail", total != 0 and !last_valid);
+        try writeField(&json, "returned", @as(u32, @intCast(entries.items.len)));
+        try writeField(&json, "truncated", if (tail) |value| value.truncated else false);
+        try json.objectField("lines");
+        try json.beginArray();
+        for (entries.items) |entry| {
+            try json.beginObject();
+            try writeField(&json, "line", entry.index);
+            try writeField(&json, "valid", entry.valid);
+            try writeField(&json, "raw", entry.raw);
+            if (entry.parsed) |parsed| {
+                const wire = parsed.value;
+                try writeField(&json, "op", wire.op);
+                try writeOptionalField(&json, "dev", wire.dev);
+                try writeOptionalField(&json, "cidr", wire.cidr);
+                try writeOptionalField(&json, "up", wire.up);
+                try writeOptionalField(&json, "dst", wire.dst);
+                try writeOptionalField(&json, "via", wire.via);
+                try writeOptionalField(&json, "metric", wire.metric);
+                try writeOptionalField(&json, "table", wire.table);
+                try writeOptionalField(&json, "kind", wire.kind);
+                try writeOptionalField(&json, "peer", wire.peer);
+                try writeOptionalField(&json, "stp", wire.stp);
+                try writeOptionalField(&json, "vlan_filtering", wire.vlan_filtering);
+                try writeOptionalField(&json, "master", wire.master);
+                try writeOptionalField(&json, "vid", wire.vid);
+                try writeOptionalField(&json, "pvid", wire.pvid);
+                try writeOptionalField(&json, "untagged", wire.untagged);
+            }
+            try json.endObject();
+        }
+        try json.endArray();
+        try json.endObject();
+        try json.endObject();
+        try writer.writeByte('\n');
     }
 
     fn sendConfigApplied(
@@ -962,6 +1262,8 @@ pub const Server = struct {
         restart_required: bool,
         revision: config_store.Revision,
         diff: []const u8,
+        restart_supported: bool,
+        restart_token: ?[]const u8,
     ) void {
         var allocating = std.Io.Writer.Allocating.initCapacity(self.gpa, 4096 + diff.len) catch {
             return;
@@ -981,6 +1283,12 @@ pub const Server = struct {
             writeField(&json, "result", @tagName(result)) catch break :blk false;
             writeAffected(&json, affected) catch break :blk false;
             writeField(&json, "restart_required", restart_required) catch break :blk false;
+            if (restart_required) {
+                writeField(&json, "restart_supported", restart_supported) catch break :blk false;
+                if (restart_token) |value| {
+                    writeField(&json, "restart_token", value) catch break :blk false;
+                }
+            }
             if (diff.len != 0) {
                 writeField(&json, "diff", diff) catch break :blk false;
             }
@@ -1019,6 +1327,159 @@ pub const Server = struct {
         var writer = stream.writer(self.io, &socket_buf);
         writer.interface.writeAll(bytes) catch return;
         writer.interface.flush() catch {};
+    }
+
+    fn restartSupported(self: *const Server) bool {
+        return self.restart_supported;
+    }
+
+    fn currentRestartToken(self: *const Server, transaction_id: []const u8) ?[]const u8 {
+        if (!self.restart_token.active) return null;
+        if (!std.mem.eql(u8, self.restart_token.transaction[0..], transaction_id)) return null;
+        return self.restart_token.token[0..];
+    }
+
+    fn handleDaemonRestart(
+        self: *Server,
+        stream: std.Io.net.Stream,
+        request: protocol.Request,
+        uid: u32,
+        pid: i32,
+    ) void {
+        if (!self.restart_supported) {
+            self.sendError(
+                stream,
+                request.id,
+                request.op,
+                "restart_unavailable",
+                "no supervisor is configured; restart vrouterd with the service manager",
+            );
+            return;
+        }
+        const supplied = request.restart_token orelse {
+            self.sendError(stream, request.id, request.op, "confirm_required", "restart token required");
+            return;
+        };
+        const now = transport.nowMs(self.io);
+        switch (self.restart_token.validate(supplied, self.boot_id, now)) {
+            .ok => {},
+            .expired => {
+                self.sendError(stream, request.id, request.op, "confirm_expired", "restart token expired");
+                return;
+            },
+            .missing => {
+                if (self.restart_pending) {
+                    self.sendError(
+                        stream,
+                        request.id,
+                        request.op,
+                        "restart_pending",
+                        "restart token was already used or superseded",
+                    );
+                } else {
+                    self.sendError(stream, request.id, request.op, "confirm_required", "restart token required");
+                }
+                return;
+            },
+        }
+
+        const transaction_id = transaction.generateId(self.io) catch |err| {
+            self.sendError(stream, request.id, request.op, "internal", @errorName(err));
+            return;
+        };
+        const audit_id = transaction.generateId(self.io) catch |err| {
+            self.sendError(stream, request.id, request.op, "internal", @errorName(err));
+            return;
+        };
+        transaction.appendOperationAudit(
+            self.io,
+            self.gpa,
+            self.state_dir,
+            request.op,
+            self.snapshot.instance,
+            transaction_id[0..],
+            audit_id[0..],
+            .{ .uid = uid, .pid = pid },
+            now,
+        ) catch |err| {
+            self.sendError(stream, request.id, request.op, "internal", @errorName(err));
+            return;
+        };
+        self.restart_token.clear();
+        self.sendDaemonAccepted(stream, request, transaction_id[0..]);
+        self.restart_requested.store(true, .release);
+    }
+
+    fn handleDaemonStop(
+        self: *Server,
+        stream: std.Io.net.Stream,
+        request: protocol.Request,
+        uid: u32,
+        pid: i32,
+    ) void {
+        if (!self.restart_supported) {
+            self.sendError(
+                stream,
+                request.id,
+                request.op,
+                "restart_unavailable",
+                "no supervisor is configured; stop vrouterd with the service manager",
+            );
+            return;
+        }
+        if (request.confirm == null or !std.mem.eql(u8, request.confirm.?, "stop")) {
+            self.sendError(stream, request.id, request.op, "confirm_required", "type stop to confirm");
+            return;
+        }
+        const now = transport.nowMs(self.io);
+        const transaction_id = transaction.generateId(self.io) catch |err| {
+            self.sendError(stream, request.id, request.op, "internal", @errorName(err));
+            return;
+        };
+        const audit_id = transaction.generateId(self.io) catch |err| {
+            self.sendError(stream, request.id, request.op, "internal", @errorName(err));
+            return;
+        };
+        transaction.appendOperationAudit(
+            self.io,
+            self.gpa,
+            self.state_dir,
+            request.op,
+            self.snapshot.instance,
+            transaction_id[0..],
+            audit_id[0..],
+            .{ .uid = uid, .pid = pid },
+            now,
+        ) catch |err| {
+            self.sendError(stream, request.id, request.op, "internal", @errorName(err));
+            return;
+        };
+        self.sendDaemonAccepted(stream, request, transaction_id[0..]);
+        self.stop_requested.store(true, .release);
+    }
+
+    fn sendDaemonAccepted(
+        self: *Server,
+        stream: std.Io.net.Stream,
+        request: protocol.Request,
+        transaction_id: []const u8,
+    ) void {
+        var buf: [1024]u8 = undefined;
+        var writer: std.Io.Writer = .fixed(&buf);
+        var json: std.json.Stringify = .{ .writer = &writer };
+        const written = blk: {
+            json.beginObject() catch break :blk false;
+            writeField(&json, "ok", true) catch break :blk false;
+            writeOptionalId(&json, request.id) catch break :blk false;
+            writeField(&json, "op", request.op) catch break :blk false;
+            writeField(&json, "protocol_version", protocol.version) catch break :blk false;
+            writeField(&json, "result", "accepted") catch break :blk false;
+            writeField(&json, "transaction", transaction_id) catch break :blk false;
+            json.endObject() catch break :blk false;
+            writer.writeByte('\n') catch break :blk false;
+            break :blk true;
+        };
+        if (written) self.sendBuffer(stream, writer.buffered());
     }
 
     fn handleNatApply(
@@ -1166,6 +1627,10 @@ fn isSupported(op: []const u8) bool {
         std.mem.eql(u8, op, "config.validate") or
         std.mem.eql(u8, op, "config.diff") or
         std.mem.eql(u8, op, "config.apply") or
+        std.mem.eql(u8, op, "daemon.stop") or
+        std.mem.eql(u8, op, "daemon.restart") or
+        std.mem.eql(u8, op, "audit.list") or
+        std.mem.eql(u8, op, "journal.list") or
         read_model.isListOp(op);
 }
 
@@ -1198,6 +1663,29 @@ fn writeWarnings(json: *std.json.Stringify) !void {
 fn writeField(json: *std.json.Stringify, name: []const u8, value: anytype) !void {
     try json.objectField(name);
     try json.write(value);
+}
+
+fn writeOptionalField(json: *std.json.Stringify, name: []const u8, value: anytype) !void {
+    try json.objectField(name);
+    try json.write(value);
+}
+
+fn appendJournalLine(
+    gpa: std.mem.Allocator,
+    entries: *std.ArrayListUnmanaged(Server.StoredJournalLine),
+    limit: u32,
+    entry: Server.StoredJournalLine,
+) !void {
+    if (limit == 0) {
+        var dropped = entry;
+        dropped.deinit();
+        return;
+    }
+    while (entries.items.len >= limit) {
+        var removed = entries.orderedRemove(0);
+        removed.deinit();
+    }
+    try entries.append(gpa, entry);
 }
 
 fn writeOptionalId(json: *std.json.Stringify, id: ?u64) !void {
@@ -1572,6 +2060,22 @@ test "server starts, answers status, and removes its socket" {
     try testing.expectEqualStrings("lan", ports.value.ports.?.array.items[0].object.get("name").?.string);
     try testing.expectEqualStrings("eth0", ports.value.ports.?.array.items[0].object.get("device").?.string);
 
+    const v2_restart_line = try sendRequest(
+        testing.io,
+        path,
+        "{\"id\":13,\"op\":\"daemon.restart\",\"restart_token\":\"abc\"}\n",
+        &input,
+    );
+    try testing.expect(std.mem.indexOf(u8, v2_restart_line, "\"version_unsupported\"") != null);
+
+    const unavailable_line = try sendRequest(
+        testing.io,
+        path,
+        "{\"version\":3,\"id\":14,\"op\":\"daemon.restart\",\"restart_token\":\"abc\"}\n",
+        &input,
+    );
+    try testing.expect(std.mem.indexOf(u8, unavailable_line, "\"restart_unavailable\"") != null);
+
     const v2_ping_line = try sendRequest(testing.io, path, "{\"id\":12,\"op\":\"ping\"}\n", &input);
     var v2_ping = try std.json.parseFromSlice(protocol.Response, testing.allocator, v2_ping_line, .{});
     defer v2_ping.deinit();
@@ -1740,6 +2244,7 @@ test "server diffs, applies and audits a config proposal" {
     var server = try Server.init(testing.io, testing.allocator, path, .{
         .config_store = &store,
         .state_dir = state_dir,
+        .restart_supported = true,
     });
     defer server.deinit();
     server.publish(&snapshot);
@@ -1787,6 +2292,10 @@ test "server diffs, applies and audits a config proposal" {
     try testing.expectEqualStrings("restart_required", apply_response.value.result.?);
     try testing.expect(apply_response.value.transaction != null);
     try testing.expect(apply_response.value.restart_required.?);
+    try testing.expect(apply_response.value.restart_supported.?);
+    try testing.expect(apply_response.value.restart_token != null);
+    const restart_token = try testing.allocator.dupe(u8, apply_response.value.restart_token.?);
+    defer testing.allocator.free(restart_token);
     const transaction_id = try testing.allocator.dupe(u8, apply_response.value.transaction.?);
     defer testing.allocator.free(transaction_id);
 
@@ -1815,6 +2324,123 @@ test "server diffs, applies and audits a config proposal" {
     defer noop_response.deinit();
     try testing.expect(noop_response.value.ok);
     try testing.expectEqualStrings("noop", noop_response.value.result.?);
+    try testing.expect(noop_response.value.restart_required.? == false);
+    try testing.expect(noop_response.value.restart_token == null);
+    try testing.expect(!server.restartRequested());
+}
+
+test "server accepts restart once and audits the operation" {
+    const testing = std.testing;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir = try tmp.dir.realPath(testing.io, &path_buf);
+    const path = try std.fmt.allocPrint(testing.allocator, "{s}/control.sock", .{path_buf[0..dir]});
+    defer testing.allocator.free(path);
+    const state_dir = path_buf[0..dir];
+
+    const current_json =
+        \\{"version":1,"instance":"test","ports":{"lan":{"kind":"l2","device":"eth0"}}}
+    ;
+    const proposed_json =
+        \\{"version":1,"instance":"test","ports":{"lan":{"kind":"l2","device":"eth0"}},"log":{"level":"debug"}}
+    ;
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "vrouter.json", .data = current_json });
+    const config_path = try std.fmt.allocPrint(testing.allocator, "{s}/vrouter.json", .{state_dir});
+    defer testing.allocator.free(config_path);
+    var store = try config_store.Store.open(testing.io, testing.allocator, config_path);
+    defer store.deinit();
+
+    var server = try Server.init(testing.io, testing.allocator, path, .{
+        .config_store = &store,
+        .state_dir = state_dir,
+        .restart_supported = true,
+    });
+    defer server.deinit();
+    var snapshot: state.Snapshot = .{
+        .instance = "test",
+        .state_dir = state_dir,
+        .control_path = path,
+    };
+    server.publish(&snapshot);
+    try server.start();
+
+    var input: [8192]u8 = undefined;
+    const get_line = try sendRequest(
+        testing.io,
+        path,
+        "{\"version\":3,\"id\":40,\"op\":\"config.get\",\"instance\":\"test\"}\n",
+        &input,
+    );
+    var get_response = try std.json.parseFromSlice(protocol.Response, testing.allocator, get_line, .{});
+    defer get_response.deinit();
+    const revision = try testing.allocator.dupe(u8, get_response.value.revision.?);
+    defer testing.allocator.free(revision);
+
+    const diff_payload = try std.fmt.allocPrint(
+        testing.allocator,
+        "{{\"version\":3,\"id\":41,\"op\":\"config.diff\",\"instance\":\"test\",\"revision\":\"{s}\",\"config\":{s}}}\n",
+        .{ revision, proposed_json },
+    );
+    defer testing.allocator.free(diff_payload);
+    const diff_line = try sendRequest(testing.io, path, diff_payload, &input);
+    var diff_response = try std.json.parseFromSlice(protocol.Response, testing.allocator, diff_line, .{});
+    defer diff_response.deinit();
+    try testing.expect(diff_response.value.confirm != null);
+    const confirm = try testing.allocator.dupe(u8, diff_response.value.confirm.?);
+    defer testing.allocator.free(confirm);
+
+    const apply_payload = try std.fmt.allocPrint(
+        testing.allocator,
+        "{{\"version\":3,\"id\":42,\"op\":\"config.apply\",\"instance\":\"test\",\"revision\":\"{s}\",\"confirm\":\"{s}\",\"idempotency_key\":\"restart-1\",\"config\":{s}}}\n",
+        .{ revision, confirm, proposed_json },
+    );
+    defer testing.allocator.free(apply_payload);
+    const apply_line = try sendRequest(testing.io, path, apply_payload, &input);
+    var apply_response = try std.json.parseFromSlice(protocol.Response, testing.allocator, apply_line, .{});
+    defer apply_response.deinit();
+    try testing.expect(apply_response.value.ok);
+    try testing.expect(apply_response.value.restart_token != null);
+    const restart_token = try testing.allocator.dupe(u8, apply_response.value.restart_token.?);
+    defer testing.allocator.free(restart_token);
+
+    const missing_line = try sendRequest(
+        testing.io,
+        path,
+        "{\"version\":3,\"id\":43,\"op\":\"daemon.restart\"}\n",
+        &input,
+    );
+    var missing = try std.json.parseFromSlice(protocol.Response, testing.allocator, missing_line, .{});
+    defer missing.deinit();
+    try testing.expect(!missing.value.ok);
+    try testing.expectEqualStrings("confirm_required", missing.value.error_code.?);
+
+    const restart_payload = try std.fmt.allocPrint(
+        testing.allocator,
+        "{{\"version\":3,\"id\":44,\"op\":\"daemon.restart\",\"restart_token\":\"{s}\"}}\n",
+        .{restart_token},
+    );
+    defer testing.allocator.free(restart_payload);
+    const restart_line = try sendRequest(testing.io, path, restart_payload, &input);
+    var restart = try std.json.parseFromSlice(protocol.Response, testing.allocator, restart_line, .{});
+    defer restart.deinit();
+    try testing.expect(restart.value.ok);
+    try testing.expectEqualStrings("accepted", restart.value.result.?);
+    try testing.expect(restart.value.transaction != null);
+    try testing.expect(server.restartRequested());
+
+    const replay_line = try sendRequest(testing.io, path, restart_payload, &input);
+    var replay = try std.json.parseFromSlice(protocol.Response, testing.allocator, replay_line, .{});
+    defer replay.deinit();
+    try testing.expect(!replay.value.ok);
+    try testing.expectEqualStrings("restart_pending", replay.value.error_code.?);
+
+    const audit = try tmp.dir.readFileAlloc(testing.io, "audit.jsonl", testing.allocator, .limited(8192));
+    defer testing.allocator.free(audit);
+    try testing.expect(std.mem.indexOf(u8, audit, "\"kind\":\"operational\"") != null);
+    try testing.expect(std.mem.indexOf(u8, audit, "\"op\":\"daemon.restart\"") != null);
+    try testing.expect(std.mem.indexOf(u8, audit, "\"result\":\"accepted\"") != null);
 }
 
 test "server refuses a regular file at the socket path" {
@@ -1913,4 +2539,94 @@ test "server replaces a stale socket" {
         std.Io.File.Kind.unix_domain_socket,
         (try tmp.dir.statFile(testing.io, "control.sock", .{})).kind,
     );
+}
+
+test "server lists bounded audit and journal tails" {
+    const testing = std.testing;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir = try tmp.dir.realPath(testing.io, &path_buf);
+    const state_dir = path_buf[0..dir];
+    const path = try std.fmt.allocPrint(testing.allocator, "{s}/control.sock", .{state_dir});
+    defer testing.allocator.free(path);
+
+    const audit_data =
+        \\{"ts_ms":1000,"transaction":"t1","audit_id":"a1","kind":"operational","op":"config.apply","instance":"test","actor_uid":1000,"actor_pid":10,"result":"applied"}
+        \\not-json
+        \\{"ts_ms":2000,"transaction":"t2","audit_id":"a2","kind":"operational","op":"daemon.restart","instance":"test","actor_uid":1000,"actor_pid":11,"result":"accepted"}
+        \\{"ts_ms":3000,"transaction":"t3","audit_id":"a3","kind":"operational","op":"daemon.stop","instance":"test","actor_uid":1000,"actor_pid":12,"result":"accepted"}
+        \\
+    ;
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = transaction.audit_file, .data = audit_data });
+
+    const journal_data =
+        \\{"op":"addr_add","dev":"lan","cidr":"192.0.2.1/24"}
+        \\{"op":"bogus"}
+        \\{"op":"link","dev":"lan","up":true}
+        \\{"op":"route_add","dst":"not-a-prefix","dev":"lan"}
+        \\
+    ;
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "test.journal", .data = journal_data });
+
+    var server = try Server.init(testing.io, testing.allocator, path, .{
+        .state_dir = state_dir,
+    });
+    defer server.deinit();
+    var snapshot: state.Snapshot = .{
+        .instance = "test",
+        .state_dir = state_dir,
+        .control_path = path,
+    };
+    server.publish(&snapshot);
+    try server.start();
+
+    var input: [16384]u8 = undefined;
+    const audit_line = try sendRequest(
+        testing.io,
+        path,
+        "{\"version\":3,\"id\":60,\"op\":\"audit.list\",\"limit\":2}\n",
+        &input,
+    );
+    var audit_response = try std.json.parseFromSlice(protocol.Response, testing.allocator, audit_line, .{});
+    defer audit_response.deinit();
+    try testing.expect(audit_response.value.ok);
+    const audit_snapshot = audit_response.value.audit.?;
+    try testing.expectEqual(@as(u32, 4), audit_snapshot.total);
+    try testing.expectEqual(@as(u32, 1), audit_snapshot.malformed);
+    try testing.expectEqual(@as(u32, 2), audit_snapshot.returned);
+    try testing.expectEqualStrings("daemon.restart", audit_snapshot.entries[0].op);
+    try testing.expectEqualStrings("daemon.stop", audit_snapshot.entries[1].op);
+    try testing.expectEqual(@as(i64, 3000), audit_snapshot.entries[1].ts_ms);
+
+    const journal_line = try sendRequest(
+        testing.io,
+        path,
+        "{\"version\":3,\"id\":61,\"op\":\"journal.list\",\"limit\":2}\n",
+        &input,
+    );
+    var journal_response = try std.json.parseFromSlice(protocol.Response, testing.allocator, journal_line, .{});
+    defer journal_response.deinit();
+    try testing.expect(journal_response.value.ok);
+    const journal_snapshot = journal_response.value.journal.?;
+    try testing.expectEqual(@as(u32, 4), journal_snapshot.entries);
+    try testing.expectEqual(@as(u32, 2), journal_snapshot.valid);
+    try testing.expectEqual(@as(u32, 2), journal_snapshot.malformed);
+    try testing.expect(journal_snapshot.malformed_tail);
+    try testing.expectEqual(@as(usize, 2), journal_snapshot.lines.len);
+    try testing.expect(journal_snapshot.lines[0].valid);
+    try testing.expectEqualStrings("link", journal_snapshot.lines[0].op);
+    try testing.expect(!journal_snapshot.lines[1].valid);
+
+    const v2_line = try sendRequest(
+        testing.io,
+        path,
+        "{\"version\":2,\"id\":62,\"op\":\"audit.list\"}\n",
+        &input,
+    );
+    var v2_response = try std.json.parseFromSlice(protocol.Response, testing.allocator, v2_line, .{});
+    defer v2_response.deinit();
+    try testing.expect(!v2_response.value.ok);
+    try testing.expectEqualStrings("version_unsupported", v2_response.value.error_code.?);
 }

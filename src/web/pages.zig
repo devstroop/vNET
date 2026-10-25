@@ -421,6 +421,27 @@ fn writeStagedReviewDialog(
     try w.writeAll("</footer></div></dialog>");
 }
 
+fn writeRestartBanner(w: *std.Io.Writer, csrf: []const u8, token: ?[]const u8, supported: bool) !void {
+    try w.writeAll("<div class=\"alert alert-warn\" role=\"alert\"><strong>Restart required.</strong> The running daemon still uses the old service configuration. ");
+    if (token) |value| {
+        try w.writeAll("Restart vrouterd to activate the committed config.");
+        if (supported) {
+            try w.writeAll("<form class=\"inline-form restart-form\" method=\"post\" action=\"/restart\" hx-post=\"/restart\" hx-target=\"#restart-result\" hx-swap=\"innerHTML\" hx-indicator=\"#refresh-indicator\"><input type=\"hidden\" name=\"csrf\" value=\"");
+            try html.writeEscaped(w, csrf);
+            try w.writeAll("\"><input type=\"hidden\" name=\"restart_token\" value=\"");
+            try html.writeEscaped(w, value);
+            try w.writeAll("\"><button class=\"button button-primary button-inline\" type=\"submit\">Restart daemon</button></form>");
+        }
+    } else {
+        try w.writeAll("Run <code>systemctl restart vrouterd</code> from a local shell; this deployment did not expose a restart token.");
+    }
+    try w.writeAll("</div>");
+}
+
+pub fn restartResultDialog(w: *std.Io.Writer, message: []const u8, is_error: bool) !void {
+    try writeMessageDialog(w, "Daemon restart", message, is_error);
+}
+
 fn writeMessageDialog(w: *std.Io.Writer, title: []const u8, message: []const u8, is_error: bool) !void {
     try w.writeAll("<dialog id=\"nat-message\" class=\"dialog dialog-sm\" data-auto-open><div class=\"dialog-card");
     if (is_error) try w.writeAll(" dialog-card-error");
@@ -568,6 +589,9 @@ pub const DhcpView = struct {
     notice: ?[]const u8 = null,
     err: ?[]const u8 = null,
     review: ?ConfigReview = null,
+    restart_pending: bool = false,
+    restart_supported: bool = false,
+    restart_token: ?[]const u8 = null,
 };
 
 pub fn dhcpPage(gpa: std.mem.Allocator, w: *std.Io.Writer, view: DhcpView) !void {
@@ -601,6 +625,7 @@ pub fn dhcpFragment(w: *std.Io.Writer, view: DhcpView) !void {
     } else if (view.err) |message| {
         try writeMessageDialog(w, "DHCP change failed", message, true);
     }
+    if (view.restart_pending) try writeRestartBanner(w, view.csrf, view.restart_token, view.restart_supported);
 
     try w.writeAll("<section class=\"config-bar");
     if (view.pending > 0) try w.writeAll(" config-bar-pending");
@@ -816,6 +841,9 @@ pub const DnsView = struct {
     notice: ?[]const u8 = null,
     err: ?[]const u8 = null,
     review: ?ConfigReview = null,
+    restart_pending: bool = false,
+    restart_supported: bool = false,
+    restart_token: ?[]const u8 = null,
 };
 
 pub fn dnsPage(gpa: std.mem.Allocator, w: *std.Io.Writer, view: DnsView) !void {
@@ -849,6 +877,7 @@ pub fn dnsFragment(w: *std.Io.Writer, view: DnsView) !void {
     } else if (view.err) |message| {
         try writeMessageDialog(w, "DNS change failed", message, true);
     }
+    if (view.restart_pending) try writeRestartBanner(w, view.csrf, view.restart_token, view.restart_supported);
 
     try w.writeAll("<section class=\"config-bar");
     if (view.pending > 0) try w.writeAll(" config-bar-pending");
@@ -1110,6 +1139,417 @@ pub fn connectionsFragment(
     try w.writeAll("</section><p class=\"refresh-note\">Auto-refreshes every 5 seconds.</p>");
 }
 
+pub fn auditPage(
+    gpa: std.mem.Allocator,
+    w: *std.Io.Writer,
+    csrf: []const u8,
+    audit: ?protocol.Audit,
+    query: []const u8,
+    result_filter: []const u8,
+    err: ?[]const u8,
+    now_ms: i64,
+) !void {
+    var body: std.Io.Writer.Allocating = .init(gpa);
+    defer body.deinit();
+    try writeAuditBody(&body.writer, audit, query, result_filter, err, now_ms);
+    try html.writePage(w, .{
+        .title = "Audit",
+        .subtitle = "Operator and transaction audit trail from the control plane.",
+        .active = .audit,
+        .csrf = csrf,
+        .body = body.written(),
+    });
+}
+
+fn writeAuditBody(
+    w: *std.Io.Writer,
+    audit: ?protocol.Audit,
+    query: []const u8,
+    result_filter: []const u8,
+    err: ?[]const u8,
+    now_ms: i64,
+) !void {
+    try w.writeAll(
+        \\<section class="page-head">
+        \\  <div>
+        \\    <p class="eyebrow">Control plane</p>
+        \\    <h2>Audit log</h2>
+        \\  </div>
+        \\  <div class="page-actions">
+        \\    <span class="live-pill"><span class="live-dot"></span>Live</span>
+        \\    <button class="button" type="button" hx-get="/partials/audit" hx-include="#audit-filters" hx-target="#audit-live" hx-swap="innerHTML" hx-indicator="#refresh-indicator">Refresh</button>
+        \\  </div>
+        \\</section>
+        \\<form id="audit-filters" class="filters" hx-get="/partials/audit" hx-target="#audit-live" hx-swap="innerHTML" hx-trigger="change, keyup changed delay:400ms, submit" hx-indicator="#refresh-indicator">
+        \\  <label class="field"><span>Result</span><select name="result">
+        \\
+    );
+    try selectOption(w, "all", "All", result_filter);
+    try selectOption(w, "accepted", "Accepted", result_filter);
+    try selectOption(w, "applied", "Applied", result_filter);
+    try selectOption(w, "rejected", "Rejected", result_filter);
+    try w.writeAll(
+        \\  </select></label>
+        \\  <label class="field field-grow"><span>Search</span><input name="q" type="search" value="
+    );
+    try html.writeEscaped(w, query);
+    try w.writeAll(
+        \\" placeholder="Operation, transaction or instance" autocomplete="off"></label>
+        \\  <button class="button" type="submit">Apply</button>
+        \\</form>
+        \\<div id="audit-live" hx-get="/partials/audit" hx-include="#audit-filters" hx-trigger="every 10s" hx-target="this" hx-swap="innerHTML">
+        \\
+    );
+    try auditFragment(w, audit, query, result_filter, err, now_ms);
+    try w.writeAll("</div>\n<p class=\"refresh-note\">Newest entries are shown first. Auto-refreshes every 10 seconds.</p>\n");
+}
+
+pub fn auditFragment(
+    w: *std.Io.Writer,
+    audit: ?protocol.Audit,
+    query: []const u8,
+    result_filter: []const u8,
+    err: ?[]const u8,
+    now_ms: i64,
+) !void {
+    const value = audit orelse {
+        try html.writeError(w, err orelse "No audit snapshot was returned by the daemon.");
+        return;
+    };
+    var visible: usize = 0;
+    for (value.entries) |entry| {
+        if (auditEntryMatches(entry, query, result_filter)) visible += 1;
+    }
+    try w.writeAll("<div class=\"stat-grid stat-grid-3\">");
+    try statCard(w, "Records", value.total, "Entries in the current audit tail", "neutral");
+    try statCard(w, "Returned", value.returned, "Rows in this snapshot", "neutral");
+    try statCard(w, "Malformed", value.malformed, "Lines that could not be decoded", if (value.malformed > 0) "warn" else "neutral");
+    try w.writeAll("</div>");
+    try w.writeAll("<section class=\"card\"><header class=\"card-head\"><div><h3>Audit trail</h3><p class=\"mono small\">");
+    try html.writeEscaped(w, value.path);
+    try w.writeAll("</p></div>");
+    if (value.truncated) try w.writeAll("<p class=\"card-note\">Showing a bounded tail; older records were truncated.</p>");
+    try w.writeAll("</header>");
+    if (value.entries.len == 0) {
+        try html.writeEmpty(w, "No audit records", "Successful and rejected control operations are recorded here.");
+    } else if (visible == 0) {
+        try html.writeEmpty(w, "No matching records", "Adjust the search text or result filter to see more entries.");
+    } else {
+        try w.writeAll("<div class=\"table-wrap\"><table><thead><tr><th>When</th><th>Operation</th><th>Result</th><th>Actor</th><th class=\"hide-md\">Transaction</th><th>Details</th></tr></thead><tbody>");
+        var index = value.entries.len;
+        while (index > 0) {
+            index -= 1;
+            const entry = value.entries[index];
+            if (!auditEntryMatches(entry, query, result_filter)) continue;
+            try w.writeAll("<tr><td class=\"right muted\">");
+            try html.writeAgo(w, entry.ts_ms, now_ms);
+            try w.writeAll("</td><td><span class=\"badge badge-muted\">");
+            try html.writeEscaped(w, if (entry.op.len == 0) "—" else entry.op);
+            try w.writeAll("</span></td><td><span class=\"");
+            try w.writeAll(auditResultClass(entry.result));
+            try w.writeAll("\">");
+            try html.writeEscaped(w, if (entry.result.len == 0) "unknown" else entry.result);
+            try w.writeAll("</span></td><td class=\"mono small\">");
+            try writeActor(w, entry);
+            try w.writeAll("</td><td class=\"mono small muted hide-md\">");
+            try writeShortId(w, entry.transaction);
+            try w.writeAll("</td><td class=\"small\">");
+            try writeAuditDetails(w, entry);
+            try w.writeAll("</td></tr>");
+        }
+        try w.writeAll("</tbody></table></div>");
+    }
+    try w.writeAll("</section>");
+}
+
+fn auditEntryMatches(entry: protocol.AuditEntry, query: []const u8, result_filter: []const u8) bool {
+    if (!std.mem.eql(u8, result_filter, "all") and result_filter.len > 0 and
+        !std.ascii.eqlIgnoreCase(entry.result, result_filter)) return false;
+    if (query.len == 0) return true;
+    return containsIgnoreCase(entry.op, query) or
+        containsIgnoreCase(entry.transaction, query) or
+        containsIgnoreCase(entry.audit_id, query) or
+        containsIgnoreCase(entry.instance, query) or
+        (entry.kind != null and containsIgnoreCase(entry.kind.?, query));
+}
+
+fn auditResultClass(result: []const u8) []const u8 {
+    if (std.ascii.eqlIgnoreCase(result, "accepted") or std.ascii.eqlIgnoreCase(result, "applied")) return "badge badge-ok";
+    if (std.ascii.eqlIgnoreCase(result, "rejected")) return "badge badge-warn";
+    return "badge badge-muted";
+}
+
+fn writeActor(w: *std.Io.Writer, entry: protocol.AuditEntry) !void {
+    if (entry.actor_uid) |uid| {
+        try html.writeNumber(w, uid);
+    } else {
+        try w.writeAll("—");
+    }
+    if (entry.actor_pid) |pid| {
+        try w.writeAll(":");
+        try html.writeNumber(w, pid);
+    }
+}
+
+fn writeShortId(w: *std.Io.Writer, value: []const u8) !void {
+    if (value.len == 0) {
+        try w.writeAll("—");
+    } else if (value.len <= 12) {
+        try html.writeEscaped(w, value);
+    } else {
+        try html.writeEscaped(w, value[0..12]);
+        try w.writeAll("…");
+    }
+}
+
+fn writeAuditDetails(w: *std.Io.Writer, entry: protocol.AuditEntry) !void {
+    var wrote = false;
+    if (entry.revision_before) |before| {
+        try w.writeAll("rev ");
+        try writeShortId(w, before);
+        wrote = true;
+    }
+    if (entry.revision_after) |after| {
+        if (wrote) try w.writeAll(" → ");
+        try writeShortId(w, after);
+        wrote = true;
+    }
+    if (entry.affected) |affected| {
+        if (wrote) try w.writeAll(" · ");
+        try html.writeNumber(w, @as(u64, affected.len));
+        try w.writeAll(" affected");
+        wrote = true;
+    }
+    if (entry.restart_required) |required| {
+        if (wrote) try w.writeAll(" · ");
+        try w.writeAll(if (required) "restart required" else "live apply");
+        wrote = true;
+    }
+    if (!wrote) try w.writeAll("—");
+}
+
+pub fn journalPage(
+    gpa: std.mem.Allocator,
+    w: *std.Io.Writer,
+    csrf: []const u8,
+    journal: ?protocol.Journal,
+    query: []const u8,
+    state_filter: []const u8,
+    err: ?[]const u8,
+) !void {
+    var body: std.Io.Writer.Allocating = .init(gpa);
+    defer body.deinit();
+    try writeJournalBody(&body.writer, journal, query, state_filter, err);
+    try html.writePage(w, .{
+        .title = "Journal",
+        .subtitle = "Write-ahead host mutations and their inverses.",
+        .active = .journal,
+        .csrf = csrf,
+        .body = body.written(),
+    });
+}
+
+fn writeJournalBody(
+    w: *std.Io.Writer,
+    journal: ?protocol.Journal,
+    query: []const u8,
+    state_filter: []const u8,
+    err: ?[]const u8,
+) !void {
+    try w.writeAll(
+        \\<section class="page-head">
+        \\  <div>
+        \\    <p class="eyebrow">Control plane</p>
+        \\    <h2>Host journal</h2>
+        \\  </div>
+        \\  <div class="page-actions">
+        \\    <span class="live-pill"><span class="live-dot"></span>Live</span>
+        \\    <button class="button" type="button" hx-get="/partials/journal" hx-include="#journal-filters" hx-target="#journal-live" hx-swap="innerHTML" hx-indicator="#refresh-indicator">Refresh</button>
+        \\  </div>
+        \\</section>
+        \\<form id="journal-filters" class="filters" hx-get="/partials/journal" hx-target="#journal-live" hx-swap="innerHTML" hx-trigger="change, keyup changed delay:400ms, submit" hx-indicator="#refresh-indicator">
+        \\  <label class="field"><span>State</span><select name="state">
+        \\
+    );
+    try selectOption(w, "all", "All", state_filter);
+    try selectOption(w, "valid", "Valid", state_filter);
+    try selectOption(w, "malformed", "Malformed", state_filter);
+    try w.writeAll(
+        \\  </select></label>
+        \\  <label class="field field-grow"><span>Search</span><input name="q" type="search" value="
+    );
+    try html.writeEscaped(w, query);
+    try w.writeAll(
+        \\" placeholder="Operation, device or address" autocomplete="off"></label>
+        \\  <button class="button" type="submit">Apply</button>
+        \\</form>
+        \\<div id="journal-live" hx-get="/partials/journal" hx-include="#journal-filters" hx-trigger="every 10s" hx-target="this" hx-swap="innerHTML">
+        \\
+    );
+    try journalFragment(w, journal, query, state_filter, err);
+    try w.writeAll("</div>\n<p class=\"refresh-note\">Newest entries are shown first. Auto-refreshes every 10 seconds.</p>\n");
+}
+
+pub fn journalFragment(
+    w: *std.Io.Writer,
+    journal: ?protocol.Journal,
+    query: []const u8,
+    state_filter: []const u8,
+    err: ?[]const u8,
+) !void {
+    const value = journal orelse {
+        try html.writeError(w, err orelse "No journal snapshot was returned by the daemon.");
+        return;
+    };
+    var visible: usize = 0;
+    for (value.lines) |entry| {
+        if (journalEntryMatches(entry, query, state_filter)) visible += 1;
+    }
+    try w.writeAll("<div class=\"stat-grid stat-grid-4\">");
+    try statCard(w, "Entries", value.entries, "Records in the current journal tail", "neutral");
+    try statCard(w, "Valid", value.valid, "Inverses ready to replay", "neutral");
+    try statCard(w, "Malformed", value.malformed, "Records that cannot be replayed", if (value.malformed > 0) "warn" else "neutral");
+    try statCard(w, "Returned", value.returned, "Rows in this snapshot", "neutral");
+    try w.writeAll("</div>");
+    try w.writeAll("<section class=\"card\"><header class=\"card-head\"><div><h3>Journal records</h3><p class=\"mono small\">");
+    try html.writeEscaped(w, value.path);
+    try w.writeAll("</p></div>");
+    if (value.malformed_tail) try w.writeAll("<p class=\"card-note\">The newest record is malformed; recovery stops before it.</p>");
+    if (value.truncated) try w.writeAll("<p class=\"card-note\">Showing a bounded tail; older records were truncated.</p>");
+    try w.writeAll("</header>");
+    if (value.lines.len == 0) {
+        try html.writeEmpty(w, "Journal is empty", "Host mutations appear here after the router applies a configuration.");
+    } else if (visible == 0) {
+        try html.writeEmpty(w, "No matching records", "Adjust the search text or state filter to see more entries.");
+    } else {
+        try w.writeAll("<div class=\"table-wrap\"><table><thead><tr><th class=\"right\">Line</th><th>Operation</th><th>Target</th><th>Details</th><th>State</th></tr></thead><tbody>");
+        var index = value.lines.len;
+        while (index > 0) {
+            index -= 1;
+            const entry = value.lines[index];
+            if (!journalEntryMatches(entry, query, state_filter)) continue;
+            try w.writeAll("<tr><td class=\"right mono muted\">");
+            try html.writeNumber(w, entry.line);
+            try w.writeAll("</td><td><span class=\"badge badge-muted\">");
+            try html.writeEscaped(w, if (entry.op.len == 0) "—" else entry.op);
+            try w.writeAll("</span></td><td class=\"mono small\">");
+            try writeJournalTarget(w, entry);
+            try w.writeAll("</td><td class=\"small\">");
+            if (entry.valid) {
+                try writeJournalDetails(w, entry);
+            } else {
+                try w.writeAll("<span class=\"muted\">");
+                try html.writeEscaped(w, entry.raw);
+                try w.writeAll("</span>");
+            }
+            try w.writeAll("</td><td><span class=\"");
+            try w.writeAll(if (entry.valid) "badge badge-ok" else "badge badge-warn");
+            try w.writeAll("\">");
+            try w.writeAll(if (entry.valid) "valid" else "malformed");
+            try w.writeAll("</span></td></tr>");
+        }
+        try w.writeAll("</tbody></table></div>");
+    }
+    try w.writeAll("</section>");
+}
+
+fn journalEntryMatches(entry: protocol.JournalEntry, query: []const u8, state_filter: []const u8) bool {
+    if (std.mem.eql(u8, state_filter, "valid") and !entry.valid) return false;
+    if (std.mem.eql(u8, state_filter, "malformed") and entry.valid) return false;
+    if (query.len == 0) return true;
+    return containsIgnoreCase(entry.op, query) or
+        containsIgnoreCase(entry.raw, query) or
+        (entry.dev != null and containsIgnoreCase(entry.dev.?, query)) or
+        (entry.cidr != null and containsIgnoreCase(entry.cidr.?, query)) or
+        (entry.dst != null and containsIgnoreCase(entry.dst.?, query)) or
+        (entry.via != null and containsIgnoreCase(entry.via.?, query)) or
+        (entry.master != null and containsIgnoreCase(entry.master.?, query));
+}
+
+fn writeJournalTarget(w: *std.Io.Writer, entry: protocol.JournalEntry) !void {
+    if (entry.dev) |dev| {
+        try html.writeEscaped(w, dev);
+    } else if (entry.cidr) |cidr| {
+        try html.writeEscaped(w, cidr);
+    } else if (entry.dst) |dst| {
+        try html.writeEscaped(w, dst);
+    } else {
+        try w.writeAll("—");
+    }
+}
+
+fn writeJournalDetails(w: *std.Io.Writer, entry: protocol.JournalEntry) !void {
+    var wrote = false;
+    if (entry.cidr) |cidr| {
+        if (entry.dev != null) {
+            try w.writeAll(cidr);
+            wrote = true;
+        }
+    }
+    if (entry.master) |master| {
+        if (wrote) try w.writeAll(" · ");
+        try w.writeAll("master ");
+        try html.writeEscaped(w, master);
+        wrote = true;
+    }
+    if (entry.dst) |dst| {
+        if (wrote) try w.writeAll(" · ");
+        try w.writeAll("dst ");
+        try html.writeEscaped(w, dst);
+        wrote = true;
+    }
+    if (entry.via) |via| {
+        if (wrote) try w.writeAll(" · ");
+        try w.writeAll("via ");
+        try html.writeEscaped(w, via);
+        wrote = true;
+    }
+    if (entry.metric) |metric| {
+        if (wrote) try w.writeAll(" · ");
+        try w.writeAll("metric ");
+        try html.writeNumber(w, metric);
+        wrote = true;
+    }
+    if (entry.kind) |kind| {
+        if (wrote) try w.writeAll(" · ");
+        try html.writeEscaped(w, kind);
+        wrote = true;
+    }
+    if (entry.peer) |peer| {
+        if (wrote) try w.writeAll(" · ");
+        try w.writeAll("peer ");
+        try html.writeEscaped(w, peer);
+        wrote = true;
+    }
+    if (entry.vid) |vid| {
+        if (wrote) try w.writeAll(" · ");
+        try w.writeAll("vid ");
+        try html.writeNumber(w, vid);
+        wrote = true;
+    }
+    if (entry.pvid) |pvid| {
+        if (wrote) try w.writeAll(" · ");
+        try w.writeAll(if (pvid) "pvid" else "not pvid");
+        wrote = true;
+    }
+    if (entry.untagged) |untagged| {
+        if (wrote) try w.writeAll(" · ");
+        try w.writeAll(if (untagged) "untagged" else "tagged");
+        wrote = true;
+    }
+    if (entry.stp) |stp| {
+        if (wrote) try w.writeAll(" · ");
+        try w.writeAll(if (stp) "stp" else "no stp");
+        wrote = true;
+    }
+    if (entry.up) |up| {
+        if (wrote) try w.writeAll(" · ");
+        try w.writeAll(if (up) "up" else "down");
+        wrote = true;
+    }
+    if (!wrote) try w.writeAll("—");
+}
+
 fn writeTranslation(w: *std.Io.Writer, entry: protocol.ConntrackEntry) !void {
     var wrote = false;
     if (entry.translated_src) |src| {
@@ -1155,6 +1595,13 @@ fn containsIgnoreCase(haystack: []const u8, needle: []const u8) bool {
     return false;
 }
 
+pub const RestartUi = struct {
+    csrf: []const u8 = "",
+    pending: bool = false,
+    supported: bool = false,
+    token: ?[]const u8 = null,
+};
+
 pub fn systemPage(
     gpa: std.mem.Allocator,
     w: *std.Io.Writer,
@@ -1162,10 +1609,11 @@ pub fn systemPage(
     status: ?protocol.Status,
     err: ?[]const u8,
     now_ms: i64,
+    restart: RestartUi,
 ) !void {
     var body: std.Io.Writer.Allocating = .init(gpa);
     defer body.deinit();
-    try writeSystemBody(&body.writer, status, err, now_ms);
+    try writeSystemBody(&body.writer, status, err, now_ms, restart);
     try html.writePage(w, .{
         .title = "System",
         .subtitle = "Runtime identity and paths reported by the vRouter daemon.",
@@ -1175,7 +1623,13 @@ pub fn systemPage(
     });
 }
 
-fn writeSystemBody(w: *std.Io.Writer, status: ?protocol.Status, err: ?[]const u8, now_ms: i64) !void {
+fn writeSystemBody(
+    w: *std.Io.Writer,
+    status: ?protocol.Status,
+    err: ?[]const u8,
+    now_ms: i64,
+    restart: RestartUi,
+) !void {
     try w.writeAll(
         \\<section class="page-head">
         \\  <div>
@@ -1189,11 +1643,18 @@ fn writeSystemBody(w: *std.Io.Writer, status: ?protocol.Status, err: ?[]const u8
         \\<div id="system-live" hx-get="/partials/system" hx-trigger="every 10s" hx-target="this" hx-swap="innerHTML">
         \\
     );
-    try systemFragment(w, status, err, now_ms);
+    try systemFragment(w, status, err, now_ms, restart);
     try w.writeAll("</div>\n");
 }
 
-pub fn systemFragment(w: *std.Io.Writer, status: ?protocol.Status, err: ?[]const u8, now_ms: i64) !void {
+pub fn systemFragment(
+    w: *std.Io.Writer,
+    status: ?protocol.Status,
+    err: ?[]const u8,
+    now_ms: i64,
+    restart: RestartUi,
+) !void {
+    if (restart.pending) try writeRestartBanner(w, restart.csrf, restart.token, restart.supported);
     const value = status orelse {
         try html.writeError(w, err orelse "No status was returned by the daemon.");
         return;

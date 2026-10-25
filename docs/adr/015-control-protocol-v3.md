@@ -274,7 +274,8 @@ Restart token rules:
 
 - A `restart_required` response includes an opaque, one-time `restart_token`
   only when `restart_supported` is true. It is bound to the transaction id,
-  `revision_after`, the daemon boot id and a short TTL.
+  `revision_after`, the daemon boot id and a short TTL. The token is kept in
+  memory only; a daemon restart invalidates it.
 - `daemon.restart` requires the current token. A missing, expired, superseded
   or wrong-boot token returns `confirm_required`, `confirm_expired` or
   `restart_pending` as appropriate.
@@ -286,6 +287,15 @@ Restart token rules:
 - If `restart_supported` is false, the response still says `restart_required`
   but has no token; the UI shows the exact service-manager command.
 - `daemon.stop` does not use a restart token; it uses typed confirmation.
+
+For local preview and single-host deployments without a service manager,
+`vrouterd --enable-restart` is an explicit opt-in. It sets
+`restart_supported` and, after `daemon.restart`, tears down the datapath and
+control socket, then re-execs the same argv. This preserves the requested-
+restart versus crash distinction for the web flow, but it is not a supervisor:
+if the re-exec fails, the daemon exits and the operator must start it again.
+Deployments that need automatic recovery must use a service manager and must
+not enable this flag. The flag is never inferred from PID 1.
 
 ## Consequences
 

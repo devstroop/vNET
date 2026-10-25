@@ -16,6 +16,8 @@ const max_password_len = 256;
 const login_max_failures = 5;
 const login_lock_ms = 30_000;
 const conntrack_page_limit = 200;
+const audit_page_limit = 200;
+const journal_page_limit = 200;
 
 pub const Options = struct {
     io: std.Io,
@@ -117,6 +119,10 @@ const App = struct {
     sessions: auth.Store,
     login_failures: u32 = 0,
     login_locked_until_ms: i64 = 0,
+    restart_token_buf: [64]u8 = undefined,
+    restart_token_len: usize = 0,
+    restart_supported: bool = false,
+    restart_pending: bool = false,
 
     fn handleConnection(self: *App, stream: std.Io.net.Stream) !void {
         defer stream.close(self.io);
@@ -248,9 +254,21 @@ const App = struct {
             if (method != .GET and method != .HEAD) return self.methodNotAllowedHtml(request);
             return self.serveConnectionsPage(request);
         }
+        if (std.mem.eql(u8, path, "/audit")) {
+            if (method != .GET and method != .HEAD) return self.methodNotAllowedHtml(request);
+            return self.serveAuditPage(request);
+        }
+        if (std.mem.eql(u8, path, "/journal")) {
+            if (method != .GET and method != .HEAD) return self.methodNotAllowedHtml(request);
+            return self.serveJournalPage(request);
+        }
         if (std.mem.eql(u8, path, "/system")) {
             if (method != .GET and method != .HEAD) return self.methodNotAllowedHtml(request);
             return self.serveSystemPage(request);
+        }
+        if (std.mem.eql(u8, path, "/restart")) {
+            if (method != .POST) return self.methodNotAllowedHtml(request);
+            return self.serveRestart(request);
         }
         if (std.mem.eql(u8, path, "/partials/status")) {
             if (method != .GET) return self.methodNotAllowed(request);
@@ -275,6 +293,14 @@ const App = struct {
         if (std.mem.eql(u8, path, "/partials/system")) {
             if (method != .GET) return self.methodNotAllowed(request);
             return self.serveSystemFragment(request);
+        }
+        if (std.mem.eql(u8, path, "/partials/audit")) {
+            if (method != .GET) return self.methodNotAllowed(request);
+            return self.serveAuditFragment(request);
+        }
+        if (std.mem.eql(u8, path, "/partials/journal")) {
+            if (method != .GET) return self.methodNotAllowed(request);
+            return self.serveJournalFragment(request);
         }
 
         if (method != .GET and method != .HEAD) return self.methodNotAllowedHtml(request);
@@ -628,6 +654,7 @@ const App = struct {
             return self.renderNatDraftError(request, csrf[0..], allocator, running, input.value, message);
         }
 
+        self.clearRestartToken();
         var notice_buf: [160]u8 = undefined;
         const notice = std.fmt.bufPrint(&notice_buf, "{d} NAT change{s} applied.", .{ changes, if (changes == 1) "" else "s" }) catch "NAT changes applied.";
         return self.renderNatApplied(request, csrf[0..], allocator, notice);
@@ -823,8 +850,9 @@ const App = struct {
             return self.renderDhcpPageView(request, .{ .csrf = csrf[0..], .draft_json = "", .err = "Missing DHCP snapshot" });
         const draft_json = jsonStringify(allocator, running) catch |err|
             return self.renderDhcpPageView(request, .{ .csrf = csrf[0..], .draft_json = "", .err = @errorName(err) });
-        const view = buildDhcpView(allocator, csrf[0..], running, running, draft_json, null, null, null) catch |err|
+        var view = buildDhcpView(allocator, csrf[0..], running, running, draft_json, null, null, null) catch |err|
             return self.renderDhcpPageView(request, .{ .csrf = csrf[0..], .draft_json = "", .err = @errorName(err) });
+        self.decorateDhcpView(&view);
         return self.renderDhcpPageView(request, view);
     }
 
@@ -842,8 +870,9 @@ const App = struct {
             return self.renderDhcpFragmentView(request, .{ .csrf = csrf[0..], .draft_json = "", .err = "Missing DHCP snapshot" });
         const draft_json = jsonStringify(allocator, running) catch |err|
             return self.renderDhcpFragmentView(request, .{ .csrf = csrf[0..], .draft_json = "", .err = @errorName(err) });
-        const view = buildDhcpView(allocator, csrf[0..], running, running, draft_json, null, null, null) catch |err|
+        var view = buildDhcpView(allocator, csrf[0..], running, running, draft_json, null, null, null) catch |err|
             return self.renderDhcpFragmentView(request, .{ .csrf = csrf[0..], .draft_json = "", .err = @errorName(err) });
+        self.decorateDhcpView(&view);
         return self.renderDhcpFragmentView(request, view);
     }
 
@@ -969,7 +998,16 @@ const App = struct {
         if (!apply_response.value.ok) {
             return self.renderDhcpDraftError(request, csrf[0..], allocator, running, input.value, apply_response.value.message orelse "Config apply failed.");
         }
-        return self.renderDhcpApplied(request, csrf[0..], allocator, "DHCP configuration saved. Restart vrouterd to activate it.");
+        if (apply_response.value.restart_required orelse false) {
+            self.rememberRestartResponse(&apply_response.value);
+            const notice = if (apply_response.value.restart_token != null)
+                "DHCP configuration saved. Restart vrouterd to activate it."
+            else
+                "DHCP configuration saved. Run systemctl restart vrouterd to activate it.";
+            return self.renderDhcpApplied(request, csrf[0..], allocator, notice);
+        }
+        self.clearRestartToken();
+        return self.renderDhcpApplied(request, csrf[0..], allocator, "DHCP configuration applied.");
     }
 
     fn reviewConfigSection(
@@ -1011,6 +1049,18 @@ const App = struct {
         };
     }
 
+    fn decorateDhcpView(self: *App, view: *pages.DhcpView) void {
+        view.restart_pending = self.restart_pending;
+        view.restart_supported = self.restart_supported;
+        view.restart_token = self.restartToken();
+    }
+
+    fn decorateDnsView(self: *App, view: *pages.DnsView) void {
+        view.restart_pending = self.restart_pending;
+        view.restart_supported = self.restart_supported;
+        view.restart_token = self.restartToken();
+    }
+
     fn renderDhcpApplied(self: *App, request: *std.http.Server.Request, csrf: []const u8, allocator: std.mem.Allocator, notice: []const u8) !void {
         var response = self.call("dhcp.list", null, null) catch |err| {
             return self.renderDhcpFragmentView(request, .{ .csrf = csrf, .draft_json = "", .err = @errorName(err) });
@@ -1021,8 +1071,9 @@ const App = struct {
         };
         const draft_json = jsonStringify(allocator, running) catch |err|
             return self.renderDhcpFragmentView(request, .{ .csrf = csrf, .draft_json = "", .err = @errorName(err) });
-        const view = buildDhcpView(allocator, csrf, running, running, draft_json, notice, null, null) catch |err|
+        var view = buildDhcpView(allocator, csrf, running, running, draft_json, notice, null, null) catch |err|
             return self.renderDhcpFragmentView(request, .{ .csrf = csrf, .draft_json = "", .err = @errorName(err) });
+        self.decorateDhcpView(&view);
         return self.renderDhcpFragmentView(request, view);
     }
 
@@ -1071,8 +1122,9 @@ const App = struct {
             return self.renderDnsPageView(request, .{ .csrf = csrf[0..], .draft_json = "", .err = "Missing DNS snapshot" });
         const draft_json = jsonStringify(allocator, running) catch |err|
             return self.renderDnsPageView(request, .{ .csrf = csrf[0..], .draft_json = "", .err = @errorName(err) });
-        const view = buildDnsView(allocator, csrf[0..], running, running, draft_json, null, null, null) catch |err|
+        var view = buildDnsView(allocator, csrf[0..], running, running, draft_json, null, null, null) catch |err|
             return self.renderDnsPageView(request, .{ .csrf = csrf[0..], .draft_json = "", .err = @errorName(err) });
+        self.decorateDnsView(&view);
         return self.renderDnsPageView(request, view);
     }
 
@@ -1089,8 +1141,9 @@ const App = struct {
             return self.renderDnsFragmentView(request, .{ .csrf = csrf[0..], .draft_json = "", .err = "Missing DNS snapshot" });
         const draft_json = jsonStringify(allocator, running) catch |err|
             return self.renderDnsFragmentView(request, .{ .csrf = csrf[0..], .draft_json = "", .err = @errorName(err) });
-        const view = buildDnsView(allocator, csrf[0..], running, running, draft_json, null, null, null) catch |err|
+        var view = buildDnsView(allocator, csrf[0..], running, running, draft_json, null, null, null) catch |err|
             return self.renderDnsFragmentView(request, .{ .csrf = csrf[0..], .draft_json = "", .err = @errorName(err) });
+        self.decorateDnsView(&view);
         return self.renderDnsFragmentView(request, view);
     }
 
@@ -1217,7 +1270,16 @@ const App = struct {
         if (!apply_response.value.ok) {
             return self.renderDnsDraftError(request, csrf[0..], allocator, running, input.value, apply_response.value.message orelse "Config apply failed.");
         }
-        return self.renderDnsApplied(request, csrf[0..], allocator, "DNS configuration saved. Restart vrouterd to activate it.");
+        if (apply_response.value.restart_required orelse false) {
+            self.rememberRestartResponse(&apply_response.value);
+            const notice = if (apply_response.value.restart_token != null)
+                "DNS configuration saved. Restart vrouterd to activate it."
+            else
+                "DNS configuration saved. Run systemctl restart vrouterd to activate it.";
+            return self.renderDnsApplied(request, csrf[0..], allocator, notice);
+        }
+        self.clearRestartToken();
+        return self.renderDnsApplied(request, csrf[0..], allocator, "DNS configuration applied.");
     }
 
     fn renderDnsApplied(self: *App, request: *std.http.Server.Request, csrf: []const u8, allocator: std.mem.Allocator, notice: []const u8) !void {
@@ -1230,8 +1292,9 @@ const App = struct {
         };
         const draft_json = jsonStringify(allocator, running) catch |err|
             return self.renderDnsFragmentView(request, .{ .csrf = csrf, .draft_json = "", .err = @errorName(err) });
-        const view = buildDnsView(allocator, csrf, running, running, draft_json, notice, null, null) catch |err|
+        var view = buildDnsView(allocator, csrf, running, running, draft_json, notice, null, null) catch |err|
             return self.renderDnsFragmentView(request, .{ .csrf = csrf, .draft_json = "", .err = @errorName(err) });
+        self.decorateDnsView(&view);
         return self.renderDnsFragmentView(request, view);
     }
 
@@ -1307,6 +1370,84 @@ const App = struct {
         return self.respondHtml(request, .ok, out.written());
     }
 
+    fn serveAuditPage(self: *App, request: *std.http.Server.Request) !void {
+        const csrf = (try self.requireSession(request)) orelse return;
+        const now = self.nowMs();
+        var query_buf: [256]u8 = undefined;
+        var result_buf: [32]u8 = undefined;
+        const query = queryValue(request.head.target, "q", &query_buf) orelse "";
+        const result_filter = queryValue(request.head.target, "result", &result_buf) orelse "all";
+
+        var response = self.call("audit.list", null, audit_page_limit) catch |err| {
+            return self.renderAuditPage(request, csrf[0..], null, query, result_filter, @errorName(err), now);
+        };
+        defer response.deinit();
+        const audit = response.value.audit orelse
+            return self.renderAuditPage(request, csrf[0..], null, query, result_filter, "Missing audit snapshot", now);
+        return self.renderAuditPage(request, csrf[0..], audit, query, result_filter, null, now);
+    }
+
+    fn serveAuditFragment(self: *App, request: *std.http.Server.Request) !void {
+        if ((try self.requireSessionFragment(request)) == null) return;
+        const now = self.nowMs();
+        var query_buf: [256]u8 = undefined;
+        var result_buf: [32]u8 = undefined;
+        const query = queryValue(request.head.target, "q", &query_buf) orelse "";
+        const result_filter = queryValue(request.head.target, "result", &result_buf) orelse "all";
+
+        var out: std.Io.Writer.Allocating = .init(self.gpa);
+        defer out.deinit();
+        var response = self.call("audit.list", null, audit_page_limit) catch |err| {
+            try pages.auditFragment(&out.writer, null, query, result_filter, @errorName(err), now);
+            return self.respondHtml(request, .ok, out.written());
+        };
+        defer response.deinit();
+        const audit = response.value.audit orelse {
+            try pages.auditFragment(&out.writer, null, query, result_filter, "Missing audit snapshot", now);
+            return self.respondHtml(request, .ok, out.written());
+        };
+        try pages.auditFragment(&out.writer, audit, query, result_filter, null, now);
+        return self.respondHtml(request, .ok, out.written());
+    }
+
+    fn serveJournalPage(self: *App, request: *std.http.Server.Request) !void {
+        const csrf = (try self.requireSession(request)) orelse return;
+        var query_buf: [256]u8 = undefined;
+        var state_buf: [32]u8 = undefined;
+        const query = queryValue(request.head.target, "q", &query_buf) orelse "";
+        const state_filter = queryValue(request.head.target, "state", &state_buf) orelse "all";
+
+        var response = self.call("journal.list", null, journal_page_limit) catch |err| {
+            return self.renderJournalPage(request, csrf[0..], null, query, state_filter, @errorName(err));
+        };
+        defer response.deinit();
+        const journal = response.value.journal orelse
+            return self.renderJournalPage(request, csrf[0..], null, query, state_filter, "Missing journal snapshot");
+        return self.renderJournalPage(request, csrf[0..], journal, query, state_filter, null);
+    }
+
+    fn serveJournalFragment(self: *App, request: *std.http.Server.Request) !void {
+        if ((try self.requireSessionFragment(request)) == null) return;
+        var query_buf: [256]u8 = undefined;
+        var state_buf: [32]u8 = undefined;
+        const query = queryValue(request.head.target, "q", &query_buf) orelse "";
+        const state_filter = queryValue(request.head.target, "state", &state_buf) orelse "all";
+
+        var out: std.Io.Writer.Allocating = .init(self.gpa);
+        defer out.deinit();
+        var response = self.call("journal.list", null, journal_page_limit) catch |err| {
+            try pages.journalFragment(&out.writer, null, query, state_filter, @errorName(err));
+            return self.respondHtml(request, .ok, out.written());
+        };
+        defer response.deinit();
+        const journal = response.value.journal orelse {
+            try pages.journalFragment(&out.writer, null, query, state_filter, "Missing journal snapshot");
+            return self.respondHtml(request, .ok, out.written());
+        };
+        try pages.journalFragment(&out.writer, journal, query, state_filter, null);
+        return self.respondHtml(request, .ok, out.written());
+    }
+
     fn serveSystemPage(self: *App, request: *std.http.Server.Request) !void {
         const csrf = (try self.requireSession(request)) orelse return;
         const now = self.nowMs();
@@ -1320,20 +1461,94 @@ const App = struct {
     }
 
     fn serveSystemFragment(self: *App, request: *std.http.Server.Request) !void {
-        if ((try self.requireSessionFragment(request)) == null) return;
+        const csrf = (try self.requireSessionFragment(request)) orelse return;
         const now = self.nowMs();
         var out: std.Io.Writer.Allocating = .init(self.gpa);
         defer out.deinit();
         var response = self.call("status", null, null) catch |err| {
-            try pages.systemFragment(&out.writer, null, @errorName(err), now);
+            try pages.systemFragment(&out.writer, null, @errorName(err), now, self.restartUi(csrf[0..]));
             return self.respondHtml(request, .ok, out.written());
         };
         defer response.deinit();
         const status = response.value.status orelse {
-            try pages.systemFragment(&out.writer, null, "Missing status", now);
+            try pages.systemFragment(&out.writer, null, "Missing status", now, self.restartUi(csrf[0..]));
             return self.respondHtml(request, .ok, out.written());
         };
-        try pages.systemFragment(&out.writer, status, null, now);
+        try pages.systemFragment(&out.writer, status, null, now, self.restartUi(csrf[0..]));
+        return self.respondHtml(request, .ok, out.written());
+    }
+
+    fn rememberRestartResponse(self: *App, response: *const protocol.Response) void {
+        self.restart_supported = response.restart_supported orelse self.restart_supported;
+        if (response.restart_required orelse false) {
+            self.restart_pending = true;
+            if (response.restart_token) |token| {
+                if (token.len <= self.restart_token_buf.len) {
+                    @memcpy(self.restart_token_buf[0..token.len], token);
+                    self.restart_token_len = token.len;
+                    return;
+                }
+            }
+        }
+        self.clearRestartToken();
+    }
+
+    fn clearRestartToken(self: *App) void {
+        self.restart_token_len = 0;
+    }
+
+    fn restartToken(self: *const App) ?[]const u8 {
+        if (self.restart_token_len == 0) return null;
+        return self.restart_token_buf[0..self.restart_token_len];
+    }
+
+    fn serveRestart(self: *App, request: *std.http.Server.Request) !void {
+        if (!self.sameOrigin(request)) {
+            return self.respondHtml(request, .forbidden, "<h1>Cross-origin request rejected.</h1>");
+        }
+        const csrf = (try self.requireSessionFragment(request)) orelse return;
+        const body = self.readRequestBody(request) catch |err| {
+            return self.respondRestartResult(request, bodyErrorMessage(err), true);
+        };
+        defer self.gpa.free(body);
+        if (!try self.verifyFormCsrf(request, csrf, body)) return;
+
+        var token_buf: [64]u8 = undefined;
+        const token = formValue(body, "restart_token", &token_buf) orelse "";
+        var response = self.restartDaemon(token) catch |err| {
+            return self.respondRestartResult(request, @errorName(err), true);
+        };
+        defer response.deinit();
+        if (!response.value.ok) {
+            return self.respondRestartResult(
+                request,
+                response.value.message orelse response.value.error_code orelse "Restart request failed.",
+                true,
+            );
+        }
+        self.clearRestartToken();
+        self.restart_pending = false;
+        return self.respondRestartResult(
+            request,
+            "Restart accepted. vrouterd is stopping cleanly and will come back up; refresh in a few seconds.",
+            false,
+        );
+    }
+
+    fn restartDaemon(self: *App, token: []const u8) !std.json.Parsed(protocol.Response) {
+        var client = try vrouter.control_client.Client.connect(self.io, self.gpa, self.control_path);
+        defer client.deinit();
+        return client.call(.{
+            .version = protocol.version,
+            .op = "daemon.restart",
+            .restart_token = token,
+        });
+    }
+
+    fn respondRestartResult(self: *App, request: *std.http.Server.Request, message: []const u8, is_error: bool) !void {
+        var out: std.Io.Writer.Allocating = .init(self.gpa);
+        defer out.deinit();
+        try pages.restartResultDialog(&out.writer, message, is_error);
         return self.respondHtml(request, .ok, out.written());
     }
 
@@ -1365,11 +1580,34 @@ const App = struct {
         return self.respondHtml(request, .ok, out.written());
     }
 
+    fn renderAuditPage(self: *App, request: *std.http.Server.Request, csrf: []const u8, audit: ?protocol.Audit, query: []const u8, result_filter: []const u8, err: ?[]const u8, now: i64) !void {
+        var out: std.Io.Writer.Allocating = .init(self.gpa);
+        defer out.deinit();
+        try pages.auditPage(self.gpa, &out.writer, csrf, audit, query, result_filter, err, now);
+        return self.respondHtml(request, .ok, out.written());
+    }
+
+    fn renderJournalPage(self: *App, request: *std.http.Server.Request, csrf: []const u8, journal: ?protocol.Journal, query: []const u8, state_filter: []const u8, err: ?[]const u8) !void {
+        var out: std.Io.Writer.Allocating = .init(self.gpa);
+        defer out.deinit();
+        try pages.journalPage(self.gpa, &out.writer, csrf, journal, query, state_filter, err);
+        return self.respondHtml(request, .ok, out.written());
+    }
+
     fn renderSystemPage(self: *App, request: *std.http.Server.Request, csrf: []const u8, status: ?protocol.Status, err: ?[]const u8, now: i64) !void {
         var out: std.Io.Writer.Allocating = .init(self.gpa);
         defer out.deinit();
-        try pages.systemPage(self.gpa, &out.writer, csrf, status, err, now);
+        try pages.systemPage(self.gpa, &out.writer, csrf, status, err, now, self.restartUi(csrf));
         return self.respondHtml(request, .ok, out.written());
+    }
+
+    fn restartUi(self: *const App, csrf: []const u8) pages.RestartUi {
+        return .{
+            .csrf = csrf,
+            .pending = self.restart_pending,
+            .supported = self.restart_supported,
+            .token = self.restartToken(),
+        };
     }
 
     fn renderLoginError(self: *App, request: *std.http.Server.Request, status: std.http.Status, message: []const u8) !void {

@@ -83,6 +83,57 @@ pub fn appendAudit(io: std.Io, gpa: std.mem.Allocator, state_dir: []const u8, en
     try file.sync(io);
 }
 
+pub fn appendOperationAudit(
+    io: std.Io,
+    gpa: std.mem.Allocator,
+    state_dir: []const u8,
+    op: []const u8,
+    instance: []const u8,
+    transaction_id: []const u8,
+    audit_id: []const u8,
+    actor: Actor,
+    ts_ms: i64,
+) !void {
+    var out: std.Io.Writer.Allocating = .init(gpa);
+    defer out.deinit();
+    var json: std.json.Stringify = .{ .writer = &out.writer };
+    try json.beginObject();
+    try json.objectField("ts_ms");
+    try json.write(ts_ms);
+    try json.objectField("transaction");
+    try json.write(transaction_id);
+    try json.objectField("audit_id");
+    try json.write(audit_id);
+    try json.objectField("kind");
+    try json.write("operational");
+    try json.objectField("op");
+    try json.write(op);
+    try json.objectField("instance");
+    try json.write(instance);
+    try json.objectField("actor_uid");
+    try json.write(actor.uid);
+    try json.objectField("actor_pid");
+    try json.write(actor.pid);
+    try json.objectField("result");
+    try json.write("accepted");
+    try json.endObject();
+    try out.writer.writeByte('\n');
+
+    try ensureStateDir(io, state_dir);
+    const path = try std.fs.path.join(gpa, &.{ state_dir, audit_file });
+    defer gpa.free(path);
+    const cwd = std.Io.Dir.cwd();
+    var file = try cwd.createFile(io, path, .{
+        .read = true,
+        .truncate = false,
+        .permissions = std.Io.File.Permissions.fromMode(0o600),
+    });
+    defer file.close(io);
+    const stat = try file.stat(io);
+    try file.writePositionalAll(io, out.writer.buffered(), stat.size);
+    try file.sync(io);
+}
+
 pub fn auditContains(io: std.Io, gpa: std.mem.Allocator, state_dir: []const u8, transaction: []const u8) !bool {
     const path = try std.fs.path.join(gpa, &.{ state_dir, audit_file });
     defer gpa.free(path);
@@ -333,6 +384,29 @@ fn syncParent(io: std.Io, path: []const u8) !void {
     var dir = try std.Io.Dir.cwd().openFile(io, dir_path, .{ .allow_directory = true });
     defer dir.close(io);
     try dir.sync(io);
+}
+
+test "operation audit records accepted daemon actions" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir = try tmp.dir.realPath(std.testing.io, &path_buf);
+    const state_dir = path_buf[0..dir];
+    try appendOperationAudit(
+        std.testing.io,
+        std.testing.allocator,
+        state_dir,
+        "daemon.restart",
+        "test",
+        "a" ** 64,
+        "b" ** 64,
+        .{ .uid = 0, .pid = 42 },
+        1000,
+    );
+    const audit = try tmp.dir.readFileAlloc(std.testing.io, audit_file, std.testing.allocator, .limited(4096));
+    defer std.testing.allocator.free(audit);
+    try std.testing.expect(std.mem.indexOf(u8, audit, "\"op\":\"daemon.restart\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, audit, "\"result\":\"accepted\"") != null);
 }
 
 test "resolvePending commits, audits once, and records restart" {

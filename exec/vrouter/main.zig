@@ -517,7 +517,7 @@ fn upCommand(init: std.process.Init, args: []const []const u8) !void {
     };
 
     const child = std.process.spawn(io, .{
-        .argv = &.{ daemon, "-c", cfg.path },
+        .argv = &.{ daemon, "-c", cfg.path, "--enable-restart" },
         .stdin = .ignore,
         .stdout = .ignore,
         .stderr = .{ .file = log_file },

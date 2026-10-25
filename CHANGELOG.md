@@ -8,6 +8,21 @@ All notable changes to vRouter are documented here. The format follows
 
 ### Added
 
+- **Restart orchestration (ADR-015/016):** v3 `config.apply` returns
+  `restart_required` with a one-time, boot-bound `restart_token` when restart
+  support is enabled. `daemon.restart` consumes the token, audits the accepted
+  operation and asks the service loop to exit cleanly; `daemon.stop` uses typed
+  `stop` confirmation. `vrouter up` passes `--enable-restart`, and direct
+  `vrouterd` runs can opt in with the same flag, to perform a clean teardown and
+  self re-exec for preview deployments; without it, lifecycle calls fail with
+  `restart_unavailable`. The DHCP, DNS and System
+  pages show a persistent restart banner and a restart button when a token is
+  available, or the exact service-manager command otherwise.
+- **Audit and journal views:** the web admin reads bounded v3 `audit.list` and
+  `journal.list` tails through the control socket. New Audit and Journal pages
+  show transaction/operator history, actor credentials, malformed-line counts,
+  truncation and journal health, with result/state and text filters. Reads are
+  capped at 200 rows and never mutate daemon or journal state.
 - **Staged web configuration (ADR-016):** the NAT, DHCP and DNS pages stage
   add, edit and remove operations in page-carried drafts. A pending-changes bar
   reviews the proposed `config.diff`, applies the draft once through

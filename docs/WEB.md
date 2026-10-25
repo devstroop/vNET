@@ -66,6 +66,18 @@ Options:
 | `--session-ttl-hours` | `12` | Session lifetime, 1–168 hours. |
 | `--hash-password` | — | Read a password from stdin and print a PHC hash. |
 
+Restart-required DHCP/DNS saves return a one-time token. To let the web restart
+the daemon locally, start it with `--enable-restart`:
+
+```bash
+./zig-out/bin/vrouterd -c /etc/vrouter/vrouter.json --enable-restart
+```
+
+The option performs a clean teardown and re-exec; it is not a service manager.
+`vrouter up` passes it automatically when it launches the daemon. Without it,
+`restart_supported` is false and the UI prints the exact
+`systemctl restart vrouterd` command instead.
+
 ## Pages and fragments
 
 The browser loads a full page once, then HTMX refreshes only the live region:
@@ -76,15 +88,24 @@ The browser loads a full page once, then HTMX refreshes only the live region:
 | `/overview` | page | Ports, uptime, forwarding, drops, conntrack and NAT counters. |
 | `/nat` | page | Masquerade and port-forward rules. |
 | `/connections` | page | Up to 200 active flows with state and text filters. |
+| `/audit` | page | Up to 200 audit records with result and text filters. |
+| `/journal` | page | Up to 200 journal records with valid/malformed and text filters. |
 | `/system` | page | Runtime identity, paths and preview scope. |
+| `/dhcp` | page | DHCP servers, pools and reservations. |
+| `/dns` | page | Resolver settings and split-DNS zones. |
+| `/restart` | action | Accepts a one-time restart token from a restart-required apply. |
 | `/partials/status` | fragment | Overview live region (5 s refresh). |
 | `/partials/nat` | fragment | NAT live region (10 s refresh). |
 | `/partials/conntrack` | fragment | Connections live region (5 s refresh). |
+| `/partials/audit` | fragment | Audit live region (10 s refresh). |
+| `/partials/journal` | fragment | Journal live region (10 s refresh). |
 | `/partials/system` | fragment | System live region (10 s refresh). |
 | `/healthz` | text | Unauthenticated liveness check. |
 
 The connections form sends `state` and `q` to `/partials/conntrack`; the live
-region includes the same form values so auto-refresh preserves the filter.
+region includes the same form values so auto-refresh preserves the filter. The
+audit form sends `result` and `q`; the journal form sends `state` and `q`. Both
+read bounded state-directory tails through v3 `audit.list` and `journal.list`.
 HTMX 4.0.0 uses explicit `hx-target`/`hx-swap` on every request; the preview
 does not rely on attribute inheritance.
 

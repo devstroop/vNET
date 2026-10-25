@@ -4,7 +4,7 @@
 const std = @import("std");
 const assets = @import("assets.zig");
 
-pub const Page = enum { overview, nat, dhcp, dns, connections, system };
+pub const Page = enum { overview, nat, dhcp, dns, connections, audit, journal, system };
 
 pub const PageOptions = struct {
     title: []const u8,
@@ -98,6 +98,7 @@ pub fn writePage(w: *std.Io.Writer, opts: PageOptions) !void {
         \\      </div>
         \\    </header>
         \\    <div id="refresh-indicator" class="htmx-indicator" aria-live="polite">Refreshing…</div>
+        \\    <div id="restart-result"></div>
         \\
     );
     try w.writeAll(opts.body);
@@ -117,6 +118,8 @@ fn writeNav(w: *std.Io.Writer, active: Page) !void {
         .{ .page = .dhcp, .href = "/dhcp", .label = "DHCP" },
         .{ .page = .dns, .href = "/dns", .label = "DNS" },
         .{ .page = .connections, .href = "/connections", .label = "Connections" },
+        .{ .page = .audit, .href = "/audit", .label = "Audit" },
+        .{ .page = .journal, .href = "/journal", .label = "Journal" },
         .{ .page = .system, .href = "/system", .label = "System" },
     };
     for (items) |item| {

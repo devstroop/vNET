@@ -270,7 +270,15 @@ pub fn run(
     var netlink_tick: u8 = 0;
     var lease_save_ms = nowMs(io);
     var control_tick_ms = started_ms;
+    var restart_requested = false;
     while (!stop.load(.acquire)) {
+        if (control) |*server| {
+            if (server.restartRequested()) {
+                restart_requested = true;
+                break;
+            }
+            if (server.stopRequested()) break;
+        }
         var now = nowMs(io);
         if (control) |*server| {
             if (server.takeNatApply(apply_buf)) |line| {
@@ -384,6 +392,10 @@ pub fn run(
 
     if (options.runtime) |runtime| runtime.running.store(false, .release);
 
+    if (restart_requested) {
+        logger.info("restart requested by control plane", .{});
+    }
+
     if (lease_store) |*store| {
         store.save(forwarder.dhcpServers()) catch |err| {
             logger.warn("lease db save: {s}", .{@errorName(err)});
@@ -457,6 +469,8 @@ pub fn run(
             forwarder.counters.icmpv6_echoes,
         },
     );
+
+    if (restart_requested) return error.RestartRequested;
 }
 
 const ApplyResult = struct {

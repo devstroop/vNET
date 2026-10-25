@@ -133,19 +133,20 @@ journal or edits the config file directly.
 ### Gaps
 
 1. **No web read model for most resources.** v3 list reads expose ports,
-   bridges, interfaces, routes, DHCP, DNS and firewall config, but there are no
-   detail pages, leases, journal or audit views yet.
+   bridges, interfaces, routes, DHCP, DNS and firewall config, plus bounded
+   audit and journal tails, but there are no detail pages or lease views yet.
 2. **No general write API.** NAT, DHCP and DNS have staged config paths; there
-   is no web CRUD for ports, bridges, interfaces, routes or firewall, and no
-   lifecycle operation.
+   is no web CRUD for ports, bridges, interfaces, routes or firewall. Restart
+   and stop are available through the token-gated lifecycle flow only.
 3. **No single write path.** CLI address/route mutations bypass the daemon.
    Running them while `vrouterd` is live can race the datapath and the config.
 4. **No live structural apply.** Ports, bridges, interfaces, routes, DHCP, DNS
    and firewall changes require a daemon restart today. The web saves DHCP/DNS
    and reports restart-required rather than pretending they are live.
 5. **No write authorization.** Read and write scopes are not distinct.
-6. **No web audit trail.** The daemon appends transaction audit entries, but
-   there is no operator-facing audit or journal page in the web preview.
+6. **Audit/journal reads have no paging.** The web renders bounded audit and
+   journal tails, including malformed entries, but cursor pagination and
+   journal repair guidance are not implemented.
 7. **Limits are only partly lifted.** The web request limit is 64 KiB for
    staged NAT/DHCP/DNS drafts; control config frames are 16 MiB on a dedicated
    worker (ADR-015).
@@ -653,6 +654,9 @@ unprivileged process must not signal the daemon arbitrarily.
 
 - The daemon detects a supervisor through an explicit deployment setting and
   exposes `restart_supported` in `status`. It does not guess from PID 1.
+  `vrouterd --enable-restart` is the explicit preview setting for a
+  daemon-managed clean re-exec; it is not a supervisor and is not enabled by
+  default.
 - The supervisor contract (requested stop/restart versus crash) is deployment
   configuration. If the unit cannot distinguish them, `daemon.stop` and
   `daemon.restart` return `restart_unavailable` and the UI gives the exact

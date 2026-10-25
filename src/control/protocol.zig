@@ -35,6 +35,7 @@ pub const Request = struct {
     instance: ?[]const u8 = null,
     revision: ?[]const u8 = null,
     confirm: ?[]const u8 = null,
+    restart_token: ?[]const u8 = null,
     idempotency_key: ?[]const u8 = null,
     state: ?[]const u8 = null,
     limit: ?u32 = null,
@@ -111,6 +112,67 @@ pub const Conntrack = struct {
     entries: []const ConntrackEntry = &.{},
 };
 
+pub const AuditEntry = struct {
+    ts_ms: i64 = 0,
+    transaction: []const u8 = "",
+    audit_id: []const u8 = "",
+    kind: ?[]const u8 = null,
+    op: []const u8 = "",
+    instance: []const u8 = "",
+    revision_before: ?[]const u8 = null,
+    revision_after: ?[]const u8 = null,
+    actor_uid: ?u32 = null,
+    actor_pid: ?i32 = null,
+    affected: ?[]const []const u8 = null,
+    restart_required: ?bool = null,
+    result: []const u8 = "",
+    recovered: ?bool = null,
+};
+
+pub const Audit = struct {
+    instance: []const u8 = "",
+    path: []const u8 = "",
+    total: u32 = 0,
+    returned: u32 = 0,
+    malformed: u32 = 0,
+    truncated: bool = false,
+    entries: []const AuditEntry = &.{},
+};
+
+pub const JournalEntry = struct {
+    line: u64 = 0,
+    valid: bool = true,
+    raw: []const u8 = "",
+    op: []const u8 = "",
+    dev: ?[]const u8 = null,
+    cidr: ?[]const u8 = null,
+    up: ?bool = null,
+    dst: ?[]const u8 = null,
+    via: ?[]const u8 = null,
+    metric: ?u32 = null,
+    table: ?u32 = null,
+    kind: ?[]const u8 = null,
+    peer: ?[]const u8 = null,
+    stp: ?bool = null,
+    vlan_filtering: ?bool = null,
+    master: ?[]const u8 = null,
+    vid: ?u16 = null,
+    pvid: ?bool = null,
+    untagged: ?bool = null,
+};
+
+pub const Journal = struct {
+    instance: []const u8 = "",
+    path: []const u8 = "",
+    entries: u32 = 0,
+    valid: u32 = 0,
+    malformed: u32 = 0,
+    malformed_tail: bool = false,
+    returned: u32 = 0,
+    truncated: bool = false,
+    lines: []const JournalEntry = &.{},
+};
+
 pub const Response = struct {
     ok: bool = false,
     id: ?u64 = null,
@@ -122,6 +184,8 @@ pub const Response = struct {
     status: ?Status = null,
     nat: ?Nat = null,
     conntrack: ?Conntrack = null,
+    audit: ?Audit = null,
+    journal: ?Journal = null,
     revision: ?[]const u8 = null,
     source_path: ?[]const u8 = null,
     writable: ?bool = null,
@@ -140,6 +204,7 @@ pub const Response = struct {
     warnings: ?[]const []const u8 = null,
     confirm: ?[]const u8 = null,
     restart_required: ?bool = null,
+    restart_supported: ?bool = null,
     restart_token: ?[]const u8 = null,
 };
 
@@ -162,7 +227,9 @@ pub fn isV3Only(op: []const u8) bool {
         std.mem.eql(u8, op, "firewall.counters") or
         std.mem.eql(u8, op, "journal.list") or
         std.mem.eql(u8, op, "audit.list") or
-        std.mem.eql(u8, op, "doctor.status");
+        std.mem.eql(u8, op, "doctor.status") or
+        std.mem.eql(u8, op, "daemon.stop") or
+        std.mem.eql(u8, op, "daemon.restart");
 }
 
 pub fn isConfigSized(op: []const u8) bool {
@@ -201,6 +268,16 @@ test "v3 request parses version and config fields" {
     try std.testing.expectEqualStrings("sha256:abc", parsed.value.revision.?);
     try std.testing.expectEqualStrings("yes", parsed.value.confirm.?);
     try std.testing.expectEqualStrings("k1", parsed.value.idempotency_key.?);
+}
+
+test "restart request parses the one-time token" {
+    var parsed = try parseRequest(
+        std.testing.allocator,
+        "{\"version\":3,\"id\":9,\"op\":\"daemon.restart\",\"restart_token\":\"abc\"}",
+    );
+    defer parsed.deinit();
+    try std.testing.expectEqualStrings("daemon.restart", parsed.value.op);
+    try std.testing.expectEqualStrings("abc", parsed.value.restart_token.?);
 }
 
 test "v2 request serialization omits null optional fields" {
