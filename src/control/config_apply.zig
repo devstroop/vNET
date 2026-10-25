@@ -144,11 +144,55 @@ pub fn analyze(
 }
 
 pub fn canonicalize(gpa: std.mem.Allocator, value: std.json.Value) ![]u8 {
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const normalized = try normalizeValue(arena.allocator(), value);
     var out: std.Io.Writer.Allocating = .init(gpa);
     errdefer out.deinit();
-    try std.json.Stringify.value(value, .{ .whitespace = .indent_2 }, &out.writer);
+    try std.json.Stringify.value(normalized, .{ .whitespace = .indent_2 }, &out.writer);
     try out.writer.writeByte('\n');
     return out.toOwnedSlice();
+}
+
+fn normalizeValue(arena: std.mem.Allocator, value: std.json.Value) !std.json.Value {
+    return switch (value) {
+        .object => |object| {
+            const keys = try arena.alloc([]const u8, object.keys().len);
+            var count: usize = 0;
+            for (object.keys()) |key| {
+                const field_value = object.get(key) orelse continue;
+                if (isNull(field_value)) continue;
+                keys[count] = key;
+                count += 1;
+            }
+            std.mem.sort([]const u8, keys[0..count], {}, lessThanKey);
+            var map: std.json.ObjectMap = .{};
+            for (keys[0..count]) |key| {
+                try map.put(arena, key, try normalizeValue(arena, object.get(key).?));
+            }
+            return .{ .object = map };
+        },
+        .array => |array| {
+            var list = std.json.Array.init(arena);
+            try list.ensureTotalCapacity(array.items.len);
+            for (array.items) |item| {
+                try list.append(try normalizeValue(arena, item));
+            }
+            return .{ .array = list };
+        },
+        else => value,
+    };
+}
+
+fn isNull(value: std.json.Value) bool {
+    return switch (value) {
+        .null => true,
+        else => false,
+    };
+}
+
+fn lessThanKey(_: void, lhs: []const u8, rhs: []const u8) bool {
+    return std.mem.order(u8, lhs, rhs) == .lt;
 }
 
 fn compare(
@@ -366,6 +410,40 @@ pub const Idempotency = struct {
         conflict,
     };
 };
+
+test "canonicalize ignores object order and null optionals" {
+    const before =
+        \\{"version":1,"instance":"test","ports":{"wan":{"kind":"l2","device":"eth0"}},"dns":{"upstreams":["1.1.1.1"],"listen":null}}
+    ;
+    const after =
+        \\{"instance":"test","dns":{"upstreams":["1.1.1.1"]},"ports":{"wan":{"device":"eth0","kind":"l2"}},"version":1}
+    ;
+    var before_value = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, before, .{ .allocate = .alloc_always });
+    defer before_value.deinit();
+    var after_value = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, after, .{ .allocate = .alloc_always });
+    defer after_value.deinit();
+    const before_canonical = try canonicalize(std.testing.allocator, before_value.value);
+    defer std.testing.allocator.free(before_canonical);
+    const after_canonical = try canonicalize(std.testing.allocator, after_value.value);
+    defer std.testing.allocator.free(after_canonical);
+    try std.testing.expectEqualStrings(before_canonical, after_canonical);
+}
+
+test "analyze ignores object order and null optionals" {
+    const before =
+        \\{"version":1,"instance":"test","ports":{"wan":{"kind":"l2","device":"eth0"}},"nat":{"masquerade":[{"out":"wan"}]}}
+    ;
+    const after =
+        \\{"nat":{"masquerade":[{"out":"wan"}]},"ports":{"wan":{"device":"eth0","kind":"l2"}},"instance":"test","version":1}
+    ;
+    var value = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, after, .{ .allocate = .alloc_always });
+    defer value.deinit();
+    var change = try analyze(std.testing.allocator, before, value.value);
+    defer change.deinit();
+    try std.testing.expectEqual(@as(usize, 0), change.affected.count());
+    try std.testing.expectEqualStrings("", change.diff);
+    try std.testing.expect(!change.restart_required);
+}
 
 test "canonicalize and diff preserve unrelated fields" {
     const before =

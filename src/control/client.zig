@@ -37,7 +37,18 @@ pub const Client = struct {
         state_filter: ?[]const u8,
         limit: ?u32,
     ) !std.json.Parsed(protocol.Response) {
+        return self.callOpVersion(null, op, state_filter, limit);
+    }
+
+    pub fn callOpVersion(
+        self: *Client,
+        version: ?u32,
+        op: []const u8,
+        state_filter: ?[]const u8,
+        limit: ?u32,
+    ) !std.json.Parsed(protocol.Response) {
         const request: protocol.Request = .{
+            .version = version,
             .id = self.next_id,
             .op = op,
             .state = state_filter,
