@@ -6,6 +6,7 @@ const transport = @import("transport.zig");
 const unix = @import("unix.zig");
 
 const max_request_bytes = 64 * 1024;
+const max_config_request_bytes: usize = 16 * 1024 * 1024;
 const max_response_bytes = 128 * 1024;
 const max_config_response_bytes: usize = 16 * 1024 * 1024;
 const response_timeout_ms = 5_000;
@@ -47,17 +48,29 @@ pub const Client = struct {
     }
 
     pub fn call(self: *Client, request: protocol.Request) !std.json.Parsed(protocol.Response) {
+        const is_config = protocol.isConfigSized(request.op);
         var request_buf: [max_request_bytes]u8 = undefined;
-        var request_writer: std.Io.Writer = .fixed(&request_buf);
-        try std.json.Stringify.value(request, .{ .emit_null_optional_fields = false }, &request_writer);
+        var request_fixed: std.Io.Writer = .fixed(&request_buf);
+        var request_alloc: std.Io.Writer.Allocating = undefined;
+        var request_writer: *std.Io.Writer = undefined;
+        if (is_config) {
+            request_alloc = .init(self.gpa);
+            request_writer = &request_alloc.writer;
+        } else {
+            request_writer = &request_fixed;
+        }
+        defer if (is_config) request_alloc.deinit();
+        try std.json.Stringify.value(request, .{ .emit_null_optional_fields = false }, request_writer);
         try request_writer.writeByte('\n');
+        if (request_writer.buffered().len > if (is_config) max_config_request_bytes else max_request_bytes) {
+            return error.RequestTooLarge;
+        }
 
         var socket_buf: [4096]u8 = undefined;
         var stream_writer = self.stream.writer(self.io, &socket_buf);
         try stream_writer.interface.writeAll(request_writer.buffered());
         try stream_writer.interface.flush();
 
-        const is_config = std.mem.eql(u8, request.op, "config.get");
         const response_limit: usize = if (is_config) max_config_response_bytes else max_response_bytes;
         const response_buf = try self.gpa.alloc(u8, response_limit);
         defer self.gpa.free(response_buf);

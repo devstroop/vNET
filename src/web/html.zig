@@ -2,6 +2,7 @@
 //! from the control plane or the request is escaped at the boundary.
 
 const std = @import("std");
+const assets = @import("assets.zig");
 
 pub const Page = enum { overview, nat, connections, system };
 
@@ -40,9 +41,17 @@ pub fn writePage(w: *std.Io.Writer, opts: PageOptions) !void {
         \\ · vRouter</title>
         \\  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
         \\  <script src="/assets/theme-init.js"></script>
-        \\  <link rel="stylesheet" href="/assets/app.css">
+        \\  <link rel="stylesheet" href="/assets/app.css?v=
+    );
+    try w.writeAll(assets.app_css_rev);
+    try w.writeAll(
+        \\">
         \\  <script src="/assets/htmx.min.js" defer></script>
-        \\  <script src="/assets/app.js" defer></script>
+        \\  <script src="/assets/app.js?v=
+    );
+    try w.writeAll(assets.app_js_rev);
+    try w.writeAll(
+        \\" defer></script>
         \\</head>
         \\<body>
         \\<div class="app-shell">
@@ -58,7 +67,7 @@ pub fn writePage(w: *std.Io.Writer, opts: PageOptions) !void {
         \\    </nav>
         \\    <div class="sidebar-foot">
         \\      <span class="status-dot"></span>
-        \\      <span>Read-only preview</span>
+        \\      <span>Local administration</span>
         \\    </div>
         \\  </aside>
         \\  <main class="main">
@@ -131,7 +140,11 @@ pub fn writeLoginPage(w: *std.Io.Writer, error_message: ?[]const u8) !void {
         \\  <title>Sign in · vRouter</title>
         \\  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
         \\  <script src="/assets/theme-init.js"></script>
-        \\  <link rel="stylesheet" href="/assets/app.css">
+        \\  <link rel="stylesheet" href="/assets/app.css?v=
+    );
+    try w.writeAll(assets.app_css_rev);
+    try w.writeAll(
+        \\">
         \\</head>
         \\<body class="login-body">
         \\<main class="login-shell">
@@ -143,14 +156,14 @@ pub fn writeLoginPage(w: *std.Io.Writer, error_message: ?[]const u8) !void {
         \\    <div class="login-hero-copy">
         \\      <span class="pill">Local control plane</span>
         \\      <h1>Your network,<br>without the noise.</h1>
-        \\      <p>Inspect forwarding, NAT and live connection state from a focused, read-only console. Nothing here changes the router.</p>
+        \\      <p>Inspect forwarding, NAT and live connection state from a focused local console. NAT edits are staged and applied explicitly.</p>
         \\      <ul class="check-list">
         \\        <li>Session-protected, loopback-only access</li>
-        \\        <li>State is read through the local Unix socket</li>
-        \\        <li>No host mutation from the browser</li>
+        \\        <li>State and transactions go through the local Unix socket</li>
+        \\        <li>Changes are staged; nothing is applied implicitly</li>
         \\      </ul>
         \\    </div>
-        \\    <p class="login-hero-foot">vRouter 0.2 preview · read-only by design</p>
+        \\    <p class="login-hero-foot">vRouter 0.2 preview · loopback only</p>
         \\  </section>
         \\  <section class="login-panel">
         \\    <div class="login-card">

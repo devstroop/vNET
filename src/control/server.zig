@@ -6,6 +6,8 @@ const linux = std.os.linux;
 const build_options = @import("build_options");
 const config_parse = @import("../config/parse.zig");
 const config_store = @import("../config/store.zig");
+const config_apply = @import("config_apply.zig");
+const transaction = @import("transaction.zig");
 const protocol = @import("protocol.zig");
 const read_model = @import("read_model.zig");
 const state = @import("state.zig");
@@ -15,6 +17,7 @@ const unix = @import("unix.zig");
 const thread = @import("../thread.zig");
 
 pub const max_request_bytes = 64 * 1024;
+pub const max_config_request_bytes = 16 * 1024 * 1024;
 const max_response_bytes = 128 * 1024;
 const client_timeout_ms = 2_000;
 const default_conntrack_limit = 100;
@@ -26,6 +29,7 @@ pub const Options = struct {
     allow_uid: ?u32 = null,
     kernel_backlog: u31 = 16,
     config_store: ?*config_store.Store = null,
+    state_dir: []const u8 = "",
     restart_pending: bool = false,
     restart_supported: bool = false,
 };
@@ -39,8 +43,9 @@ pub const Error = error{
 
 const ConfigJob = struct {
     stream: std.Io.net.Stream,
-    line: [max_request_bytes]u8 = undefined,
-    line_len: usize = 0,
+    line: []u8,
+    uid: u32,
+    pid: i32,
 };
 
 pub const Server = struct {
@@ -74,8 +79,11 @@ pub const Server = struct {
     apply_error_message: [max_apply_error]u8 = undefined,
     apply_error_message_len: usize = 0,
     config_store: ?*config_store.Store = null,
+    state_dir: []u8,
     restart_pending: bool = false,
     restart_supported: bool = false,
+    confirm: config_apply.Confirm = .{},
+    idempotency: config_apply.Idempotency = .{},
 
     pub fn init(
         io: std.Io,
@@ -88,6 +96,12 @@ pub const Server = struct {
         }
         const config_jobs = try gpa.alloc(ConfigJob, config_queue_capacity);
         errdefer gpa.free(config_jobs);
+        const state_dir = try gpa.dupe(u8, options.state_dir);
+        errdefer gpa.free(state_dir);
+        const persisted_restart = if (options.state_dir.len != 0)
+            transaction.restartPending(io, gpa, options.state_dir) catch false
+        else
+            false;
         if (std.fs.path.dirname(path)) |dir| {
             _ = std.Io.Dir.cwd().createDirPathStatus(
                 io,
@@ -138,7 +152,8 @@ pub const Server = struct {
             .config_jobs = config_jobs,
             .allowed_uid = options.allow_uid orelse linux.geteuid(),
             .config_store = options.config_store,
-            .restart_pending = options.restart_pending,
+            .state_dir = state_dir,
+            .restart_pending = options.restart_pending or persisted_restart,
             .restart_supported = options.restart_supported,
         };
     }
@@ -213,9 +228,19 @@ pub const Server = struct {
         self.listener.deinit(self.io);
         self.removeOwnedSocket();
         self.lock_file.close(self.io);
+        while (self.config_count > 0) {
+            self.gpa.free(self.config_jobs[self.config_head].line);
+            self.config_head = (self.config_head + 1) % self.config_jobs.len;
+            self.config_count -= 1;
+        }
         self.gpa.free(self.config_jobs);
+        self.gpa.free(self.state_dir);
         self.gpa.free(self.path);
         self.* = undefined;
+    }
+
+    pub fn markStarted(self: *Server) void {
+        self.restart_pending = false;
     }
 
     pub fn publish(self: *Server, snapshot: *const state.Snapshot) void {
@@ -257,22 +282,28 @@ pub const Server = struct {
             return;
         }
 
-        var request_buf: [max_request_bytes]u8 = undefined;
-        const line = transport.readLine(
+        const line = transport.readLineAlloc(
             self.io,
             stream.socket.handle,
-            &request_buf,
+            self.gpa,
+            max_config_request_bytes,
             client_timeout_ms,
         ) catch |err| {
             self.sendError(stream, null, null, "invalid_request", @errorName(err));
             return;
         } orelse return;
+        defer self.gpa.free(line);
 
         var parsed = protocol.parseRequest(std.heap.page_allocator, line) catch {
             self.sendError(stream, null, null, "invalid_request", "malformed JSON request");
             return;
         };
         defer parsed.deinit();
+
+        if (line.len > max_request_bytes and !protocol.isConfigSized(parsed.value.op)) {
+            self.sendError(stream, parsed.value.id, parsed.value.op, "too_large", "request too large");
+            return;
+        }
 
         const request_version = parsed.value.version orelse protocol.v2_version;
         if (request_version < protocol.v2_version or request_version > protocol.version) {
@@ -303,8 +334,8 @@ pub const Server = struct {
             return;
         }
 
-        if (std.mem.eql(u8, parsed.value.op, "config.get") or read_model.isListOp(parsed.value.op)) {
-            if (self.submitConfig(stream, line)) {
+        if (protocol.isConfigSized(parsed.value.op) or read_model.isListOp(parsed.value.op)) {
+            if (self.submitConfig(stream, line, credentials.uid, credentials.pid)) {
                 close_stream = false;
             } else {
                 self.sendError(stream, parsed.value.id, parsed.value.op, "busy", "config worker is busy");
@@ -392,14 +423,19 @@ pub const Server = struct {
         return true;
     }
 
-    fn submitConfig(self: *Server, stream: std.Io.net.Stream, line: []const u8) bool {
+    fn submitConfig(
+        self: *Server,
+        stream: std.Io.net.Stream,
+        line: []const u8,
+        uid: u32,
+        pid: i32,
+    ) bool {
         self.config_mutex.lockUncancelable(self.io);
         defer self.config_mutex.unlock(self.io);
         if (self.stop.load(.acquire) or self.config_count == self.config_jobs.len) return false;
+        const copy = self.gpa.dupe(u8, line) catch return false;
         const job = &self.config_jobs[self.config_tail];
-        job.stream = stream;
-        job.line_len = line.len;
-        @memcpy(job.line[0..line.len], line);
+        job.* = .{ .stream = stream, .line = copy, .uid = uid, .pid = pid };
         self.config_tail = (self.config_tail + 1) % self.config_jobs.len;
         self.config_count += 1;
         self.config_cond.signal(self.io);
@@ -425,21 +461,30 @@ pub const Server = struct {
             if (stopping) {
                 self.sendError(job.stream, null, null, "server_stopped", "server stopped");
                 job.stream.close(self.io);
+                self.gpa.free(job.line);
                 continue;
             }
 
-            var parsed = protocol.parseRequest(std.heap.page_allocator, job.line[0..job.line_len]) catch {
+            var parsed = protocol.parseRequest(std.heap.page_allocator, job.line) catch {
                 self.sendError(job.stream, null, null, "invalid_request", "malformed JSON request");
                 job.stream.close(self.io);
+                self.gpa.free(job.line);
                 continue;
             };
             defer parsed.deinit();
             if (std.mem.eql(u8, parsed.value.op, "config.get")) {
                 self.handleConfigGet(job.stream, parsed.value);
+            } else if (std.mem.eql(u8, parsed.value.op, "config.validate")) {
+                self.handleConfigValidate(job.stream, parsed.value);
+            } else if (std.mem.eql(u8, parsed.value.op, "config.diff")) {
+                self.handleConfigDiff(job.stream, parsed.value);
+            } else if (std.mem.eql(u8, parsed.value.op, "config.apply")) {
+                self.handleConfigApply(job.stream, parsed.value, job.uid, job.pid);
             } else {
                 self.handleConfigList(job.stream, parsed.value);
             }
             job.stream.close(self.io);
+            self.gpa.free(job.line);
         }
     }
 
@@ -572,6 +617,407 @@ pub const Server = struct {
         var socket_buf: [4096]u8 = undefined;
         var writer = stream.writer(self.io, &socket_buf);
         writer.interface.writeAll(response.buffered()) catch return;
+        writer.interface.flush() catch {};
+    }
+
+    fn handleConfigValidate(
+        self: *Server,
+        stream: std.Io.net.Stream,
+        request: protocol.Request,
+    ) void {
+        const store = self.config_store orelse {
+            self.sendError(stream, request.id, request.op, "unsupported", "config store is unavailable");
+            return;
+        };
+        const requested_instance = request.instance orelse {
+            self.sendError(stream, request.id, request.op, "invalid_request", "missing instance");
+            return;
+        };
+        if (!self.instanceMatches(requested_instance)) {
+            self.sendError(stream, request.id, request.op, "instance_mismatch", "instance does not match");
+            return;
+        }
+        const proposal = request.config orelse {
+            self.sendError(stream, request.id, request.op, "invalid_request", "missing config");
+            return;
+        };
+        _ = store.refresh() catch |err| {
+            self.sendError(stream, request.id, request.op, "internal", @errorName(err));
+            return;
+        };
+        var config = store.snapshot() catch |err| {
+            self.sendError(stream, request.id, request.op, "internal", @errorName(err));
+            return;
+        };
+        defer config.deinit();
+        var change = config_apply.analyze(self.gpa, config.bytes, proposal) catch |err| {
+            self.sendConfigAnalyzeError(stream, request, err);
+            return;
+        };
+        defer change.deinit();
+
+        var allocating = std.Io.Writer.Allocating.initCapacity(self.gpa, 4096) catch {
+            self.sendError(stream, request.id, request.op, "internal", "response allocation failed");
+            return;
+        };
+        defer allocating.deinit();
+        var json: std.json.Stringify = .{ .writer = &allocating.writer };
+        const written = blk: {
+            json.beginObject() catch break :blk false;
+            writeField(&json, "ok", true) catch break :blk false;
+            writeOptionalId(&json, request.id) catch break :blk false;
+            writeField(&json, "op", request.op) catch break :blk false;
+            writeField(&json, "protocol_version", protocol.version) catch break :blk false;
+            writeField(&json, "revision", config.revision.slice()) catch break :blk false;
+            writeAffected(&json, change.affected) catch break :blk false;
+            writeField(&json, "restart_required", change.restart_required) catch break :blk false;
+            writeWarnings(&json) catch break :blk false;
+            json.endObject() catch break :blk false;
+            allocating.writer.writeByte('\n') catch break :blk false;
+            break :blk true;
+        };
+        if (!written) {
+            self.sendError(stream, request.id, request.op, "internal", "response too large");
+            return;
+        }
+        self.sendBuffer(stream, allocating.writer.buffered());
+    }
+
+    fn handleConfigDiff(
+        self: *Server,
+        stream: std.Io.net.Stream,
+        request: protocol.Request,
+    ) void {
+        const store = self.config_store orelse {
+            self.sendError(stream, request.id, request.op, "unsupported", "config store is unavailable");
+            return;
+        };
+        const requested_instance = request.instance orelse {
+            self.sendError(stream, request.id, request.op, "invalid_request", "missing instance");
+            return;
+        };
+        if (!self.instanceMatches(requested_instance)) {
+            self.sendError(stream, request.id, request.op, "instance_mismatch", "instance does not match");
+            return;
+        }
+        const proposal = request.config orelse {
+            self.sendError(stream, request.id, request.op, "invalid_request", "missing config");
+            return;
+        };
+        const expected = request.revision orelse {
+            self.sendError(stream, request.id, request.op, "invalid_request", "missing revision");
+            return;
+        };
+        _ = store.refresh() catch |err| {
+            self.sendError(stream, request.id, request.op, "internal", @errorName(err));
+            return;
+        };
+        var config = store.snapshot() catch |err| {
+            self.sendError(stream, request.id, request.op, "internal", @errorName(err));
+            return;
+        };
+        defer config.deinit();
+        if (!std.mem.eql(u8, expected, config.revision.slice())) {
+            self.sendError(stream, request.id, request.op, "stale_revision", "config revision changed");
+            return;
+        }
+        var change = config_apply.analyze(self.gpa, config.bytes, proposal) catch |err| {
+            self.sendConfigAnalyzeError(stream, request, err);
+            return;
+        };
+        defer change.deinit();
+        const now = transport.nowMs(self.io);
+        const token = self.confirm.issue(self.io, config.revision, change.diff_hash, now) catch |err| {
+            self.sendError(stream, request.id, request.op, "internal", @errorName(err));
+            return;
+        };
+
+        var allocating = std.Io.Writer.Allocating.initCapacity(
+            self.gpa,
+            change.diff.len + 4096,
+        ) catch {
+            self.sendError(stream, request.id, request.op, "internal", "response allocation failed");
+            return;
+        };
+        defer allocating.deinit();
+        var json: std.json.Stringify = .{ .writer = &allocating.writer };
+        const written = blk: {
+            json.beginObject() catch break :blk false;
+            writeField(&json, "ok", true) catch break :blk false;
+            writeOptionalId(&json, request.id) catch break :blk false;
+            writeField(&json, "op", request.op) catch break :blk false;
+            writeField(&json, "protocol_version", protocol.version) catch break :blk false;
+            writeField(&json, "revision", config.revision.slice()) catch break :blk false;
+            writeField(&json, "diff", change.diff) catch break :blk false;
+            writeAffected(&json, change.affected) catch break :blk false;
+            writeField(&json, "restart_required", change.restart_required) catch break :blk false;
+            writeField(&json, "confirm", token) catch break :blk false;
+            writeWarnings(&json) catch break :blk false;
+            json.endObject() catch break :blk false;
+            allocating.writer.writeByte('\n') catch break :blk false;
+            break :blk true;
+        };
+        if (!written) {
+            self.sendError(stream, request.id, request.op, "internal", "response too large");
+            return;
+        }
+        self.sendBuffer(stream, allocating.writer.buffered());
+    }
+
+    fn handleConfigApply(
+        self: *Server,
+        stream: std.Io.net.Stream,
+        request: protocol.Request,
+        uid: u32,
+        pid: i32,
+    ) void {
+        const store = self.config_store orelse {
+            self.sendError(stream, request.id, request.op, "unsupported", "config store is unavailable");
+            return;
+        };
+        if (self.state_dir.len == 0) {
+            self.sendError(stream, request.id, request.op, "unsupported", "state directory is unavailable");
+            return;
+        }
+        const requested_instance = request.instance orelse {
+            self.sendError(stream, request.id, request.op, "invalid_request", "missing instance");
+            return;
+        };
+        if (!self.instanceMatches(requested_instance)) {
+            self.sendError(stream, request.id, request.op, "instance_mismatch", "instance does not match");
+            return;
+        }
+        const proposal = request.config orelse {
+            self.sendError(stream, request.id, request.op, "invalid_request", "missing config");
+            return;
+        };
+        const expected = request.revision orelse {
+            self.sendError(stream, request.id, request.op, "invalid_request", "missing revision");
+            return;
+        };
+        const idempotency_key = request.idempotency_key orelse "";
+        if (idempotency_key.len > config_apply.max_idempotency_key) {
+            self.sendError(stream, request.id, request.op, "invalid_request", "idempotency key too long");
+            return;
+        }
+        const now = transport.nowMs(self.io);
+        if (idempotency_key.len != 0) {
+            var early = config_apply.validateProposal(self.gpa, proposal) catch |err| {
+                self.sendConfigAnalyzeError(stream, request, err);
+                return;
+            };
+            defer early.deinit();
+            var proposal_hash: [32]u8 = undefined;
+            std.crypto.hash.sha2.Sha256.hash(early.bytes, &proposal_hash, .{});
+            if (self.idempotency.lookup(idempotency_key, proposal_hash, now)) |lookup| {
+                switch (lookup) {
+                    .hit => |snapshot| {
+                        self.sendConfigApplied(
+                            stream,
+                            request,
+                            snapshot.transaction[0..],
+                            snapshot.result,
+                            snapshot.affected,
+                            snapshot.restart_required,
+                            snapshot.revision,
+                            "",
+                        );
+                        return;
+                    },
+                    .conflict => {
+                        self.sendError(
+                            stream,
+                            request.id,
+                            request.op,
+                            "idempotency_conflict",
+                            "idempotency key was used for a different change",
+                        );
+                        return;
+                    },
+                }
+            }
+        }
+        _ = store.refresh() catch |err| {
+            self.sendError(stream, request.id, request.op, "internal", @errorName(err));
+            return;
+        };
+        var config = store.snapshot() catch |err| {
+            self.sendError(stream, request.id, request.op, "internal", @errorName(err));
+            return;
+        };
+        defer config.deinit();
+        if (!std.mem.eql(u8, expected, config.revision.slice())) {
+            self.sendError(stream, request.id, request.op, "stale_revision", "config revision changed");
+            return;
+        }
+        var change = config_apply.analyze(self.gpa, config.bytes, proposal) catch |err| {
+            self.sendConfigAnalyzeError(stream, request, err);
+            return;
+        };
+        defer change.deinit();
+        var proposal_hash: [32]u8 = undefined;
+        std.crypto.hash.sha2.Sha256.hash(change.proposal.bytes, &proposal_hash, .{});
+
+        if (change.affected.count() == 0) {
+            self.sendConfigApplied(stream, request, null, .noop, change.affected, false, config.revision, "");
+            return;
+        }
+
+        const token = request.confirm orelse {
+            self.sendError(stream, request.id, request.op, "confirm_required", "config diff confirmation required");
+            return;
+        };
+        if (!self.confirm.consume(token, config.revision, change.diff_hash, now)) {
+            self.sendError(stream, request.id, request.op, "confirm_required", "confirmation is invalid or expired");
+            return;
+        }
+
+        var held = store.lock() catch |err| {
+            self.sendError(stream, request.id, request.op, "internal", @errorName(err));
+            return;
+        };
+        defer held.deinit();
+        _ = store.refresh() catch |err| {
+            self.sendError(stream, request.id, request.op, "internal", @errorName(err));
+            return;
+        };
+        const locked_revision = store.revisionCopy();
+        if (!std.mem.eql(u8, expected, locked_revision.slice())) {
+            self.sendError(stream, request.id, request.op, "stale_revision", "config revision changed");
+            return;
+        }
+
+        const transaction_id = transaction.generateId(self.io) catch |err| {
+            self.sendError(stream, request.id, request.op, "internal", @errorName(err));
+            return;
+        };
+        const audit_id = transaction.generateId(self.io) catch |err| {
+            self.sendError(stream, request.id, request.op, "internal", @errorName(err));
+            return;
+        };
+        const next_revision = config_store.Revision.compute(change.proposal.bytes);
+        const entry: transaction.Entry = .{
+            .transaction = transaction_id[0..],
+            .audit_id = audit_id[0..],
+            .op = request.op,
+            .instance = requested_instance,
+            .revision_before = locked_revision.slice(),
+            .revision_after = next_revision.slice(),
+            .affected = change.affected,
+            .restart_required = change.restart_required,
+            .actor = .{ .uid = uid, .pid = pid },
+            .ts_ms = now,
+        };
+        transaction.writePending(self.io, self.gpa, self.state_dir, entry) catch |err| {
+            self.sendError(stream, request.id, request.op, "internal", @errorName(err));
+            return;
+        };
+        _ = store.replaceLocked(change.proposal.bytes) catch |err| {
+            transaction.clearPending(self.io, self.gpa, self.state_dir) catch {};
+            self.sendError(stream, request.id, request.op, configStoreErrorCode(err), @errorName(err));
+            return;
+        };
+
+        var audit_ok = true;
+        transaction.appendAudit(self.io, self.gpa, self.state_dir, entry) catch {
+            audit_ok = false;
+        };
+        if (audit_ok) {
+            transaction.clearPending(self.io, self.gpa, self.state_dir) catch {};
+        }
+        if (change.restart_required) {
+            self.restart_pending = true;
+            transaction.writeRestartPending(self.io, self.gpa, self.state_dir, entry) catch {};
+        }
+        const result: config_apply.Result = if (change.restart_required) .restart_required else .applied;
+        self.idempotency.record(
+            idempotency_key,
+            proposal_hash,
+            next_revision,
+            transaction_id,
+            result,
+            change.restart_required,
+            change.affected,
+            now,
+        );
+        self.sendConfigApplied(
+            stream,
+            request,
+            transaction_id[0..],
+            result,
+            change.affected,
+            change.restart_required,
+            next_revision,
+            "",
+        );
+    }
+
+    fn sendConfigApplied(
+        self: *Server,
+        stream: std.Io.net.Stream,
+        request: protocol.Request,
+        transaction_id: ?[]const u8,
+        result: config_apply.Result,
+        affected: config_apply.Affected,
+        restart_required: bool,
+        revision: config_store.Revision,
+        diff: []const u8,
+    ) void {
+        var allocating = std.Io.Writer.Allocating.initCapacity(self.gpa, 4096 + diff.len) catch {
+            return;
+        };
+        defer allocating.deinit();
+        var json: std.json.Stringify = .{ .writer = &allocating.writer };
+        const written = blk: {
+            json.beginObject() catch break :blk false;
+            writeField(&json, "ok", true) catch break :blk false;
+            writeOptionalId(&json, request.id) catch break :blk false;
+            writeField(&json, "op", request.op) catch break :blk false;
+            writeField(&json, "protocol_version", protocol.version) catch break :blk false;
+            writeField(&json, "revision", revision.slice()) catch break :blk false;
+            if (transaction_id) |id| {
+                writeField(&json, "transaction", id) catch break :blk false;
+            }
+            writeField(&json, "result", @tagName(result)) catch break :blk false;
+            writeAffected(&json, affected) catch break :blk false;
+            writeField(&json, "restart_required", restart_required) catch break :blk false;
+            if (diff.len != 0) {
+                writeField(&json, "diff", diff) catch break :blk false;
+            }
+            writeWarnings(&json) catch break :blk false;
+            json.endObject() catch break :blk false;
+            allocating.writer.writeByte('\n') catch break :blk false;
+            break :blk true;
+        };
+        if (written) self.sendBuffer(stream, allocating.writer.buffered());
+    }
+
+    fn sendConfigAnalyzeError(
+        self: *Server,
+        stream: std.Io.net.Stream,
+        request: protocol.Request,
+        err: anyerror,
+    ) void {
+        const code = switch (err) {
+            error.DiffTooLarge, error.ConfigTooLarge => "too_large",
+            error.OutOfMemory => "internal",
+            error.InvalidCurrentConfig => "internal",
+            else => "invalid_config",
+        };
+        self.sendError(stream, request.id, request.op, code, @errorName(err));
+    }
+
+    fn instanceMatches(self: *Server, requested: []const u8) bool {
+        self.mutex.lockUncancelable(self.io);
+        const matches = std.mem.eql(u8, requested, self.snapshot.instance);
+        self.mutex.unlock(self.io);
+        return matches;
+    }
+
+    fn sendBuffer(self: *Server, stream: std.Io.net.Stream, bytes: []const u8) void {
+        var socket_buf: [4096]u8 = undefined;
+        var writer = stream.writer(self.io, &socket_buf);
+        writer.interface.writeAll(bytes) catch return;
         writer.interface.flush() catch {};
     }
 
@@ -717,7 +1163,36 @@ fn isSupported(op: []const u8) bool {
         std.mem.eql(u8, op, "nat.apply") or
         std.mem.eql(u8, op, "conntrack.list") or
         std.mem.eql(u8, op, "config.get") or
+        std.mem.eql(u8, op, "config.validate") or
+        std.mem.eql(u8, op, "config.diff") or
+        std.mem.eql(u8, op, "config.apply") or
         read_model.isListOp(op);
+}
+
+fn configStoreErrorCode(err: anyerror) []const u8 {
+    return switch (err) {
+        error.ConfigTooLarge => "too_large",
+        error.FileNotFound => "config_not_found",
+        error.InvalidArgument => "invalid_config",
+        error.RevisionMismatch => "stale_revision",
+        else => "internal",
+    };
+}
+
+fn writeAffected(json: *std.json.Stringify, affected: config_apply.Affected) !void {
+    try json.objectField("affected");
+    try json.beginArray();
+    var index: usize = 0;
+    while (affected.labelAt(index)) |label| : (index += 1) {
+        try json.write(label);
+    }
+    try json.endArray();
+}
+
+fn writeWarnings(json: *std.json.Stringify) !void {
+    try json.objectField("warnings");
+    try json.beginArray();
+    try json.endArray();
 }
 
 fn isV3Only(op: []const u8) bool {
@@ -1203,6 +1678,116 @@ test "server starts, answers status, and removes its socket" {
     server.deinit();
     server_active = false;
     try std.testing.expectError(error.FileNotFound, tmp.dir.statFile(testing.io, "control.sock", .{}));
+}
+
+test "server diffs, applies and audits a config proposal" {
+    const testing = std.testing;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir = try tmp.dir.realPath(testing.io, &path_buf);
+    const path = try std.fmt.allocPrint(testing.allocator, "{s}/control.sock", .{path_buf[0..dir]});
+    defer testing.allocator.free(path);
+    const state_dir = path_buf[0..dir];
+
+    const current_json =
+        \\{"version":1,"instance":"test","ports":{"lan":{"kind":"l2","device":"eth0"}}}
+    ;
+    const proposed_json =
+        \\{"version":1,"instance":"test","ports":{"lan":{"kind":"l2","device":"eth0"}},"log":{"level":"debug"}}
+    ;
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "vrouter.json", .data = current_json });
+    const config_path = try std.fmt.allocPrint(testing.allocator, "{s}/vrouter.json", .{state_dir});
+    defer testing.allocator.free(config_path);
+    var store = try config_store.Store.open(testing.io, testing.allocator, config_path);
+    defer store.deinit();
+
+    var snapshot: state.Snapshot = .{
+        .instance = "test",
+        .state_dir = state_dir,
+        .control_path = path,
+        .started_ms = 1,
+        .updated_ms = 2,
+    };
+    var server = try Server.init(testing.io, testing.allocator, path, .{
+        .config_store = &store,
+        .state_dir = state_dir,
+    });
+    defer server.deinit();
+    server.publish(&snapshot);
+    try server.start();
+
+    var input: [8192]u8 = undefined;
+    const get_line = try sendRequest(
+        testing.io,
+        path,
+        "{\"version\":3,\"id\":30,\"op\":\"config.get\",\"instance\":\"test\"}\n",
+        &input,
+    );
+    var get_response = try std.json.parseFromSlice(protocol.Response, testing.allocator, get_line, .{});
+    defer get_response.deinit();
+    try testing.expect(get_response.value.ok);
+    const revision = try testing.allocator.dupe(u8, get_response.value.revision.?);
+    defer testing.allocator.free(revision);
+
+    const diff_payload = try std.fmt.allocPrint(
+        testing.allocator,
+        "{{\"version\":3,\"id\":31,\"op\":\"config.diff\",\"instance\":\"test\",\"revision\":\"{s}\",\"config\":{s}}}\n",
+        .{ revision, proposed_json },
+    );
+    defer testing.allocator.free(diff_payload);
+    const diff_line = try sendRequest(testing.io, path, diff_payload, &input);
+    var diff_response = try std.json.parseFromSlice(protocol.Response, testing.allocator, diff_line, .{});
+    defer diff_response.deinit();
+    try testing.expect(diff_response.value.ok);
+    try testing.expect(diff_response.value.confirm != null);
+    try testing.expect(diff_response.value.diff != null);
+    try testing.expect(diff_response.value.restart_required.?);
+    const confirm = try testing.allocator.dupe(u8, diff_response.value.confirm.?);
+    defer testing.allocator.free(confirm);
+
+    const apply_payload = try std.fmt.allocPrint(
+        testing.allocator,
+        "{{\"version\":3,\"id\":32,\"op\":\"config.apply\",\"instance\":\"test\",\"revision\":\"{s}\",\"confirm\":\"{s}\",\"idempotency_key\":\"k1\",\"config\":{s}}}\n",
+        .{ revision, confirm, proposed_json },
+    );
+    defer testing.allocator.free(apply_payload);
+    const apply_line = try sendRequest(testing.io, path, apply_payload, &input);
+    var apply_response = try std.json.parseFromSlice(protocol.Response, testing.allocator, apply_line, .{});
+    defer apply_response.deinit();
+    try testing.expect(apply_response.value.ok);
+    try testing.expectEqualStrings("restart_required", apply_response.value.result.?);
+    try testing.expect(apply_response.value.transaction != null);
+    try testing.expect(apply_response.value.restart_required.?);
+    const transaction_id = try testing.allocator.dupe(u8, apply_response.value.transaction.?);
+    defer testing.allocator.free(transaction_id);
+
+    var applied_config = try store.snapshot();
+    defer applied_config.deinit();
+    try testing.expect(std.mem.indexOf(u8, applied_config.bytes, "\"level\": \"debug\"") != null);
+    const audit = try tmp.dir.readFileAlloc(testing.io, "audit.jsonl", testing.allocator, .limited(8192));
+    defer testing.allocator.free(audit);
+    try testing.expect(std.mem.indexOf(u8, audit, transaction_id) != null);
+    try testing.expectError(error.FileNotFound, tmp.dir.statFile(testing.io, transaction.pending_file, .{}));
+
+    const replay_line = try sendRequest(testing.io, path, apply_payload, &input);
+    var replay_response = try std.json.parseFromSlice(protocol.Response, testing.allocator, replay_line, .{});
+    defer replay_response.deinit();
+    try testing.expect(replay_response.value.ok);
+    try testing.expectEqualStrings(transaction_id, replay_response.value.transaction.?);
+
+    const noop_payload = try std.fmt.allocPrint(
+        testing.allocator,
+        "{{\"version\":3,\"id\":33,\"op\":\"config.apply\",\"instance\":\"test\",\"revision\":\"{s}\",\"config\":{s}}}\n",
+        .{ replay_response.value.revision.?, proposed_json },
+    );
+    defer testing.allocator.free(noop_payload);
+    const noop_line = try sendRequest(testing.io, path, noop_payload, &input);
+    var noop_response = try std.json.parseFromSlice(protocol.Response, testing.allocator, noop_line, .{});
+    defer noop_response.deinit();
+    try testing.expect(noop_response.value.ok);
+    try testing.expectEqualStrings("noop", noop_response.value.result.?);
 }
 
 test "server refuses a regular file at the socket path" {

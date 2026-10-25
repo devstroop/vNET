@@ -40,8 +40,21 @@ fn run(init: std.process.Init) !void {
         return error.InvalidArgument;
     }
 
+    const run_dir = init.environ_map.get("VROUTER_RUN_DIR") orelse "/run/vrouter";
+
     var store = try vrouter.config_store.Store.open(io, gpa, path);
     defer store.deinit();
+    if (try vrouter.control_transaction.loadPending(io, gpa, run_dir)) |pending_value| {
+        var pending = pending_value;
+        defer pending.deinit();
+        _ = try vrouter.control_transaction.resolvePending(
+            io,
+            gpa,
+            run_dir,
+            store.revisionCopy(),
+            &pending,
+        );
+    }
     const source = try store.readAlloc();
     defer gpa.free(source);
 
@@ -57,7 +70,6 @@ fn run(init: std.process.Init) !void {
     std.posix.sigaction(std.posix.SIG.INT, &action, null);
     std.posix.sigaction(std.posix.SIG.TERM, &action, null);
 
-    const run_dir = init.environ_map.get("VROUTER_RUN_DIR") orelse "/run/vrouter";
     try vrouter.app_service.run(io, gpa, &parsed.config, &stop, .{
         .state_dir = run_dir,
         .config_store = &store,

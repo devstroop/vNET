@@ -29,6 +29,8 @@ pub const journal = @import("control/journal.zig");
 pub const firewall_counters = @import("control/firewall_counters.zig");
 pub const control_state = @import("control/state.zig");
 pub const control_protocol = @import("control/protocol.zig");
+pub const config_apply = @import("control/config_apply.zig");
+pub const control_transaction = @import("control/transaction.zig");
 pub const control_client = if (builtin.os.tag == .linux)
     @import("control/client.zig")
 else
@@ -104,6 +106,8 @@ test {
     _ = @import("control/firewall_counters.zig");
     _ = @import("control/state.zig");
     _ = @import("control/protocol.zig");
+    _ = @import("control/config_apply.zig");
+    _ = @import("control/transaction.zig");
     if (builtin.os.tag == .linux) {
         _ = @import("control/host.zig");
         _ = @import("control/offload.zig");

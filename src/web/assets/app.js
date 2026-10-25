@@ -26,7 +26,64 @@
   }
   updateToggle();
 
-  document.body.addEventListener("htmx:responseError", () => {
+  function openDialog(id) {
+    const dialog = document.getElementById(id);
+    if (!dialog || typeof dialog.showModal !== "function") return;
+    if (!dialog.open) dialog.showModal();
+  }
+
+  function openAutoDialogs() {
+    for (const dialog of document.querySelectorAll("dialog[data-auto-open]")) {
+      if (dialog.open || typeof dialog.showModal !== "function") continue;
+      dialog.showModal();
+    }
+  }
+
+  document.addEventListener("click", (event) => {
+    const target = event.target instanceof Element ? event.target : null;
+    if (!target) return;
+
+    const opener = target.closest("[data-dialog-open]");
+    if (opener) {
+      event.preventDefault();
+      openDialog(opener.getAttribute("data-dialog-open"));
+      return;
+    }
+
+    const closer = target.closest("[data-dialog-close]");
+    if (closer) {
+      event.preventDefault();
+      const dialog = closer.closest("dialog");
+      if (dialog) dialog.close();
+      return;
+    }
+
+    const confirm = target.closest("[data-confirm-open]");
+    if (confirm) {
+      event.preventDefault();
+      const dialog = document.getElementById(confirm.getAttribute("data-confirm-open"));
+      const form = document.getElementById("nat-confirm-form");
+      if (!dialog || !form) return;
+      const action = form.querySelector('input[name="action"]');
+      const index = form.querySelector('input[name="index"]');
+      const message = dialog.querySelector("[data-confirm-message]");
+      if (action) action.value = confirm.getAttribute("data-action") || "";
+      if (index) index.value = confirm.getAttribute("data-index") || "";
+      if (message) {
+        const label = confirm.getAttribute("data-label") || "this rule";
+        message.textContent = `Stage removal of ${label}? Nothing changes until you apply the draft.`;
+      }
+      openDialog(dialog.id);
+      return;
+    }
+
+    if (target instanceof HTMLDialogElement && target === event.target) {
+      target.close();
+    }
+  });
+
+  document.body.addEventListener("htmx:after:swap", openAutoDialogs);
+  document.body.addEventListener("htmx:response:error", () => {
     const indicator = document.getElementById("refresh-indicator");
     if (!indicator) return;
     indicator.textContent = "Refresh failed";

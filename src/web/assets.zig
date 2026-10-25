@@ -6,6 +6,18 @@ const std = @import("std");
 pub const htmx = @embedFile("assets/htmx.min.js");
 pub const app_css = @embedFile("assets/app.css");
 pub const app_js = @embedFile("assets/app.js");
+pub const app_css_rev = contentRevision(app_css);
+pub const app_js_rev = contentRevision(app_js);
+
+fn contentRevision(comptime data: []const u8) []const u8 {
+    @setEvalBranchQuota(data.len * 2 + 100);
+    comptime var hash: u32 = 2_166_136_261;
+    comptime var index: usize = 0;
+    inline while (index < data.len) : (index += 1) {
+        hash = (hash ^ data[index]) *% 16_777_619;
+    }
+    return std.fmt.comptimePrint("{x}", .{hash});
+}
 pub const theme_init_js = @embedFile("assets/theme-init.js");
 pub const favicon_svg = @embedFile("assets/favicon.svg");
 pub const htmx_license = @embedFile("assets/htmx.LICENSE");

@@ -3,14 +3,15 @@
 - **Status:** Draft for review
 - **Date:** 2026-10-25
 - **Related:** [ADR-011](adr/011-web-admin.md), [ADR-014](adr/014-live-nat-updates.md),
-  [ADR-015](adr/015-control-protocol-v3.md), [WEB.md](WEB.md), [PLAN.md](PLAN.md) R10
+  [ADR-015](adr/015-control-protocol-v3.md), [ADR-016](adr/016-network-model-and-staged-config.md),
+  [WEB.md](WEB.md), [PLAN.md](PLAN.md) R10
 
 ## 1. Summary
 
-The current `vrouterweb` preview is read-only and exposes only status, NAT and
-conntrack. The gap to a useful admin is mostly backend: the daemon has no
-general read model for configuration, no general write path, and no way to
-apply structural changes without a restart.
+The `vrouterweb` preview started read-only. It now exposes status, NAT and
+conntrack, and NAT has a staged draft/review/apply path (ADR-016). The gap to a
+useful admin is still mostly backend: most resources have no general web read
+model or write path, and structural changes still require a restart.
 
 This assumes v1.0 has shipped, the control socket is stable, and the deployment
 is Linux with one daemon and one web process per instance.
@@ -44,6 +45,8 @@ journal or edits the config file directly.
   offline CLI operation.
 - Keep v2 response shapes byte-compatible for v2 requests; v3-only fields are
   version-gated (ADR-015).
+- Stage edits and apply once. NAT is the first vertical slice; other resources
+  adopt the same pending/review/apply/discard model (ADR-016).
 
 ## 2. Goals and non-goals
 
@@ -94,9 +97,10 @@ journal or edits the config file directly.
 - `src/web/server.zig` serves server-rendered HTMX 4.0.0 pages and fragments
   with embedded assets, plus a small same-origin JSON API backed by the Unix
   control socket.
-- The configuration API is read-only: `GET /api/status`, `GET /api/nat`,
-  `GET /api/conntrack`. Login and logout are POSTs but do not mutate router
-  configuration.
+- The JSON API remains read-only: `GET /api/status`, `GET /api/nat`,
+  `GET /api/conntrack`. HTML NAT writes use `POST /nat/rules` to stage a draft,
+  `POST /nat/review` to diff it, `POST /nat/apply` to commit it, and
+  `GET /partials/nat` to discard it.
 - Control protocol v2 supports `ping`, `status`, `nat.list`, `nat.apply` and
   `conntrack.list`. Request and response parsing is strict: a v2 daemon rejects
   v3 envelope fields as `invalid_request`, and deployed v2 clients reject
@@ -104,8 +108,9 @@ journal or edits the config file directly.
   requests (ADR-015).
 - NAT is the only live configuration update (`ADR-014`). The CLI writes the
   config atomically, sends the complete NAT tables, and restores the file on a
-  clear rejection. The daemon applies the tables but does not own the config
-  file today.
+  clear rejection. The web preview stages NAT edits in a page-carried draft and
+  applies them through `config.apply` followed by `nat.apply`; the daemon still
+  does not apply config and datapath in one transaction.
 - The daemon publishes a fixed read-only snapshot with status, counters, NAT
   and up to 256 conntrack entries.
 - The daemon loads ports, bridges, interfaces, routes, DHCP, DNS and firewall
@@ -122,24 +127,23 @@ journal or edits the config file directly.
 
 ### Gaps
 
-1. **No read model for most resources.** The snapshot does not contain ports,
-   bridges, interfaces, routes, DHCP config/leases, DNS config, firewall rules
-   or journal/audit data.
-2. **No general write API.** Only `nat.apply` exists. There is no config
-   validate/diff/apply/rollback, no link/address/route write, no firewall write
-   and no lifecycle operation.
+1. **No web read model for most resources.** v3 list reads expose ports,
+   bridges, interfaces, routes, DHCP, DNS and firewall config, but there are no
+   detail pages, leases, journal or audit views yet.
+2. **No general write API.** NAT has a staged config path; there is no web CRUD
+   for ports, bridges, interfaces, routes, DHCP, DNS or firewall, and no
+   lifecycle operation.
 3. **No single write path.** CLI address/route mutations bypass the daemon.
    Running them while `vrouterd` is live can race the datapath and the config.
 4. **No live structural apply.** Ports, bridges, interfaces, routes, DHCP, DNS
    and firewall changes require a daemon restart today.
 5. **No write authorization.** Read and write scopes are not distinct.
-6. **No audit trail.** Host mutations are journaled, but there is no
-   operator-facing audit log for web writes.
-7. **Fixed response limits and one worker.** One request per connection, a
-   64 KiB request limit, a 128 KiB response limit, a 2 s server apply deadline,
-   a 5 s client timeout and fixed snapshot caps are too small for full config
-   (up to 4 MiB) and large tables. A 16 MiB config frame must not run on the
-   single status/NAT worker (ADR-015).
+6. **No web audit trail.** The daemon appends transaction audit entries, but
+   there is no operator-facing audit or journal page in the web preview.
+7. **Limits are only partly lifted.** The web request limit is 64 KiB for NAT
+   drafts; control config frames are 16 MiB on a dedicated worker (ADR-015).
+   Full config editing still needs bounded request/response handling and
+   large-table paging.
 8. **Unprivileged deployment is not wired.** The server accepts root or the
    daemon effective uid only; group authorization is absent. State-directory
    creation is inconsistent: the control server and `vrouter up` use `0750`
@@ -148,14 +152,12 @@ journal or edits the config file directly.
    leave a `0700` directory that blocks the group deployment. There is no
    read-only socket, so the documented `sudo -u vrouter` deployment does not
    work yet.
-9. **No config store.** The daemon receives only a parsed `Config`, not the
-   path, raw bytes, revision or canonical serializer. `src/config/write.zig`
-   only renders and saves NAT. A general read/diff/apply/rollback path has no
-   durable object to operate on.
-10. **No crash-consistent apply or audit.** Writing the config, applying live
-    state, journaling host changes and auditing the result are not coordinated
-    by a pending transaction with a journal checkpoint and recoverable audit
-    intent.
+9. **Config store exists; web coverage does not.** The daemon owns a revisioned
+   `ConfigStore` and v3 `config.get/validate/diff/apply`, but the web uses it
+   only for NAT. General resource editors and rollback UI are still missing.
+10. **Recovery coverage is incomplete.** Pending transactions, audit entries and
+    restart markers are persisted, but crash/replay tests and the daemon-owned
+    journal checkpoint are not complete.
 11. **Offload restart hazard.** A normal daemon exit leaves kernel-offload
     bridge/veth state in place; a restart-required offload change can fail
     preflight on the next start.
@@ -175,7 +177,7 @@ restarts it after confirmation.
 | Bridges | List/detail, members, SVI count, STP/VLAN/offload | Create/edit/delete, member ports, STP, VLAN-aware, offload | Restart | P0 read; P1 write |
 | Interfaces/SVIs | List/detail, addresses, bridge/port/VLAN, link state | Create/edit/delete, address add/remove, link up/down, VLAN | Address/link live where supported; membership/VLAN restart | P0 read; P1 write |
 | Routes | List/detail, IPv4/IPv6, table/metric | Add/edit/delete | Live if the route transaction is implemented; otherwise restart | P0 read; P1 write |
-| NAT | Masquerade and port forwards | Add/edit/delete | Live (existing) | P0 read; P1 write |
+| NAT | Masquerade and port forwards | Add/edit/delete (staged draft) | Live via `config.apply` + `nat.apply` | P0 read; P1 write |
 | DHCP | Server config, pool, options, reservations, leases | Server/reservation CRUD; lease actions if supported | Restart for config; lease actions live in P2 | P0 read; P1 config write; P2 lease actions |
 | DNS | Upstreams, cache, listen, zones, query test | Config CRUD; diagnostic query | Restart for config; query live in P2 | P0 read; P1 config write; P2 query |
 | Firewall | Defaults, rp_filter, rate limits, ordered rules, counters, test probe | Rule/default/rate CRUD, reorder | Restart in P2; live firewall apply is future work | P0 read; P2 write |
@@ -189,9 +191,10 @@ restarts it after confirmation.
 
 Notes:
 
-- The web never calls the raw `nat.apply` operation. It uses `config.apply` so
-  NAT changes get revision checks, diff, confirm and audit. `nat.apply` stays
-  for deployed v2 clients until the P1 CLI migration.
+- The web stages NAT edits, then calls `config.apply` for revision checks,
+  diff, confirm and audit, followed by `nat.apply` for the live datapath. The
+  two calls are not yet atomic; ADR-016 records this limitation. `nat.apply`
+  also stays for deployed v2 clients until the P1 CLI migration.
 - `link.set` is operational and journal-backed; it is not written to the config
   and does not survive a daemon restart. Address and route writes are
   config-backed.
@@ -294,9 +297,10 @@ Compatibility is explicit and request-versioned:
   returns `invalid_request` because it does not know the operation or field.
 - A v3 server treats `version` greater than 3 as `version_unsupported`.
 - Existing v2 `nat.apply` remains supported for deployed v2 clients. The web
-  uses `config.apply` so NAT changes get revision, diff, confirm and audit.
-  After the P1 CLI migration, `vrouter nat` also uses `config.apply`; raw
-  `nat.apply` is compatibility-only.
+  stages NAT edits, uses `config.apply` for revision, diff, confirm and audit,
+  then calls `nat.apply` for the live tables. After the P1 CLI migration and an
+  atomic daemon apply, `vrouter nat` also uses `config.apply`; raw `nat.apply`
+  becomes compatibility-only.
 
 Request envelope:
 
@@ -402,7 +406,7 @@ Write operations:
 | `link.set` | Up/down; live; journal-backed, not config-backed |
 | `iface.addr.add` / `iface.addr.del` | Config-backed; live only with a runtime transaction |
 | `route.add` / `route.del` | Config-backed; live only where safe |
-| `nat.apply` | Existing complete-table transaction; CLI compatibility, not used by the web |
+| `nat.apply` | Existing complete-table transaction; used by the web after `config.apply` until atomic apply lands |
 | `firewall.test` | Read-only probe |
 | `dns.query` | Read-only diagnostic |
 | `journal.repair` | **Not exposed.** Repair is an offline CLI operation while the daemon is stopped |
@@ -535,9 +539,10 @@ NAT is the current exception: the CLI writes the config file and then calls
 `nat.apply`, while the daemon only applies the tables. P1 closes that gap:
 `vrouter nat` becomes a thin `config.apply` wrapper, so CLI and web share one
 transaction and the daemon owns the config write. P1 exit requires this
-migration; until then, `vrouter nat` is the documented exception and the web
-must not use raw `nat.apply`. Raw `nat.apply` remains available for deployed v2
-clients after the migration.
+migration; until then, `vrouter nat` is the documented exception, and the web
+uses `config.apply` followed by `nat.apply` with the non-atomic gap recorded in
+ADR-016. Raw `nat.apply` remains available for deployed v2 clients after the
+migration.
 
 ### 5.5 Authorization and scopes
 
@@ -613,10 +618,10 @@ The existing fixed snapshot stays for dashboard status. Resource reads are
 serialized on demand from daemon-owned config and live tables, so adding a
 resource does not require another fixed-size array.
 
-The control server currently reads one fixed snapshot under a mutex and has a
-special queue only for `nat.apply`. P0 adds a bounded read-command path (a
-request queue or per-resource immutable snapshots) so on-demand serialization
-does not block the datapath or allocate without limit.
+The control server reads one fixed snapshot under a mutex, runs config-sized
+work on a dedicated worker, and has a bounded NAT apply queue. P0 adds a bounded
+read-command path (a request queue or per-resource immutable snapshots) so
+on-demand serialization does not block the datapath or allocate without limit.
 
 - `conntrack.list`, `dhcp.leases`, `journal.list` and `audit.list` support
   `limit`, `cursor` and filters.

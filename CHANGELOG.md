@@ -8,6 +8,13 @@ All notable changes to vRouter are documented here. The format follows
 
 ### Added
 
+- **Staged web configuration (ADR-016):** the NAT page now stages add, edit and
+  remove operations in a page-carried draft. A pending-changes bar reviews the
+  proposed `config.diff`, applies the draft once through `config.apply` plus
+  `nat.apply`, and supports explicit discard. The UI distinguishes running,
+  pending, applied and restart-required states, and the network model now
+  separates attachments, logical networks, subnets and scoped services. The
+  preview request limit is 64 KiB so a complete NAT draft fits.
 - **Control protocol v3 (ADR-015):** request-versioned envelopes keep v2
   response shapes byte-compatible while v3 `status` adds `protocol_version`,
   `config_revision`, `restart_pending`, `config_writable` and
@@ -17,15 +24,15 @@ All notable changes to vRouter are documented here. The format follows
   worker, and the client accepts 16 MiB config responses. v3 list reads expose
   ports, bridges, interfaces, routes, DHCP, DNS and firewall configuration from
   the current on-disk document.
-- **Read-only web admin preview (post-v1, ADR-011):** opt-in `vrouterweb`
-  built with `zig build web`. The Zig process serves server-rendered HTMX 4.0.0
-  pages and fragments with embedded assets, plus a same-origin JSON API backed
-  by the Unix control socket. It binds loopback only, authenticates with an
-  Argon2id password and server-side sessions, validates `Host`/`Origin`, and
-  exposes status, NAT and conntrack without host mutations. No Node build step,
-  package manager or runtime asset directory is required. It is read-only,
-  excluded from the default build, and not part of the 0.2.0 scope. See
-  `docs/WEB.md`.
+- **Web admin preview (post-v1, ADR-011):** opt-in `vrouterweb` built with
+  `zig build web`. The Zig process serves server-rendered HTMX 4.0.0 pages and
+  fragments with embedded assets, plus a same-origin JSON API backed by the
+  Unix control socket. It binds loopback only, authenticates with an Argon2id
+  password and server-side sessions, validates `Host`/`Origin`, and exposes
+  status, NAT and conntrack. NAT edits are staged and applied explicitly; other
+  pages remain read-only. No Node build step, package manager or runtime asset
+  directory is required. It is excluded from the default build and not part of
+  the 0.2.0 scope. See `docs/WEB.md`.
 - **Crash recovery:** `vrouter doctor` is now read-only but works after a
   daemon crash, and `vrouter doctor --repair` replays journal inverses while
   refusing to run against a live daemon. Malformed journal tails are quarantined
@@ -116,6 +123,10 @@ All notable changes to vRouter are documented here. The format follows
 
 ### Changed
 
+- The web preview is no longer described as read-only: the sidebar, login page
+  and system page now describe staged local administration. NAT polling was
+  removed so fragment swaps cannot close an open review or edit dialog, and
+  embedded assets are cache-busted by content revision.
 - **Breaking:** rename the project from vNAT to vRouter (ADR-012). The CLI and
   daemon are now `vrouter` and `vrouterd`; the C ABI is `vrouter_*` in
   `include/vrouter.h` (ABI 2); environment variables, default config and run
@@ -135,6 +146,9 @@ All notable changes to vRouter are documented here. The format follows
 
 ### Fixed
 
+- Use HTMX 4 event names (`htmx:after:swap`, `htmx:response:error`) so
+  auto-open dialogs and error indicators run on swapped fragments. Previously
+  the stale browser-cached script used HTMX 3 names and dialogs stayed closed.
 - Close DNS sockets only after joining the UDP/TCP workers, and shut down the
   TCP listener to wake a blocked `accept` during shutdown.
 - Recover 802.1Q tags stripped by VLAN offload using `PACKET_AUXDATA` before

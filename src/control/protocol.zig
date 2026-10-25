@@ -35,6 +35,8 @@ pub const Request = struct {
     state: ?[]const u8 = null,
     limit: ?u32 = null,
     nat: ?NatApply = null,
+    config: ?std.json.Value = null,
+    target_revision: ?[]const u8 = null,
 };
 
 pub const Status = struct {
@@ -123,9 +125,25 @@ pub const Response = struct {
     dhcp: ?std.json.Value = null,
     dns: ?std.json.Value = null,
     firewall: ?std.json.Value = null,
+    transaction: ?[]const u8 = null,
+    result: ?[]const u8 = null,
+    affected: ?[]const []const u8 = null,
+    diff: ?[]const u8 = null,
+    warnings: ?[]const []const u8 = null,
+    confirm: ?[]const u8 = null,
+    restart_required: ?bool = null,
+    restart_token: ?[]const u8 = null,
 };
 
 pub const ParseError = error{InvalidRequest};
+
+pub fn isConfigSized(op: []const u8) bool {
+    return std.mem.eql(u8, op, "config.get") or
+        std.mem.eql(u8, op, "config.validate") or
+        std.mem.eql(u8, op, "config.diff") or
+        std.mem.eql(u8, op, "config.apply") or
+        std.mem.eql(u8, op, "config.rollback");
+}
 
 pub fn parseRequest(gpa: std.mem.Allocator, line: []const u8) !std.json.Parsed(Request) {
     return std.json.parseFromSlice(Request, gpa, line, .{}) catch |err| switch (err) {

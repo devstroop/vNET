@@ -3,6 +3,7 @@
 const std = @import("std");
 const schema = @import("../config/schema.zig");
 const config_store = @import("../config/store.zig");
+const control_transaction = @import("../control/transaction.zig");
 const types = @import("../types.zig");
 const log = @import("../log.zig");
 const manager_mod = @import("../port/manager.zig");
@@ -67,6 +68,7 @@ pub fn run(
         control_path = path;
         control = try control_server.Server.init(io, gpa, path, .{
             .config_store = options.config_store,
+            .state_dir = state_dir,
             .restart_supported = options.restart_supported,
         });
     }
@@ -245,6 +247,13 @@ pub fn run(
         forwarder.fib.count(),
         forwarder.fib6.count(),
     });
+
+    if (options.state_dir) |state_dir| {
+        control_transaction.clearRestartPending(io, gpa, state_dir) catch |err| {
+            logger.warn("restart marker {s}: {s}", .{ state_dir, @errorName(err) });
+        };
+    }
+    if (control) |*server| server.markStarted();
 
     if (options.runtime) |runtime| {
         runtime.port_count.store(@intCast(manager.count()), .release);
