@@ -47,8 +47,8 @@ const bridge_keys = [_][]const u8{ "ports", "stp", "vlan_aware", "offload" };
 const interface_keys = [_][]const u8{ "bridge", "port", "address", "addresses", "vlan" };
 const route_keys = [_][]const u8{ "dst", "via", "dev", "metric", "table" };
 const nat_keys = [_][]const u8{ "masquerade", "port_forward" };
-const masquerade_keys = [_][]const u8{"out"};
-const forward_keys = [_][]const u8{ "proto", "ext_port", "to", "in" };
+const masquerade_keys = [_][]const u8{ "out", "src", "addr" };
+const forward_keys = [_][]const u8{ "proto", "ext_port", "to", "in", "description", "enabled" };
 const dhcp_keys = [_][]const u8{
     "iface", "pool", "lease", "dns", "domain", "mtu", "ntp", "reservations",
 };
@@ -225,7 +225,11 @@ fn parseMasquerade(a: std.mem.Allocator, value: *const std.json.Value) ConfigErr
     for (arr.items, 0..) |item, i| {
         const obj = try asObject(&item);
         try onlyKeys(obj, &masquerade_keys);
-        out[i] = .{ .out = try reqString(obj, "out") };
+        out[i] = .{
+            .out = try reqString(obj, "out"),
+            .src = try optString(obj, "src"),
+            .addr = try optString(obj, "addr"),
+        };
     }
     return out;
 }
@@ -241,6 +245,8 @@ fn parseForwards(a: std.mem.Allocator, value: *const std.json.Value) ConfigError
             .ext_port = try reqInt(u16, obj, "ext_port"),
             .to = try reqString(obj, "to"),
             .in_iface = try optString(obj, "in"),
+            .description = try optString(obj, "description"),
+            .enabled = try optBool(obj, "enabled", true),
         };
     }
     return out;

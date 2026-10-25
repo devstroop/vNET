@@ -64,13 +64,21 @@ pub const Proto = enum { tcp, udp, icmp, icmpv6 };
 
 pub const MasqueradeConfig = struct {
     out: []const u8,
+    /// Source prefix matched before translation. Empty matches every source.
+    src: ?[]const u8 = null,
+    /// Explicit translated source address. Empty uses the outbound address.
+    addr: ?[]const u8 = null,
 };
+
+pub const max_port_forward_description: usize = 128;
 
 pub const PortForwardConfig = struct {
     proto: Proto,
     ext_port: u16,
     to: []const u8,
     in_iface: ?[]const u8 = null,
+    description: ?[]const u8 = null,
+    enabled: bool = true,
 };
 
 pub const NatConfig = struct {

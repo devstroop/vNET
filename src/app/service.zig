@@ -493,7 +493,11 @@ fn applyNatRequest(
         return .{ .ok = false, .code = "out_of_memory", .message = "out of memory" };
     };
     for (apply.masquerade, 0..) |rule, i| {
-        masquerade[i] = .{ .out = rule.out };
+        masquerade[i] = .{
+            .out = rule.out,
+            .src = rule.src,
+            .addr = rule.addr,
+        };
     }
     const forwards = a.alloc(schema.PortForwardConfig, apply.port_forward.len) catch {
         return .{ .ok = false, .code = "out_of_memory", .message = "out of memory" };
@@ -507,6 +511,8 @@ fn applyNatRequest(
             .ext_port = rule.ext_port,
             .to = rule.to,
             .in_iface = rule.ingress,
+            .description = rule.description,
+            .enabled = rule.enabled,
         };
     }
 
@@ -582,19 +588,26 @@ fn buildSnapshot(
         out.snat[out.snat_len] = .{
             .out = portName(forwarder.ports, rule.port),
             .addr = rule.addr,
+            .src = rule.src,
+            .explicit = rule.explicit,
         };
         out.snat_len += 1;
     }
 
     for (forwarder.forward_rules.items) |rule| {
         if (out.port_forward_len >= control_state.max_port_forward) break;
-        out.port_forward[out.port_forward_len] = .{
+        const description_len = @min(rule.description.len, control_state.max_forward_description);
+        var entry: control_state.PortForward = .{
             .proto = rule.proto,
             .ext_port = rule.ext_port,
             .to_addr = rule.to_addr,
             .to_port = rule.to_port,
             .ingress = if (rule.ingress) |id| portName(forwarder.ports, id) else "",
+            .description_len = description_len,
+            .enabled = rule.enabled,
         };
+        @memcpy(entry.description[0..description_len], rule.description[0..description_len]);
+        out.port_forward[out.port_forward_len] = entry;
         out.port_forward_len += 1;
     }
 

@@ -47,7 +47,11 @@ pub const Counters = struct {
 pub const Snat = struct {
     out: []const u8 = "",
     addr: types.Ipv4 = .{},
+    src: ?types.Prefix4 = null,
+    explicit: bool = false,
 };
+
+pub const max_forward_description = 128;
 
 pub const PortForward = struct {
     proto: u8 = 0,
@@ -55,6 +59,9 @@ pub const PortForward = struct {
     to_addr: types.Ipv4 = .{},
     to_port: u16 = 0,
     ingress: []const u8 = "",
+    description: [max_forward_description]u8 = @splat(0),
+    description_len: usize = 0,
+    enabled: bool = true,
 };
 
 pub const Conntrack = struct {

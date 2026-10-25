@@ -9,6 +9,8 @@ pub const v2_version: u32 = 2;
 
 pub const NatMasquerade = struct {
     out: []const u8 = "",
+    src: ?[]const u8 = null,
+    addr: ?[]const u8 = null,
 };
 
 pub const NatForward = struct {
@@ -16,6 +18,8 @@ pub const NatForward = struct {
     ext_port: u16 = 0,
     to: []const u8 = "",
     ingress: ?[]const u8 = null,
+    description: ?[]const u8 = null,
+    enabled: bool = true,
 };
 
 pub const NatApply = struct {
@@ -60,6 +64,8 @@ pub const Status = struct {
 pub const Snat = struct {
     out: []const u8 = "",
     addr: []const u8 = "",
+    src: ?[]const u8 = null,
+    explicit: bool = false,
 };
 
 pub const PortForward = struct {
@@ -68,6 +74,8 @@ pub const PortForward = struct {
     to_addr: []const u8 = "",
     to_port: u16 = 0,
     ingress: ?[]const u8 = null,
+    description: ?[]const u8 = null,
+    enabled: bool = true,
 };
 
 pub const Nat = struct {
@@ -136,6 +144,26 @@ pub const Response = struct {
 };
 
 pub const ParseError = error{InvalidRequest};
+
+pub fn isV3Only(op: []const u8) bool {
+    return std.mem.eql(u8, op, "config.get") or
+        std.mem.eql(u8, op, "config.validate") or
+        std.mem.eql(u8, op, "config.diff") or
+        std.mem.eql(u8, op, "config.apply") or
+        std.mem.eql(u8, op, "config.rollback") or
+        std.mem.eql(u8, op, "ports.list") or
+        std.mem.eql(u8, op, "bridges.list") or
+        std.mem.eql(u8, op, "interfaces.list") or
+        std.mem.eql(u8, op, "routes.list") or
+        std.mem.eql(u8, op, "dhcp.list") or
+        std.mem.eql(u8, op, "dhcp.leases") or
+        std.mem.eql(u8, op, "dns.list") or
+        std.mem.eql(u8, op, "firewall.list") or
+        std.mem.eql(u8, op, "firewall.counters") or
+        std.mem.eql(u8, op, "journal.list") or
+        std.mem.eql(u8, op, "audit.list") or
+        std.mem.eql(u8, op, "doctor.status");
+}
 
 pub fn isConfigSized(op: []const u8) bool {
     return std.mem.eql(u8, op, "config.get") or

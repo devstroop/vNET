@@ -10,6 +10,8 @@ const icmp = @import("../l3/icmp.zig");
 pub const Rule = struct {
     port: types.PortId,
     addr: types.Ipv4,
+    src: ?types.Prefix4 = null,
+    explicit: bool = false,
 };
 
 pub const ForwardRule = struct {
@@ -18,6 +20,8 @@ pub const ForwardRule = struct {
     to_addr: types.Ipv4,
     to_port: u16,
     ingress: ?types.PortId = null,
+    description: []const u8 = "",
+    enabled: bool = true,
 };
 
 pub fn rewriteSource(packet: []u8, addr: types.Ipv4, port: u16) bool {

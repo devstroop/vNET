@@ -318,7 +318,7 @@ pub const Server = struct {
         }
         const v3 = request_version == protocol.version;
 
-        if (isV3Only(parsed.value.op) and !v3) {
+        if (protocol.isV3Only(parsed.value.op) and !v3) {
             self.sendError(
                 stream,
                 parsed.value.id,
@@ -410,7 +410,7 @@ pub const Server = struct {
             ) catch return false;
         } else if (std.mem.eql(u8, request.op, "nat.list")) {
             json.objectField("nat") catch return false;
-            writeNat(&json, snapshot) catch return false;
+            writeNat(&json, snapshot, v3) catch return false;
         } else if (std.mem.eql(u8, request.op, "conntrack.list")) {
             json.objectField("conntrack") catch return false;
             writeConntrack(&json, snapshot, request.state, request.limit) catch return false;
@@ -1195,26 +1195,6 @@ fn writeWarnings(json: *std.json.Stringify) !void {
     try json.endArray();
 }
 
-fn isV3Only(op: []const u8) bool {
-    return std.mem.eql(u8, op, "config.get") or
-        std.mem.eql(u8, op, "config.validate") or
-        std.mem.eql(u8, op, "config.diff") or
-        std.mem.eql(u8, op, "config.apply") or
-        std.mem.eql(u8, op, "config.rollback") or
-        std.mem.eql(u8, op, "ports.list") or
-        std.mem.eql(u8, op, "bridges.list") or
-        std.mem.eql(u8, op, "interfaces.list") or
-        std.mem.eql(u8, op, "routes.list") or
-        std.mem.eql(u8, op, "dhcp.list") or
-        std.mem.eql(u8, op, "dhcp.leases") or
-        std.mem.eql(u8, op, "dns.list") or
-        std.mem.eql(u8, op, "firewall.list") or
-        std.mem.eql(u8, op, "firewall.counters") or
-        std.mem.eql(u8, op, "journal.list") or
-        std.mem.eql(u8, op, "audit.list") or
-        std.mem.eql(u8, op, "doctor.status");
-}
-
 fn writeField(json: *std.json.Stringify, name: []const u8, value: anytype) !void {
     try json.objectField(name);
     try json.write(value);
@@ -1263,7 +1243,7 @@ fn writeStatus(
     try json.endObject();
 }
 
-fn writeNat(json: *std.json.Stringify, snapshot: *const state.Snapshot) !void {
+fn writeNat(json: *std.json.Stringify, snapshot: *const state.Snapshot, v3: bool) !void {
     try json.beginObject();
     try writeField(json, "instance", snapshot.instance);
     try json.objectField("snat");
@@ -1273,6 +1253,15 @@ fn writeNat(json: *std.json.Stringify, snapshot: *const state.Snapshot) !void {
         try writeField(json, "out", rule.out);
         try json.objectField("addr");
         try json.print("\"{f}\"", .{rule.addr});
+        if (v3) {
+            try json.objectField("src");
+            if (rule.src) |src| {
+                try json.print("\"{f}\"", .{src});
+            } else {
+                try json.write(null);
+            }
+            try writeField(json, "explicit", rule.explicit);
+        }
         try json.endObject();
     }
     try json.endArray();
@@ -1291,6 +1280,15 @@ fn writeNat(json: *std.json.Stringify, snapshot: *const state.Snapshot) !void {
             try json.write(null);
         } else {
             try json.write(rule.ingress);
+        }
+        if (v3) {
+            try json.objectField("description");
+            if (rule.description_len == 0) {
+                try json.write(null);
+            } else {
+                try json.write(rule.description[0..rule.description_len]);
+            }
+            try writeField(json, "enabled", rule.enabled);
         }
         try json.endObject();
     }
@@ -1456,7 +1454,12 @@ test "server starts, answers status, and removes its socket" {
         .updated_ms = 2,
         .ports = 1,
     };
-    snapshot.snat[0] = .{ .out = "wan", .addr = try types.Ipv4.parse("203.0.113.1") };
+    snapshot.snat[0] = .{
+        .out = "wan",
+        .addr = try types.Ipv4.parse("203.0.113.1"),
+        .src = try types.Prefix4.parse("10.0.0.0/24"),
+        .explicit = true,
+    };
     snapshot.snat_len = 1;
     snapshot.port_forward[0] = .{
         .proto = 6,
@@ -1464,7 +1467,10 @@ test "server starts, answers status, and removes its socket" {
         .to_addr = try types.Ipv4.parse("10.0.0.5"),
         .to_port = 80,
         .ingress = "wan",
+        .description_len = 6,
+        .enabled = false,
     };
+    @memcpy(snapshot.port_forward[0].description[0..6], "web ui");
     snapshot.port_forward_len = 1;
     snapshot.conntrack[0] = .{
         .proto = 6,
@@ -1572,14 +1578,35 @@ test "server starts, answers status, and removes its socket" {
     try testing.expectEqual(@as(?u32, 2), v2_ping.value.version);
 
     const nat_line = try sendRequest(testing.io, path, "{\"id\":2,\"op\":\"nat.list\"}\n", &input);
+    try testing.expect(std.mem.indexOf(u8, nat_line, "\"src\"") == null);
+    try testing.expect(std.mem.indexOf(u8, nat_line, "\"explicit\"") == null);
+    try testing.expect(std.mem.indexOf(u8, nat_line, "\"description\"") == null);
+    try testing.expect(std.mem.indexOf(u8, nat_line, "\"enabled\"") == null);
     var nat = try std.json.parseFromSlice(protocol.Response, testing.allocator, nat_line, .{});
     defer nat.deinit();
     try testing.expect(nat.value.ok);
     try testing.expectEqualStrings("test", nat.value.nat.?.instance);
     try testing.expectEqualStrings("wan", nat.value.nat.?.snat[0].out);
     try testing.expectEqualStrings("203.0.113.1", nat.value.nat.?.snat[0].addr);
+    try testing.expect(nat.value.nat.?.snat[0].src == null);
+    try testing.expect(!nat.value.nat.?.snat[0].explicit);
     try testing.expectEqual(@as(u16, 8080), nat.value.nat.?.port_forward[0].ext_port);
     try testing.expectEqualStrings("10.0.0.5", nat.value.nat.?.port_forward[0].to_addr);
+    try testing.expect(nat.value.nat.?.port_forward[0].description == null);
+    try testing.expect(nat.value.nat.?.port_forward[0].enabled);
+
+    const v3_nat_line = try sendRequest(testing.io, path, "{\"version\":3,\"id\":22,\"op\":\"nat.list\"}\n", &input);
+    try testing.expect(std.mem.indexOf(u8, v3_nat_line, "\"src\"") != null);
+    try testing.expect(std.mem.indexOf(u8, v3_nat_line, "\"explicit\"") != null);
+    try testing.expect(std.mem.indexOf(u8, v3_nat_line, "\"description\"") != null);
+    try testing.expect(std.mem.indexOf(u8, v3_nat_line, "\"enabled\"") != null);
+    var v3_nat = try std.json.parseFromSlice(protocol.Response, testing.allocator, v3_nat_line, .{});
+    defer v3_nat.deinit();
+    try testing.expect(v3_nat.value.ok);
+    try testing.expectEqualStrings("10.0.0.0/24", v3_nat.value.nat.?.snat[0].src.?);
+    try testing.expect(v3_nat.value.nat.?.snat[0].explicit);
+    try testing.expectEqualStrings("web ui", v3_nat.value.nat.?.port_forward[0].description.?);
+    try testing.expect(!v3_nat.value.nat.?.port_forward[0].enabled);
 
     const ct_line = try sendRequest(
         testing.io,

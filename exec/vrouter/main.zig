@@ -1035,7 +1035,11 @@ fn natCommand(init: std.process.Init, args: []const []const u8) !void {
 
     const masquerade = try a.alloc(vrouter.control_protocol.NatMasquerade, parsed.config.nat.masquerade.len);
     for (parsed.config.nat.masquerade, 0..) |rule, index| {
-        masquerade[index] = .{ .out = rule.out };
+        masquerade[index] = .{
+            .out = rule.out,
+            .src = rule.src,
+            .addr = rule.addr,
+        };
     }
     const forwards = try a.alloc(vrouter.control_protocol.NatForward, parsed.config.nat.port_forward.len);
     for (parsed.config.nat.port_forward, 0..) |rule, index| {
@@ -1044,6 +1048,8 @@ fn natCommand(init: std.process.Init, args: []const []const u8) !void {
             .ext_port = rule.ext_port,
             .to = rule.to,
             .ingress = rule.in_iface,
+            .description = rule.description,
+            .enabled = rule.enabled,
         };
     }
 

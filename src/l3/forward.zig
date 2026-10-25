@@ -446,6 +446,9 @@ pub const Forwarder = struct {
         self.arp_misses.deinit(self.gpa);
         self.ndp_misses.deinit(self.gpa);
         self.snat_rules.deinit(self.gpa);
+        for (self.forward_rules.items) |rule| {
+            if (rule.description.len != 0) self.gpa.free(rule.description);
+        }
         self.forward_rules.deinit(self.gpa);
         self.firewall_rules.deinit(self.gpa);
         for (self.dhcp_servers.items) |*server| server.deinit();
@@ -512,13 +515,17 @@ pub const Forwarder = struct {
     }
 
     pub fn addSnatRule(self: *Forwarder, port: types.PortId, addr: types.Ipv4) PortError!void {
-        for (self.snat_rules.items) |*rule| {
-            if (rule.port.eql(port)) {
-                rule.addr = addr;
+        return self.addSnatRuleFull(.{ .port = port, .addr = addr });
+    }
+
+    fn addSnatRuleFull(self: *Forwarder, rule: nat_mod.Rule) PortError!void {
+        for (self.snat_rules.items) |*existing| {
+            if (existing.port.eql(rule.port)) {
+                existing.* = rule;
                 return;
             }
         }
-        try self.snat_rules.append(self.gpa, .{ .port = port, .addr = addr });
+        try self.snat_rules.append(self.gpa, rule);
     }
 
     fn removeSnatRule(self: *Forwarder, port: types.PortId) void {
@@ -565,11 +572,16 @@ pub const Forwarder = struct {
         var new_snat: std.ArrayListUnmanaged(nat_mod.Rule) = .empty;
         errdefer new_snat.deinit(self.gpa);
         var new_forward: std.ArrayListUnmanaged(nat_mod.ForwardRule) = .empty;
-        errdefer new_forward.deinit(self.gpa);
+        errdefer {
+            for (new_forward.items) |rule| {
+                if (rule.description.len != 0) self.gpa.free(rule.description);
+            }
+            new_forward.deinit(self.gpa);
+        }
 
         for (nat.masquerade) |masquerade| {
             if (masquerade.out.len == 0) return error.InvalidArgument;
-            const rule = resolveMasquerade(cfg, self.local.items, self.ports, masquerade.out) orelse {
+            const rule = resolveMasquerade(cfg, self.local.items, self.ports, masquerade) orelse {
                 if (masqueradeDeferred(self, cfg, masquerade.out)) continue;
                 return error.InvalidArgument;
             };
@@ -586,6 +598,12 @@ pub const Forwarder = struct {
                 .icmp, .icmpv6 => return error.InvalidArgument,
             };
             if (forward.ext_port == 0) return error.InvalidArgument;
+            if (forward.description) |text| {
+                if (text.len > schema.max_port_forward_description) return error.InvalidArgument;
+                for (text) |c| {
+                    if (c < 0x20 or c == 0x7f) return error.InvalidArgument;
+                }
+            }
             const to = types.parseIpPort(forward.to) catch return error.InvalidArgument;
             if (to.ip.isUnspecified() or to.ip.isMulticast() or
                 to.ip.eql(types.Ipv4.limited_broadcast))
@@ -598,18 +616,26 @@ pub const Forwarder = struct {
                 break :blk entry.id;
             } else null;
             for (new_forward.items) |existing| {
-                if (existing.proto == proto and existing.ext_port == forward.ext_port and
+                if (existing.enabled and forward.enabled and
+                    existing.proto == proto and existing.ext_port == forward.ext_port and
                     optionalPortEqual(existing.ingress, ingress))
                 {
                     return error.InvalidArgument;
                 }
             }
+            const description = if (forward.description) |text|
+                if (text.len != 0) try self.gpa.dupe(u8, text) else ""
+            else
+                "";
+            errdefer if (description.len != 0) self.gpa.free(description);
             try new_forward.append(self.gpa, .{
                 .proto = proto,
                 .ext_port = forward.ext_port,
                 .to_addr = to.ip,
                 .to_port = to.port,
                 .ingress = ingress,
+                .description = description,
+                .enabled = forward.enabled,
             });
         }
 
@@ -618,6 +644,9 @@ pub const Forwarder = struct {
         self.snat_rules = new_snat;
         self.forward_rules = new_forward;
         old_snat.deinit(self.gpa);
+        for (old_forward.items) |rule| {
+            if (rule.description.len != 0) self.gpa.free(rule.description);
+        }
         old_forward.deinit(self.gpa);
 
         for (self.dhcp_clients.items) |*client| {
@@ -947,7 +976,7 @@ pub const Forwarder = struct {
         }
 
         for (cfg.nat.masquerade) |masquerade| {
-            const rule = resolveMasquerade(cfg, self.local.items, ports, masquerade.out) orelse {
+            const rule = resolveMasquerade(cfg, self.local.items, ports, masquerade) orelse {
                 // Defer SNAT rule installation until a DHCP client on this port
                 // obtains a lease.
                 const out_name = masquerade.out;
@@ -962,7 +991,7 @@ pub const Forwarder = struct {
                 }
                 return error.InvalidArgument;
             };
-            try self.addSnatRule(rule.port, rule.addr);
+            try self.addSnatRuleFull(rule);
         }
 
         for (cfg.nat.port_forward) |forward| {
@@ -972,11 +1001,30 @@ pub const Forwarder = struct {
                 .udp => 17,
                 .icmp, .icmpv6 => return error.InvalidArgument,
             };
+            if (forward.description) |text| {
+                if (text.len > schema.max_port_forward_description) return error.InvalidArgument;
+                for (text) |c| {
+                    if (c < 0x20 or c == 0x7f) return error.InvalidArgument;
+                }
+            }
             const ingress = if (forward.in_iface) |name| blk: {
                 const port_entry = findRoutePort(cfg, ports, name) orelse return error.NotFound;
                 break :blk port_entry.id;
             } else null;
-            try self.addForwardRuleOn(proto, forward.ext_port, to.ip, to.port, ingress);
+            const description = if (forward.description) |text|
+                if (text.len != 0) try self.gpa.dupe(u8, text) else ""
+            else
+                "";
+            errdefer if (description.len != 0) self.gpa.free(description);
+            try self.forward_rules.append(self.gpa, .{
+                .proto = proto,
+                .ext_port = forward.ext_port,
+                .to_addr = to.ip,
+                .to_port = to.port,
+                .ingress = ingress,
+                .description = description,
+                .enabled = forward.enabled,
+            });
         }
 
         for (cfg.dhcp) |dhcp| {
@@ -2312,7 +2360,7 @@ pub const Forwarder = struct {
                     };
                     self.counters.snat_packets += 1;
                 }
-            } else if (self.snatAddrFor(route.port)) |nat_addr| {
+            } else if (self.snatAddrFor(route.port, ipm.src)) |nat_addr| {
                 if (ipm.src.eql(nat_addr)) {
                     const reply_key = makeReplyKey(
                         key,
@@ -2402,7 +2450,7 @@ pub const Forwarder = struct {
                 };
                 updateFlow(created, ipm, now, false);
             }
-        } else if (self.snatAddrFor(route.port) != null) {
+        } else if (self.snatAddrFor(route.port, ipm.src) != null) {
             self.counters.dropped += 1;
             self.counters.nat_unsupported += 1;
             return;
@@ -4095,9 +4143,13 @@ pub const Forwarder = struct {
         return self.localForPort(port, vlan);
     }
 
-    fn snatAddrFor(self: *const Forwarder, port: types.PortId) ?types.Ipv4 {
+    fn snatAddrFor(self: *const Forwarder, port: types.PortId, src: types.Ipv4) ?types.Ipv4 {
         for (self.snat_rules.items) |rule| {
-            if (rule.port.eql(port)) return rule.addr;
+            if (!rule.port.eql(port)) continue;
+            if (rule.src) |prefix| {
+                if (!prefix.contains(src)) continue;
+            }
+            return rule.addr;
         }
         return null;
     }
@@ -4108,6 +4160,7 @@ pub const Forwarder = struct {
         ingress: types.PortId,
     ) ?nat_mod.ForwardRule {
         for (self.forward_rules.items) |rule| {
+            if (!rule.enabled) continue;
             if (rule.proto != key.proto or rule.ext_port != key.dport) continue;
             if (rule.ingress) |required| {
                 if (!required.eql(ingress)) continue;
@@ -4734,18 +4787,26 @@ fn resolveMasquerade(
     cfg: *const schema.Config,
     locals: []const LocalAddr,
     ports: []const PortEntry,
-    out: []const u8,
+    masquerade: schema.MasqueradeConfig,
 ) ?nat_mod.Rule {
-    const port_id = masqueradeOutPort(cfg, ports, out) orelse return null;
-    if (cfg.interfaces.get(out)) |itf| {
+    const port_id = masqueradeOutPort(cfg, ports, masquerade.out) orelse return null;
+    const src = if (masquerade.src) |text|
+        types.Prefix4.parse(text) catch return null
+    else
+        null;
+    if (masquerade.addr) |text| {
+        const addr = types.Ipv4.parse(text) catch return null;
+        return .{ .port = port_id, .addr = addr, .src = src, .explicit = true };
+    }
+    if (cfg.interfaces.get(masquerade.out)) |itf| {
         const address = itf.address orelse return null;
         if (std.mem.eql(u8, address, "dhcp")) return null;
         const prefix = types.Prefix4.parse(address) catch return null;
-        return .{ .port = port_id, .addr = prefix.addr };
+        return .{ .port = port_id, .addr = prefix.addr, .src = src };
     }
 
     for (locals) |local| {
-        if (local.port.eql(port_id)) return .{ .port = port_id, .addr = local.prefix.addr };
+        if (local.port.eql(port_id)) return .{ .port = port_id, .addr = local.prefix.addr, .src = src };
     }
     return null;
 }
@@ -5512,8 +5573,8 @@ test "forwarder builds state from config" {
         \\    { "dst": "0.0.0.0/0", "via": "10.0.1.254", "dev": "a", "metric": 100 }
         \\  ],
         \\  "nat": {
-        \\    "masquerade": [ { "out": "lan-b" } ],
-        \\    "port_forward": [ { "proto": "tcp", "ext_port": 8080, "to": "10.0.1.10:80" } ]
+        \\    "masquerade": [ { "out": "lan-b", "src": "10.0.2.0/24", "addr": "203.0.113.9" } ],
+        \\    "port_forward": [ { "proto": "tcp", "ext_port": 8080, "to": "10.0.1.10:80", "description": "web ui", "enabled": false } ]
         \\  }
         \\}
     ;
@@ -5533,12 +5594,16 @@ test "forwarder builds state from config" {
     try testing.expect(fwd.localForPeer(port_b, testIp("10.0.2.9"), 0) != null);
     try testing.expectEqual(@as(usize, 1), fwd.snat_rules.items.len);
     try testing.expect(fwd.snat_rules.items[0].port.eql(port_b));
-    try testing.expect(fwd.snat_rules.items[0].addr.eql(testIp("10.0.2.1")));
+    try testing.expect(fwd.snat_rules.items[0].addr.eql(testIp("203.0.113.9")));
+    try testing.expect(fwd.snat_rules.items[0].src.?.contains(testIp("10.0.2.9")));
+    try testing.expect(fwd.snat_rules.items[0].explicit);
     try testing.expectEqual(@as(usize, 1), fwd.forward_rules.items.len);
     try testing.expectEqual(@as(u8, 6), fwd.forward_rules.items[0].proto);
     try testing.expectEqual(@as(u16, 8080), fwd.forward_rules.items[0].ext_port);
     try testing.expect(fwd.forward_rules.items[0].to_addr.eql(testIp("10.0.1.10")));
     try testing.expectEqual(@as(u16, 80), fwd.forward_rules.items[0].to_port);
+    try testing.expectEqualStrings("web ui", fwd.forward_rules.items[0].description);
+    try testing.expect(!fwd.forward_rules.items[0].enabled);
 }
 
 test "applyNatConfig replaces NAT tables atomically" {
@@ -5597,6 +5662,29 @@ test "applyNatConfig replaces NAT tables atomically" {
     try testing.expectEqual(@as(usize, 1), fwd.forward_rules.items.len);
     try testing.expectEqual(@as(u8, 17), fwd.forward_rules.items[0].proto);
     try testing.expect(fwd.forward_rules.items[0].ingress.?.eql(port_a));
+
+    try fwd.applyNatConfig(&parsed.config, .{
+        .masquerade = &.{.{ .out = "lan-a" }},
+        .port_forward = &.{.{
+            .proto = .tcp,
+            .ext_port = 8443,
+            .to = "10.0.1.20:443",
+            .description = "web ui",
+            .enabled = false,
+        }},
+    });
+    try testing.expectEqualStrings("web ui", fwd.forward_rules.items[0].description);
+    try testing.expect(!fwd.forward_rules.items[0].enabled);
+
+    try testing.expectError(error.InvalidArgument, fwd.applyNatConfig(&parsed.config, .{
+        .port_forward = &.{.{
+            .proto = .tcp,
+            .ext_port = 8443,
+            .to = "10.0.1.20:443",
+            .description = "bad\x01name",
+        }},
+    }));
+    try testing.expectEqualStrings("web ui", fwd.forward_rules.items[0].description);
 
     try testing.expectError(error.InvalidArgument, fwd.applyNatConfig(&parsed.config, .{
         .masquerade = &.{ .{ .out = "lan-a" }, .{ .out = "lan-a" } },
