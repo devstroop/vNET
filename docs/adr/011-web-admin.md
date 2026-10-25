@@ -57,7 +57,9 @@ Add an **optional, post-v1 local web admin for Linux**:
    escape hatch.
 7. **No new source of truth.** The daemon's control API and config validation
    remain authoritative. If a UI action needs a new operation, extend the
-   versioned control API; do not duplicate logic in the web layer.
+   versioned control API; do not duplicate logic in the web layer. The v3
+   envelope, config store, apply transaction and crash recovery are specified
+   in ADR-015.
 8. **No telemetry or cloud.** No cloud accounts, analytics, remote logging or
    outbound connections except the configured control socket.
 9. **Testing.** Handlers and authorization get unit tests; happy paths and

@@ -243,20 +243,27 @@ authorization scopes exist. v1 scope does not change (ADR-011).
 - [ ] `vrouter-web`: unprivileged Unix-socket client, Zig HTTP server,
       server-rendered HTMX 4.0.0 with embedded assets; no Node build step, no
       CDN, no runtime asset directory.
+- [ ] P0: `ConfigStore`, protocol v3 with request-versioned v2 responses,
+      dedicated config worker, read ops, pagination and config revision
+      (ADR-015); full read-only UI.
+- [ ] P1: two-phase apply with journal checkpoint and recoverable audit;
+      validate/diff/confirm/rollback; live NAT/link; typed forms; group
+      auth/deployment; CLI NAT/address/route/link migration.
+- [ ] P2: firewall, DHCP lease actions, DNS query, logging/advanced settings,
+      journal repair guidance, supervised stop/restart with restart tokens.
 - [ ] Loopback/Unix-socket defaults; SSH-tunnel docs; no browser-facing LAN
       bind in R10.
 - [ ] Auth/session (PAM or Argon2id), CSRF, Origin/Host checks, strict CSP,
       rate limits and an audit log for writes.
 - [ ] Read-only status: ports, bridges, routes, leases, conntrack, counters,
       firewall rules and journal.
-- [ ] Config apply with diff/preview/confirm/rollback; link up/down/reconnect.
 - [ ] Handler/auth tests plus Playwright happy-path and security-negative tests.
 - [ ] systemd unit, packaging and operator docs.
 
 **Exit:** An operator can inspect and safely apply configuration over an
 authenticated loopback HTTP console (SSH tunnel for remote access); the web
-process cannot mutate host state or bypass the control socket; v1 CLI/API
-behavior is unchanged.
+process mutates state only through the control socket and never directly;
+v1 CLI/API behavior is unchanged.
 
 ## 3. Effort summary
 
@@ -347,3 +354,4 @@ behavior is unchanged.
 | 12 | Rename vNAT to vRouter | Accepted — ADR-012 |
 | 13 | IPv6 core in v1.0; services/NAT66 in v1.1 | Accepted — ADR-013 |
 | 14 | Config-backed live NAT updates | Accepted — ADR-014 |
+| 15 | Protocol v3 and crash-consistent config apply | Proposed — ADR-015 (R10) |

@@ -3,7 +3,7 @@
 - **Status:** Draft for review
 - **Date:** 2026-10-25
 - **Related:** [ADR-011](adr/011-web-admin.md), [ADR-014](adr/014-live-nat-updates.md),
-  [WEB.md](WEB.md), [PLAN.md](PLAN.md) R10
+  [ADR-015](adr/015-control-protocol-v3.md), [WEB.md](WEB.md), [PLAN.md](PLAN.md) R10
 
 ## 1. Summary
 
@@ -42,6 +42,8 @@ journal or edits the config file directly.
   applicable.
 - Put firewall changes and daemon lifecycle in phase 2; journal repair stays an
   offline CLI operation.
+- Keep v2 response shapes byte-compatible for v2 requests; v3-only fields are
+  version-gated (ADR-015).
 
 ## 2. Goals and non-goals
 
@@ -96,8 +98,10 @@ journal or edits the config file directly.
   `GET /api/conntrack`. Login and logout are POSTs but do not mutate router
   configuration.
 - Control protocol v2 supports `ping`, `status`, `nat.list`, `nat.apply` and
-  `conntrack.list`. The parser is strict: a v2 daemon rejects v3 envelope
-  fields as `invalid_request`.
+  `conntrack.list`. Request and response parsing is strict: a v2 daemon rejects
+  v3 envelope fields as `invalid_request`, and deployed v2 clients reject
+  unknown response fields. V3 therefore keeps v2 response shapes for v2
+  requests (ADR-015).
 - NAT is the only live configuration update (`ADR-014`). The CLI writes the
   config atomically, sends the complete NAT tables, and restores the file on a
   clear rejection. The daemon applies the tables but does not own the config
@@ -131,10 +135,11 @@ journal or edits the config file directly.
 5. **No write authorization.** Read and write scopes are not distinct.
 6. **No audit trail.** Host mutations are journaled, but there is no
    operator-facing audit log for web writes.
-7. **Fixed response limits.** One request per connection, a 64 KiB request
-   limit, a 128 KiB response limit, a 2 s server apply deadline, a 5 s client
-   timeout and fixed snapshot caps are too small for full config (up to 4 MiB)
-   and large tables.
+7. **Fixed response limits and one worker.** One request per connection, a
+   64 KiB request limit, a 128 KiB response limit, a 2 s server apply deadline,
+   a 5 s client timeout and fixed snapshot caps are too small for full config
+   (up to 4 MiB) and large tables. A 16 MiB config frame must not run on the
+   single status/NAT worker (ADR-015).
 8. **Unprivileged deployment is not wired.** The server accepts root or the
    daemon effective uid only; group authorization is absent. State-directory
    creation is inconsistent: the control server and `vrouter up` use `0750`
@@ -147,9 +152,10 @@ journal or edits the config file directly.
    path, raw bytes, revision or canonical serializer. `src/config/write.zig`
    only renders and saves NAT. A general read/diff/apply/rollback path has no
    durable object to operate on.
-10. **No crash-consistent apply.** Writing the config, applying live state and
-    journaling host changes are not coordinated by a pending transaction or
-    startup recovery marker.
+10. **No crash-consistent apply or audit.** Writing the config, applying live
+    state, journaling host changes and auditing the result are not coordinated
+    by a pending transaction with a journal checkpoint and recoverable audit
+    intent.
 11. **Offload restart hazard.** A normal daemon exit leaves kernel-offload
     bridge/veth state in place; a restart-required offload change can fail
     preflight on the next start.
@@ -185,14 +191,15 @@ Notes:
 
 - The web never calls the raw `nat.apply` operation. It uses `config.apply` so
   NAT changes get revision checks, diff, confirm and audit. `nat.apply` stays
-  for CLI compatibility.
+  for deployed v2 clients until the P1 CLI migration.
 - `link.set` is operational and journal-backed; it is not written to the config
   and does not survive a daemon restart. Address and route writes are
   config-backed.
 - The web cannot start a stopped daemon because it cannot reach a stopped
   control socket. `start` remains the service manager or `vrouter up`.
-- Typed forms edit a complete config document round-tripped from `config.get`;
-  fields outside the form are preserved by the daemon's typed serializer.
+- Typed forms edit a complete config document round-tripped from `config.get`.
+  The form submits the complete document, so fields outside the form are
+  preserved; the daemon validates and canonically serializes it.
 - The schema is strict, so unknown keys are rejected by validation rather than
   silently preserved.
 
@@ -212,8 +219,8 @@ Notes:
   same transaction.
 - `route.add` / `route.del`: config-backed route changes when safe; same
   wrapper and transaction rules.
-- `nat.apply`: existing live NAT transaction, retained for CLI compatibility;
-  the web uses `config.apply`.
+- `nat.apply`: existing live NAT transaction, retained for deployed v2
+  clients. The web uses `config.apply`; after P1, the CLI does too.
 - `firewall.test`: dry-run probe (read-only diagnostic).
 - `dns.query`: diagnostic query (P2).
 - `journal.list` / `doctor.status`: read-only diagnostics (P1).
@@ -267,20 +274,29 @@ implementation details that remain open.
 Protocol v3 extends the line-delimited JSON protocol additively. A v3 server
 accepts v2 read operations and v2 `nat.apply`. New write operations require v3.
 
-Compatibility is explicit:
+Compatibility is explicit and request-versioned:
 
-- `status` gains `protocol_version`, `config_revision`, `restart_pending`,
-  `config_writable` and `restart_supported`.
-- The client checks `protocol_version` from `status` before enabling writes.
-  If it is below 3, write controls are disabled; the client does not send a v3
-  envelope and does not silently fall back.
-- A v3 server treats an absent `version` as v2. V3-only fields are rejected
-  when `version` is absent or less than 3.
-- The current v2 parser rejects unknown fields. That is why the client must
-  negotiate before sending a v3 envelope; a v2 daemon will answer
-  `invalid_request`, not a typed version error.
-- Existing v2 `nat.apply` remains supported for the CLI. The web uses
-  `config.apply` so NAT changes get revision, diff, confirm and audit.
+- A request without `version` is a v2 request. A v3 server returns the exact v2
+  response shape for every v2 operation: no new fields in `status`, `nat` or
+  `conntrack`, and no new top-level response fields. Deployed v2 clients parse
+  strictly, so this is required for compatibility.
+- A request with `version: 3` may receive v3 fields. `status` gains
+  `protocol_version`, `config_revision`, `restart_pending`, `config_writable`
+  and `restart_supported` only for a v3 request.
+- The client first sends `status` with `version: 3`. If the daemon returns
+  `invalid_request`, it retries the same read as v2 to learn that the daemon is
+  old, then disables writes. It never retries a write as v2.
+- The client checks `protocol_version` from a v3 `status` before enabling
+  writes. If it is below 3, write controls are disabled; the client does not
+  send a v3 envelope and does not silently fall back.
+- A v3 server treats an absent `version` as v2. V3-only operations return
+  `version_unsupported` when `version` is absent or less than 3; a v2 server
+  returns `invalid_request` because it does not know the operation or field.
+- A v3 server treats `version` greater than 3 as `version_unsupported`.
+- Existing v2 `nat.apply` remains supported for deployed v2 clients. The web
+  uses `config.apply` so NAT changes get revision, diff, confirm and audit.
+  After the P1 CLI migration, `vrouter nat` also uses `config.apply`; raw
+  `nat.apply` is compatibility-only.
 
 Request envelope:
 
@@ -329,11 +345,13 @@ Response envelope:
 - `config.diff` returns `diff`, `affected`, `restart_required`, warnings and a
   one-time `confirm` token.
 - List operations return `data`, `total`, `returned` and `next_cursor`.
-- `config.apply` returns `result` (`applied`, `restart_required`,
-  `rolled_back`) and a `transaction` id.
-- `daemon.restart` returns a `restart_token` and a `restart_supported` flag.
+- `config.apply` and `config.rollback` return `result` (`applied`,
+  `restart_required`, `rolled_back`), a `transaction` id and, when
+  `restart_required`, a one-time `restart_token` and `restart_supported`.
+- `daemon.restart` consumes that token and returns `accepted`; `daemon.stop`
+  returns `accepted`. Neither returns a new token.
 
-Frame limits:
+Frame limits and worker isolation:
 
 - Status, list and diagnostic operations keep the current 64 KiB request and
   128 KiB response limits.
@@ -342,6 +360,14 @@ Frame limits:
   four times the 4 MiB config limit to cover serialization, escaping and diff
   overhead.
 - Config operations use a 30 s server deadline and a 35 s client timeout.
+- A dedicated config worker (or bounded pool) handles config-sized frames. The
+  existing worker keeps serving status, NAT, conntrack and v2 requests, so a
+  16 MiB read or a 30 s apply cannot stall the datapath control loop.
+- `config.apply` and `config.rollback` are serialized by the daemon write
+  queue. A second config write waits for a bounded period and then returns
+  `busy`; it does not block the accept loop. `config.get` and `config.diff`
+  may run concurrently with status and conntrack but only one may hold the
+  config lock.
 - The daemon preflights the config size and returns `too_large` with an
   actionable message instead of truncating. Chunked transfer is not part of P1.
 
@@ -401,8 +427,9 @@ Error codes are stable and mapped to UI messages. V2 codes remain valid:
 
 1. Web reads `config.get` and the relevant resource list.
 2. The user edits a typed form. The form produces a complete proposed config
-   from the round-tripped document; fields outside the form are preserved by
-   the daemon's typed serializer.
+   from the round-tripped document; fields outside the form are preserved
+   because the form submits the complete document and the daemon canonically
+   serializes it.
 3. Web calls `config.validate`; field errors are shown inline.
 4. Web calls `config.diff`; the daemon returns:
    - unified JSON diff;
@@ -413,21 +440,27 @@ Error codes are stable and mapped to UI messages. V2 codes remain valid:
 5. The user reviews the diff and confirms. Destructive or high-risk changes
    require typing the resource name.
 6. Web calls `config.apply` with revision, confirm token and idempotency key.
-7. The daemon takes the shared config lock and serializes the apply. It then:
-   - validates the complete config again;
-   - computes a resource-level plan from the diff;
-   - stages `config.pending` with the new bytes, previous revision,
-     transaction id and diff hash, and fsyncs it;
+7. The daemon takes the shared config lock, re-reads the current revision and
+   serializes the apply. It then:
+   - validates the complete config again and computes a resource-level plan;
+   - records `journal_checkpoint = journal.lineCount()` before any host change;
+   - writes `transaction.pending` in `staged` state with the transaction id,
+     previous/next revisions, journal checkpoint, audit intent, affected
+     resources and restart flag, then fsyncs it and the directory;
    - journals host changes before netlink calls;
    - applies live resources transactionally through the datapath;
-   - on success, atomically replaces the config, clears `config.pending`,
-     writes the audit entry and returns `applied`;
-   - on failure, reverses live changes with the journal, removes
-     `config.pending`, keeps the previous config and returns the error;
-   - if the plan contains restart-required resources, commits the config,
-     writes a `restart.pending` marker and returns `restart_required`.
+   - atomically replaces the config, then fsyncs the file and directory;
+   - appends the final audit entry and fsyncs the audit log;
+   - writes `restart.pending` when the plan contains restart-required
+     resources, then clears `transaction.pending`;
+   - returns `applied`, `restart_required` or `rolled_back`.
 8. Web shows the result, transaction id and audit link. The UI never reports
    success before the daemon acknowledges.
+
+The pending record contains the journal checkpoint and audit intent, not just
+the new config bytes. Recovery uses `downTo(journal_checkpoint)` to reverse only
+the host mutations from this transaction; it never replays the whole journal.
+See ADR-015 for the record schema.
 
 `config.apply` is all-or-nothing for live resources. If any live resource
 fails, every live change from that transaction is reversed and the previous
@@ -435,13 +468,31 @@ config remains. Restart-required resources are not applied live; they are
 listed in `affected` with `restart_required:true`. The daemon never applies part
 of a plan and then reports plain success.
 
+`rolled_back` is an `ok:false` result: the live changes from the transaction
+were reversed and the previous config was retained. For `config.rollback`, it
+means the rollback attempt itself failed and the pre-rollback config was
+retained; the UI must not present it as a successful rollback. The audit entry
+records both the original transaction and the rollback attempt.
+
 Crash recovery:
 
-- On startup, a leftover `config.pending` is resolved by comparing the live
-  config hash with the pending record's new hash. If they match, the
-  transaction committed: keep the new config and clear the marker. Otherwise
-  restore the previous config, replay the journal inverse for that transaction
-  and record a recovery audit entry.
+- Pending `staged`, config hash equals `revision_before`: the transaction did
+  not commit. Reverse the journal to `journal_checkpoint`, keep the previous
+  config, append a `rolled_back` audit entry with `recovered: true`, then clear
+  the pending record.
+- Pending `staged`, config hash equals `revision_after`: the config committed
+  but the marker was not cleared. Keep the config and the journal entries after
+  the checkpoint, append the audit entry with `recovered: true` if it is not
+  already present, clear the pending record and preserve or create
+  `restart.pending` when required.
+- Pending `committed`: ensure the audit entry exists, clear the pending record
+  and preserve `restart.pending`.
+- Pending `rolled_back`: reverse the journal to the checkpoint, keep
+  `revision_before`, ensure the audit entry exists and clear the pending
+  record.
+- Config hash matches neither revision: fail closed with `config_conflict` and
+  require `vrouter doctor --repair`. Do not overwrite an externally changed
+  config and do not start the datapath with an ambiguous pending record.
 - A committed config with a `restart.pending` marker stays in place. The daemon
   reports `restart_pending` until a successful start clears it.
 - The offload host state is reconciled on clean exit or startup before the new
@@ -481,44 +532,55 @@ datapath. The CLI keeps its existing output and exit-code contract; only the
 transport changes.
 
 NAT is the current exception: the CLI writes the config file and then calls
-`nat.apply`, while the daemon only applies the tables. The target is for the
-daemon to own the config write for NAT too, so CLI and web share one
-transaction. Until that migration lands, `vrouter nat` remains the documented
-exception and the web must not use raw `nat.apply`.
+`nat.apply`, while the daemon only applies the tables. P1 closes that gap:
+`vrouter nat` becomes a thin `config.apply` wrapper, so CLI and web share one
+transaction and the daemon owns the config write. P1 exit requires this
+migration; until then, `vrouter nat` is the documented exception and the web
+must not use raw `nat.apply`. Raw `nat.apply` remains available for deployed v2
+clients after the migration.
 
 ### 5.5 Authorization and scopes
 
-The control socket is the security boundary. The web service account is a
-member of the read/write group; read-only deployments use a separate socket.
+The control socket is the security boundary. Read-only and read/write web
+accounts use separate sockets; the ownership and membership matrix is below.
 
-Baseline implementation:
+Ownership contract:
 
-- `control.sock` — mode `0660`, group `vrouter-admin`, read/write.
-- `control-ro.sock` — mode `0660`, group `vrouter`, read-only.
+| Path | Mode | Owner:Group | Purpose |
+|---|---|---|---|
+| state dir | `0750` | `root:vrouter` | Traverse/list for read-only and write web accounts |
+| `control.sock` | `0660` | `root:vrouter-admin` | Read/write control |
+| `control-ro.sock` | `0660` | `root:vrouter` | Read-only control |
+| `*.lock` | `0600` | daemon | Lock files |
+| config | existing mode, default `0600` | daemon | Config |
+| journal/audit/pending | `0600` | daemon | Transaction state |
+
+- The read-only web account is in `vrouter` only. The read/write web account is
+  in `vrouter` and `vrouter-admin`: `vrouter` lets it traverse the state
+  directory and open the read-only socket; `vrouter-admin` lets it open the
+  read/write socket.
 - Both sockets use the same protocol; the server rejects write ops on the
   read-only socket with `read_only`.
 - Peer credentials (`SO_PEERCRED`) identify the uid/pid. The daemon records
   them in the audit entry.
 - The web process does not accept a client-supplied actor identity.
+- One canonical `ensureStateDir` helper creates the directory `0750` with group
+  `vrouter` and is used by the daemon, journal, firewall counters and
+  `vrouter up`. It never creates `0700`.
+- If an existing state directory has the wrong owner or mode, startup fails
+  with `permission_denied` and an actionable message. Root may repair it
+  explicitly; the daemon does not silently `chmod` or `chown` it.
+- `vrouterweb` needs `--control-ro` (or equivalent) and a startup check that
+  refuses write mode when the socket is read-only.
 
 This satisfies ADR-011's requirement that read and write capabilities are
 distinct. The exact group names are deployment configuration; the daemon must
 fail closed if the groups cannot be applied.
 
-Current deployment gaps that must be closed first:
-
-- The peer check is uid-only. It must accept the configured write/read gids,
-  including supplementary groups where supported, and reject everyone else.
-- The state directory is created `0750` without a group owner. It must be
-  group-owned and traversable by the socket group.
-- `vrouterweb` needs `--control-ro` (or equivalent) and a startup check that
-  refuses write mode when the socket is read-only.
-- Tests must cover the actual `vrouterd`/`vrouterweb` uid/gid split, not just
-  unit-level peer checks.
-
-Until group authorization lands in P1, only root or the daemon uid can read the
-socket. P0 read-only UI testing uses that path; it is not yet the documented
-unprivileged deployment.
+Until group authorization and the ownership matrix land in P1, only root or the
+daemon uid can read the socket. P0 read-only UI testing uses that path; it is
+not yet the documented unprivileged deployment. P1 exit requires the actual
+`vrouterd`/`vrouterweb` uid/gid split tests, not just unit-level peer checks.
 
 The web stays loopback-only. Remote access uses an SSH tunnel. A TLS reverse
 proxy is not part of this scope; supporting one later requires a public-origin
@@ -541,6 +603,9 @@ prerequisite, not an implementation detail.
   extra confirmation and restart requirements. They are not phase 1.
 - The in-memory config is updated after a successful live apply so subsequent
   reads and diffs see the new NAT and resource state.
+- After `restart_required`, `config.get` returns the committed new config and
+  revision. Live resource reads may still show the old state until restart, and
+  `status.restart_pending` marks the mismatch.
 
 ### 5.7 Read model and pagination
 
@@ -572,14 +637,19 @@ unprivileged process must not signal the daemon arbitrarily.
   configuration. If the unit cannot distinguish them, `daemon.stop` and
   `daemon.restart` return `restart_unavailable` and the UI gives the exact
   service-manager command.
-- If a supervisor is configured, `config.apply` returns `restart_required` with
-  a restart token. `daemon.restart` asks the daemon to exit cleanly; the
-  supervisor restarts it. The web waits for the control socket to return and
-  re-authenticates the session if needed.
+- If a supervisor is configured, `config.apply` or `config.rollback` returns
+  `restart_required` with an opaque, one-time restart token bound to the
+  transaction id, `revision_after`, the daemon boot id and a short TTL.
+  `daemon.restart` requires that token; a missing, expired, superseded or
+  wrong-boot token fails closed. Only one token is outstanding; a new config apply or rollback
+  invalidates the previous token. A successful start clears `restart.pending`
+  and all tokens.
+- If no supervisor is configured, `restart_supported` is false. The response
+  still says `restart_required` but has no token; the UI shows the exact
+  service-manager command and `daemon.restart` returns `restart_unavailable`.
 - `daemon.stop` is a separate operation. It also requires a supervisor and a
-  live connection; it does not imply a subsequent start.
-- If no supervisor is configured, `daemon.restart` returns
-  `restart_unavailable` and the UI shows the exact CLI command.
+  live connection; it does not imply a subsequent start, and it uses typed
+  confirmation rather than a restart token.
 - The web cannot start a stopped daemon. Start remains the service manager or
   `vrouter up`.
 - The daemon never reports `applied` for a change that is only durable but not
@@ -605,13 +675,24 @@ Every write creates an append-only audit entry under the state directory:
   "revision_after": "sha256:...",
   "affected": ["routes", "nat"],
   "restart_required": false,
-  "result": "applied"
+  "result": "applied",
+  "recovered": false
 }
 ```
 
 - The daemon audit actor is derived from peer credentials. The web records its
   own session id in its audit log and correlates by `request_id`; a
   client-supplied session id is not treated as verified identity.
+- The pending transaction record contains the audit intent. The final entry is
+  appended only after the config replace is durable. If the daemon crashes
+  after the replace but before the append, startup appends the entry from the
+  pending record with `recovered: true`. If it crashes after the append but
+  before clearing pending, startup finds the transaction id in the bounded
+  audit tail and does not append a duplicate. If the entry was rotated out, a
+  recovery entry is appended; a rare duplicate is preferable to a missing
+  write record.
+- `result` is `applied`, `restart_required` or `rolled_back`. Operational
+  actions use the same pending/audit flow and record their own `op`.
 - No passwords, session tokens, packet payloads or secret values.
 - Rotation: size-capped JSONL with a small retained history; exact retention is
   a deployment setting.
@@ -620,7 +701,31 @@ Every write creates an append-only audit entry under the state directory:
 - Journal entries remain the host rollback mechanism. Config snapshots are the
   config rollback mechanism.
 
-### 5.10 Implementation prerequisites
+### 5.10 Diff and confirmation coverage
+
+Every configuration mutation follows the same validate → diff → confirm →
+apply path. Operational actions use typed confirmation and audit, but have no
+config diff.
+
+| Operation | Validate | Diff | Confirm | Revision | Idempotency | Audit | Journal |
+|---|---|---|---|---|---|---|---|
+| `config.apply` | yes | yes | yes | yes | yes | yes | yes |
+| `config.rollback` | target snapshot | current → target | yes | yes | yes | yes | yes |
+| `iface.addr.add/del` | yes | yes | yes | yes | yes | yes | yes |
+| `route.add/del` | yes | yes | yes | yes | yes | yes | yes |
+| `link.set` | no config | no | typed target name | n/a | yes | yes | yes |
+| `daemon.stop` | n/a | no | typed `stop` | n/a | yes | yes | n/a |
+| `daemon.restart` | n/a | no | restart token | n/a | yes | yes | n/a |
+| `firewall.test`, `dns.query` | n/a | no | no | n/a | n/a | no | n/a |
+| `journal.repair` | not exposed | — | — | — | — | — | — |
+
+`config.diff` accepts either a complete proposed config or a rollback target
+(`target_revision` or `target_transaction`). The confirm token is bound to the
+current revision, the target/diff hash and the operation. `config.rollback` is
+not a raw file restore; it uses the same transaction, diff, confirm and audit
+path.
+
+### 5.11 Implementation prerequisites
 
 These are not optional polish; the scope cannot be implemented without them:
 
@@ -639,10 +744,11 @@ These are not optional polish; the scope cannot be implemented without them:
    ownership, `vrouterweb --control-ro`, supervisor detection and tests.
 6. **Transaction artifacts.** Diff format (canonical JSON text or RFC 6902),
    revision hash input, confirm-token store/TTL, idempotency store, audit store,
-   pagination cursors, config snapshot retention and size preflight.
+   pending record with journal checkpoint, restart token store, pagination
+   cursors, config snapshot retention and size preflight.
 7. **Offload restart reconciliation.** Clean exit and startup must reconcile
    kernel bridge/veth state before a new plan is applied.
-8. **Governance and docs.** An ADR for protocol v3/config apply, an ADR-011
+8. **Governance and docs.** ADR-015 for protocol v3/config apply, an ADR-011
    amendment for the group split and loopback-only/SSH-only transport,
    `PLAN.md` R10 re-baseline (including its stale LAN-bind/TLS/HTTPS exit),
    `CORE-SCOPE.md` §9 and JSON schema updates, plus `README.md`/`AGENTS.md`
@@ -681,9 +787,9 @@ The UI never optimistically shows a write as applied. Buttons disable while a
 transaction is pending; repeated submits use an idempotency key.
 
 Typed forms operate on the full config document returned by `config.get`. They
-change only the fields they own and submit the complete proposed config; the
-daemon preserves all other fields through its typed serializer. There is no raw
-config write editor in P1.
+change only the fields they own and submit the complete proposed config, so
+fields outside the form are preserved; the daemon validates and canonically
+serializes the result. There is no raw config write editor in P1.
 
 ### Cross-cutting UX
 
@@ -714,8 +820,8 @@ Additional requirements:
 - `config.apply` requires a fresh confirm token bound to revision and diff.
 - Replayed or stale confirms fail closed.
 - The read-only socket cannot execute writes.
-- The web process runs as a dedicated unprivileged account in the read/write
-  group only when writes are enabled.
+- The web process runs as a dedicated unprivileged account: `vrouter` for
+  read-only mode, plus `vrouter-admin` for write mode. It never runs as root.
 - Session fixation is prevented by rotating the session id on login.
 - Login rate limiting remains global and gains a per-account backoff. Per-IP
   limiting is not meaningful on a loopback-only listener and is not in scope.
@@ -749,9 +855,9 @@ Threat checklist:
 
 | Phase | Scope | Exit |
 |---|---|---|
-| P0 — Read model and protocol | `ConfigStore`, protocol v3 envelope, read ops, on-demand serialization, pagination, config revision, audit scaffolding, read-only UI pages for all resources | Every resource is visible; no writes |
-| P1 — Safe CRUD | Config validate/diff/apply/rollback; two-phase apply; live NAT and link state; address/route live only where a runtime transaction is implemented, otherwise restart-required; typed forms; diff/confirm; audit; rollback; group auth/deployment; CLI uses the control API when the daemon is running | Operator can perform safe live changes without SSH; restart-required changes are staged and show the exact restart command; every write is audited and reversible |
-| P2 — High-risk operations | Firewall CRUD/reorder, DHCP lease actions, DNS query, logging/advanced settings, journal repair guidance, daemon stop/restart with supervisor | Full live coverage including high-risk actions, with extra confirmation and maintenance UX; offline repair remains CLI |
+| P0 — Read model and protocol | `ConfigStore`, protocol v3 envelope with request-versioned v2 responses, dedicated config worker, read ops, on-demand serialization, pagination, config revision, audit scaffolding, read-only UI pages for all resources | Every resource is visible; v2 clients still parse v2 responses; no writes |
+| P1 — Safe CRUD | Config validate/diff/apply/rollback; two-phase apply with journal checkpoint and recoverable audit; live NAT and link state; address/route live only where a runtime transaction is implemented, otherwise restart-required; typed forms; diff/confirm; audit; rollback; group auth/deployment; CLI NAT/address/route/link writes use the control API when the daemon is running | Operator can perform safe live changes without SSH; restart-required changes are staged and show the exact restart command; every write is audited and reversible; crash recovery and the uid/gid split are tested |
+| P2 — High-risk operations | Firewall CRUD/reorder, DHCP lease actions, DNS query, logging/advanced settings, journal repair guidance, daemon stop/restart with supervisor and restart token | Full live coverage including high-risk actions, with extra confirmation and maintenance UX; offline repair remains CLI |
 | P3 — Hardening and release | systemd unit, packaging, SSH-tunnel docs, full Playwright/security suite, fuzz/soak, operator docs | CI green, security negatives pass, docs complete |
 
 Indicative effort: 6–8 engineering weeks for one engineer, excluding Android
@@ -766,18 +872,22 @@ reinterpreted.
 ### Test matrix
 
 - **Protocol unit tests:** parse/serialize v2 and v3, version negotiation,
-  v2-daemon rejection behavior, unknown ops, pagination, error codes,
-  revision/confirm/idempotency binding, config-sized frames.
+  v2-daemon rejection behavior, exact v2 response shape for v2 requests,
+  unknown ops, pagination, error codes, revision/confirm/idempotency binding,
+  config-sized frames and restart-token binding.
 - **Daemon integration:** validate/diff/apply/rollback, atomic config write,
-  journal inverse, restart-required, stale revision, concurrent apply,
-  idempotent retry, crash recovery, pending/committed markers, audit entries.
+  journal checkpoint/inverse, restart-required, stale revision, concurrent
+  apply, idempotent retry, crash recovery at every pending/audit window,
+  pending/committed markers, audit entries, config-worker isolation from
+  status/conntrack.
 - **Netns:** ports, bridges, VLANs, interfaces, routes, NAT, DHCP, DNS,
   firewall; reuse `scripts/test_netns.sh`, `test_route.sh`, `test_vlan.sh`,
   `test_offload.sh`, `nat_matrix.sh`, `test_firewall.sh`, `test_dhcp.sh`,
   `test_dns.sh`, `test_tun.sh`, `test_ipv6.sh`, `test_journal.sh`,
   `test_crash.sh`.
 - **Deployment:** `vrouterd`/`vrouterweb` uid/gid split, state-dir and socket
-  ownership, read-only socket rejection, supervisor detection.
+  ownership matrix, wrong-mode fail-closed behavior, read-only socket
+  rejection, supervisor detection.
 - **Web handlers:** auth, session rotation, CSRF on every write, Origin/Host,
   method/content-type/body limits, path traversal, read-only socket.
 - **Playwright:** login, every page, create/edit/delete, diff/confirm,
@@ -802,18 +912,25 @@ reinterpreted.
    applicable.
 4. Structural changes return `restart_required`; the UI never claims they are
    live.
-5. Read and write scopes are distinct; a read-only deployment cannot write.
-6. CLI and web do not race when the daemon is running.
-7. The daemon owns the config path, revision and two-phase apply; a crash
-   between stage and commit recovers without leaving a half-applied config.
+5. Read and write scopes are distinct; a read-only deployment cannot write,
+   and the documented state-dir/socket ownership matrix is enforced.
+6. CLI and web do not race when the daemon is running; P1 includes the NAT,
+   address/route and link CLI migration.
+7. The daemon owns the config path, revision and two-phase apply; a crash at
+   any point recovers without a half-applied config or a committed change
+   without an audit entry. The pending record carries the journal checkpoint.
 8. Offload host state survives a clean restart or is reconciled before the new
    plan is applied.
-9. V2 clients retain read and `nat.apply` compatibility; v3 writes fail
-   explicitly on a v2 daemon.
-10. `zig build test`, web tests, netns scripts and Playwright security flows
+9. V2 clients retain read and `nat.apply` compatibility, including exact v2
+   response shapes; v3 writes fail explicitly on a v2 daemon.
+10. A 16 MiB config frame or a 30 s apply does not block status, conntrack or
+    NAT reads.
+11. Restart tokens are one-time, bound to the latest transaction and invalid
+    after a successful start.
+12. `zig build test`, web tests, netns scripts and Playwright security flows
     pass.
-11. `docs/WEB.md`, `docs/PLAN.md` R10, ADR-011, ADR-014, `CHANGELOG.md` and
-    `README.md` reflect the final behavior.
+13. `docs/WEB.md`, `docs/PLAN.md` R10, ADR-011, ADR-014, ADR-015,
+    `CHANGELOG.md`, `README.md` and `AGENTS.md` reflect the final behavior.
 
 ## 10. Risks and open decisions
 
@@ -830,6 +947,11 @@ reinterpreted.
 | Audit is local | Root can tamper | State it plainly; optional remote log is out of scope |
 | Journal repair cannot be live | Web cannot complete an offline repair | Live `doctor.status`; UI gives the exact offline command |
 | Fixed protocol limits | Large config/table failures | Config-sized frames, pagination, `too_large` preflight |
+| Config frame stalls control | Status/NAT/conntrack delayed | Dedicated config worker; bounded write queue |
+| V2 response break | Deployed CLI stops working | Request-versioned response shapes; v2-shape tests |
+| Audit gap or duplicate after crash | Missing or repeated write record | Pending audit intent, idempotent recovery scan, `recovered` flag |
+| Pending/config hash mismatch | Ambiguous recovery | Fail closed with `config_conflict`; `doctor --repair` |
+| Restart token replay | Restart for the wrong change | One-time token bound to transaction, revision and boot id |
 | Session loss on restart | Operator re-login | Expected; show maintenance state and re-auth |
 | No RBAC | Single admin only | Explicit non-goal; document deployment boundary |
 | Estimate drift | Scope and schedule diverge | Re-baseline PLAN R10 after approval; no silent reinterpretation |
@@ -847,12 +969,14 @@ Open implementation details (not baseline decisions):
 4. **Advanced settings:** instance rename and `lease_db` path in P2 with extra
    confirmation (recommended); keep them CLI-only if the risk is unacceptable.
 5. **Idempotency window:** 10 minutes per instance/operation (recommended).
-6. **Supervisor detection and contract:** explicit daemon setting or
+6. **Restart token TTL:** 5 minutes, single outstanding token (recommended);
+   confirm during P1 implementation.
+7. **Supervisor detection and contract:** explicit daemon setting or
    environment variable (recommended) rather than guessing from PID 1; the
    unit must distinguish requested stop/restart from a crash or lifecycle
    returns `restart_unavailable`.
-7. **Target release:** keep this as post-v1 R10 (recommended), not 0.2.0.
-8. **Future remote access:** a TLS reverse proxy contract is out of scope now;
+8. **Target release:** keep this as post-v1 R10 (recommended), not 0.2.0.
+9. **Future remote access:** a TLS reverse proxy contract is out of scope now;
    define it separately if remote browser access becomes a requirement.
 
 ## 11. References
@@ -861,6 +985,7 @@ Open implementation details (not baseline decisions):
 - [ADR-009 — Kernel bridge offload](adr/009-kernel-bridge-offload.md)
 - [ADR-011 — Optional local web admin](adr/011-web-admin.md)
 - [ADR-014 — Config-backed live NAT updates](adr/014-live-nat-updates.md)
+- [ADR-015 — Control protocol v3 and crash-consistent config apply](adr/015-control-protocol-v3.md)
 - [WEB.md — current preview](WEB.md)
 - [PLAN.md — R10](PLAN.md)
 - [CORE-SCOPE.md — config and control socket](CORE-SCOPE.md)

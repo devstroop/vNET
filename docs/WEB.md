@@ -138,3 +138,7 @@ The Zig suite covers Argon2id verification, session expiry/eviction, CSRF token
 issuance, loopback checks, embedded assets, form/query decoding, HTML escaping,
 connection filters and page helpers. Playwright flows use the
 `webapp-testing` skill and are not a runtime or build dependency.
+
+The full read/write scope, including protocol v3 and crash-consistent config
+apply, is in [WEB-SCOPE.md](WEB-SCOPE.md) and
+[ADR-015](adr/015-control-protocol-v3.md). This preview remains read-only.
