@@ -8,10 +8,11 @@
 
 ## 1. Summary
 
-The `vrouterweb` preview started read-only. It now exposes status, NAT and
-conntrack, and NAT has a staged draft/review/apply path (ADR-016). The gap to a
-useful admin is still mostly backend: most resources have no general web read
-model or write path, and structural changes still require a restart.
+The `vrouterweb` preview started read-only. It now exposes status, NAT, DHCP,
+DNS and conntrack, and NAT, DHCP and DNS have staged
+draft/review/apply paths (ADR-016). The gap to a useful admin is still mostly
+backend: most resources have no general web read model or write path, and
+structural changes still require a restart.
 
 This assumes v1.0 has shipped, the control socket is stable, and the deployment
 is Linux with one daemon and one web process per instance.
@@ -45,8 +46,8 @@ journal or edits the config file directly.
   offline CLI operation.
 - Keep v2 response shapes byte-compatible for v2 requests; v3-only fields are
   version-gated (ADR-015).
-- Stage edits and apply once. NAT is the first vertical slice; other resources
-  adopt the same pending/review/apply/discard model (ADR-016).
+- Stage edits and apply once. NAT, DHCP and DNS use the same
+  pending/review/apply/discard model (ADR-016); other resources adopt it next.
 
 ## 2. Goals and non-goals
 
@@ -100,7 +101,9 @@ journal or edits the config file directly.
 - The JSON API remains read-only: `GET /api/status`, `GET /api/nat`,
   `GET /api/conntrack`. HTML NAT writes use `POST /nat/rules` to stage a draft,
   `POST /nat/review` to diff it, `POST /nat/apply` to commit it, and
-  `GET /partials/nat` to discard it.
+  `GET /partials/nat` to discard it. DHCP and DNS use the same pattern under
+  `/dhcp/rules`, `/dhcp/review`, `/dhcp/apply`, `/partials/dhcp` and
+  `/dns/rules`, `/dns/review`, `/dns/apply`, `/partials/dns`.
 - Control protocol v2 supports `ping`, `status`, `nat.list`, `nat.apply` and
   `conntrack.list`. Request and response parsing is strict: a v2 daemon rejects
   v3 envelope fields as `invalid_request`, and deployed v2 clients reject
@@ -108,9 +111,11 @@ journal or edits the config file directly.
   requests (ADR-015).
 - NAT is the only live configuration update (`ADR-014`). The CLI writes the
   config atomically, sends the complete NAT tables, and restores the file on a
-  clear rejection. The web preview stages NAT edits in a page-carried draft and
-  applies them through `config.apply` followed by `nat.apply`; the daemon still
-  does not apply config and datapath in one transaction.
+  clear rejection. The web preview stages NAT, DHCP and DNS edits in
+  page-carried drafts. NAT applies through `config.apply` followed by
+  `nat.apply`; DHCP and DNS save through `config.apply` and report
+  `restart_required`. The daemon still does not apply config and datapath in
+  one transaction.
 - The daemon publishes a fixed read-only snapshot with status, counters, NAT
   and up to 256 conntrack entries.
 - The daemon loads ports, bridges, interfaces, routes, DHCP, DNS and firewall
@@ -130,18 +135,20 @@ journal or edits the config file directly.
 1. **No web read model for most resources.** v3 list reads expose ports,
    bridges, interfaces, routes, DHCP, DNS and firewall config, but there are no
    detail pages, leases, journal or audit views yet.
-2. **No general write API.** NAT has a staged config path; there is no web CRUD
-   for ports, bridges, interfaces, routes, DHCP, DNS or firewall, and no
+2. **No general write API.** NAT, DHCP and DNS have staged config paths; there
+   is no web CRUD for ports, bridges, interfaces, routes or firewall, and no
    lifecycle operation.
 3. **No single write path.** CLI address/route mutations bypass the daemon.
    Running them while `vrouterd` is live can race the datapath and the config.
 4. **No live structural apply.** Ports, bridges, interfaces, routes, DHCP, DNS
-   and firewall changes require a daemon restart today.
+   and firewall changes require a daemon restart today. The web saves DHCP/DNS
+   and reports restart-required rather than pretending they are live.
 5. **No write authorization.** Read and write scopes are not distinct.
 6. **No web audit trail.** The daemon appends transaction audit entries, but
    there is no operator-facing audit or journal page in the web preview.
-7. **Limits are only partly lifted.** The web request limit is 64 KiB for NAT
-   drafts; control config frames are 16 MiB on a dedicated worker (ADR-015).
+7. **Limits are only partly lifted.** The web request limit is 64 KiB for
+   staged NAT/DHCP/DNS drafts; control config frames are 16 MiB on a dedicated
+   worker (ADR-015).
    Full config editing still needs bounded request/response handling and
    large-table paging.
 8. **Unprivileged deployment is not wired.** The server accepts root or the
@@ -152,9 +159,10 @@ journal or edits the config file directly.
    leave a `0700` directory that blocks the group deployment. There is no
    read-only socket, so the documented `sudo -u vrouter` deployment does not
    work yet.
-9. **Config store exists; web coverage does not.** The daemon owns a revisioned
-   `ConfigStore` and v3 `config.get/validate/diff/apply`, but the web uses it
-   only for NAT. General resource editors and rollback UI are still missing.
+9. **Config store exists; web coverage is partial.** The daemon owns a
+   revisioned `ConfigStore` and v3 `config.get/validate/diff/apply`, and the web
+   uses it for NAT, DHCP and DNS. General resource editors and rollback UI are
+   still missing.
 10. **Recovery coverage is incomplete.** Pending transactions, audit entries and
     restart markers are persisted, but crash/replay tests and the daemon-owned
     journal checkpoint are not complete.
@@ -178,8 +186,8 @@ restarts it after confirmation.
 | Interfaces/SVIs | List/detail, addresses, bridge/port/VLAN, link state | Create/edit/delete, address add/remove, link up/down, VLAN | Address/link live where supported; membership/VLAN restart | P0 read; P1 write |
 | Routes | List/detail, IPv4/IPv6, table/metric | Add/edit/delete | Live if the route transaction is implemented; otherwise restart | P0 read; P1 write |
 | NAT | Masquerade and port forwards | Add/edit/delete (staged draft) | Live via `config.apply` + `nat.apply` | P0 read; P1 write |
-| DHCP | Server config, pool, options, reservations, leases | Server/reservation CRUD; lease actions if supported | Restart for config; lease actions live in P2 | P0 read; P1 config write; P2 lease actions |
-| DNS | Upstreams, cache, listen, zones, query test | Config CRUD; diagnostic query | Restart for config; query live in P2 | P0 read; P1 config write; P2 query |
+| DHCP | Server config, pool, options, reservations, leases | Server/reservation CRUD (staged draft); lease actions if supported | Restart for config; lease actions live in P2 | P0 read; P1 config write implemented; P2 lease actions |
+| DNS | Upstreams, cache, listen, zones, query test | Config CRUD (staged draft); diagnostic query | Restart for config; query live in P2 | P0 read; P1 config write implemented; P2 query |
 | Firewall | Defaults, rp_filter, rate limits, ordered rules, counters, test probe | Rule/default/rate CRUD, reorder | Restart in P2; live firewall apply is future work | P0 read; P2 write |
 | Logging/advanced | Log level/format, instance, lease DB path | Edit | Restart; instance/lease DB need extra confirmation | P0 read; P2 write |
 | Conntrack | Paginated/filterable table | — | — | P0 |
@@ -195,6 +203,13 @@ Notes:
   diff, confirm and audit, followed by `nat.apply` for the live datapath. The
   two calls are not yet atomic; ADR-016 records this limitation. `nat.apply`
   also stays for deployed v2 clients until the P1 CLI migration.
+- DHCP and DNS stage and review the same way, then call `config.apply` and
+  report `restart_required`; they do not call a live service apply.
+- The NAT form exposes the outbound interface, optional source prefix, optional
+  explicit translated address, forward description, enabled state, split
+  internal IP/port and ingress. The DHCP form edits server pools, lease/options
+  and MAC reservations. The DNS form edits upstreams, listener, cache, TCP and
+  split-DNS zones.
 - `link.set` is operational and journal-backed; it is not written to the config
   and does not survive a daemon restart. Address and route writes are
   config-backed.

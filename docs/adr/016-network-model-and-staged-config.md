@@ -137,6 +137,11 @@ path. The slice implements:
 - one `config.apply` plus `nat.apply` on Apply;
 - running/pending state and honest error reporting.
 
+DHCP and DNS were added as the next slices. They reuse the same
+draft/review/apply/discard flow but call only `config.apply`; both sections
+return `restart_required`, so the UI saves the config and reports that the
+service activates after a daemon restart rather than claiming a live apply.
+
 Other resources adopt the same pattern as their read/write APIs become
 available. No new source of truth is introduced: the daemon still owns
 validation, revisions, transactions and audit.

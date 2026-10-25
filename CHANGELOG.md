@@ -8,13 +8,18 @@ All notable changes to vRouter are documented here. The format follows
 
 ### Added
 
-- **Staged web configuration (ADR-016):** the NAT page now stages add, edit and
-  remove operations in a page-carried draft. A pending-changes bar reviews the
-  proposed `config.diff`, applies the draft once through `config.apply` plus
-  `nat.apply`, and supports explicit discard. The UI distinguishes running,
-  pending, applied and restart-required states, and the network model now
-  separates attachments, logical networks, subnets and scoped services. The
-  preview request limit is 64 KiB so a complete NAT draft fits.
+- **Staged web configuration (ADR-016):** the NAT, DHCP and DNS pages stage
+  add, edit and remove operations in page-carried drafts. A pending-changes bar
+  reviews the proposed `config.diff`, applies the draft once through
+  `config.apply` (plus `nat.apply` for NAT), and supports explicit discard. The
+  UI distinguishes running, pending, applied and restart-required states, and
+  the network model now separates attachments, logical networks, subnets and
+  scoped services. The preview request limit is 64 KiB so a complete staged
+  draft fits. NAT rules now support a source prefix, explicit translated
+  address, forward description, enabled state and split internal IP/port;
+  DHCP edits server pools, options and reservations; DNS edits upstreams,
+  listener, cache and split-DNS zones. Review normalizes JSON object order and
+  null optionals so unchanged staged forms are not reported as pending.
 - **Control protocol v3 (ADR-015):** request-versioned envelopes keep v2
   response shapes byte-compatible while v3 `status` adds `protocol_version`,
   `config_revision`, `restart_pending`, `config_writable` and

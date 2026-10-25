@@ -480,9 +480,12 @@ machine-checked configs live in `examples/`):
     { "dst": "2001:db8:20::/48", "via": "2001:db8:1::1", "dev": "wan0" }
   ],
   "nat": {
-    "masquerade": [{ "out": "wan0" }],
+    "masquerade": [
+      { "out": "wan0", "src": "10.10.0.0/24", "addr": "203.0.113.7" }
+    ],
     "port_forward": [
-      { "proto": "tcp", "ext_port": 8080, "to": "10.10.0.5:80" }
+      { "proto": "tcp", "ext_port": 8080, "to": "10.10.0.5:80",
+        "description": "web ui", "enabled": true }
     ]
   },
   "dhcp": [
@@ -535,6 +538,17 @@ Rules for config:
   dual-stack interface. `"dhcp"` is invalid in `addresses`.
 - `routes[].dst` and `via` are family-checked; an IPv6 destination requires an
   IPv6 next hop (or `dev` only). IPv6-enabled ports need MTU >= 1280.
+- `nat.masquerade[].src` optionally limits SNAT to an IPv4 prefix;
+  `nat.masquerade[].addr` sets an explicit translated source address. If
+  `addr` is omitted, the outbound interface must have a static address or a
+  live local address. One masquerade rule is allowed per outbound
+  interface/port.
+- `nat.port_forward[].description` is a 128-character label.
+  `nat.port_forward[].enabled` defaults to `true`; disabled rules are ignored
+  and may share a port with an enabled rule. Duplicate enabled rules on the
+  same protocol, external port and ingress are rejected.
+- `dns.zones[]` optionally routes a suffix to zone-specific IPv4 upstreams;
+  `dns.listen` is required when upstreams or zones are configured.
 - `firewall.rules` is evaluated in order before the default policy. Each rule
   may match `family` (`ipv4` default, `ipv6`, `any`), `proto` (`tcp`, `udp`,
   `icmp`, `icmpv6`), `src`/`dst` CIDRs, `sport`/`dport` (TCP/UDP only),
