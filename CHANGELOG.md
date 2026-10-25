@@ -9,13 +9,14 @@ All notable changes to vRouter are documented here. The format follows
 ### Added
 
 - **Read-only web admin preview (post-v1, ADR-011):** opt-in `vrouterweb`
-  built with `zig build web`. The Zig process serves a Vite/React/shadcn SPA
-  and a same-origin JSON API backed by the Unix control socket. It binds
-  loopback only, authenticates with an Argon2id password and server-side
-  sessions, validates `Host`/`Origin`, and exposes status, NAT and conntrack
-  without host mutations. `--assets` selects the built frontend directory. It is
-  read-only, excluded from the default build, and not part of the 0.2.0 scope.
-  See `docs/WEB.md`.
+  built with `zig build web`. The Zig process serves server-rendered HTMX 4.0.0
+  pages and fragments with embedded assets, plus a same-origin JSON API backed
+  by the Unix control socket. It binds loopback only, authenticates with an
+  Argon2id password and server-side sessions, validates `Host`/`Origin`, and
+  exposes status, NAT and conntrack without host mutations. No Node build step,
+  package manager or runtime asset directory is required. It is read-only,
+  excluded from the default build, and not part of the 0.2.0 scope. See
+  `docs/WEB.md`.
 - **Crash recovery:** `vrouter doctor` is now read-only but works after a
   daemon crash, and `vrouter doctor --repair` replays journal inverses while
   refusing to run against a live daemon. Malformed journal tails are quarantined

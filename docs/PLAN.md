@@ -235,15 +235,16 @@ host.
 
 Post-v1 hardening: 7-day soak and multi-OEM root coverage.
 
-### R10 — Optional Linux web admin (post-v1, 2–3 weeks)
+### R10 — Optional Linux web admin (post-v1, 6–8 weeks)
 
 Prerequisites: v1.0 shipped, the R7 control socket is stable, and read/write
 authorization scopes exist. v1 scope does not change (ADR-011).
 
-- [ ] `vrouter-web`: unprivileged Unix-socket client, Zig HTTP server, embedded
-      Vite/React/shadcn static assets built at package time; no Node runtime on
-      the appliance, no CDN.
-- [ ] Loopback/Unix-socket defaults; explicit LAN bind; TLS reverse-proxy docs.
+- [ ] `vrouter-web`: unprivileged Unix-socket client, Zig HTTP server,
+      server-rendered HTMX 4.0.0 with embedded assets; no Node build step, no
+      CDN, no runtime asset directory.
+- [ ] Loopback/Unix-socket defaults; SSH-tunnel docs; no browser-facing LAN
+      bind in R10.
 - [ ] Auth/session (PAM or Argon2id), CSRF, Origin/Host checks, strict CSP,
       rate limits and an audit log for writes.
 - [ ] Read-only status: ports, bridges, routes, leases, conntrack, counters,
@@ -252,9 +253,10 @@ authorization scopes exist. v1 scope does not change (ADR-011).
 - [ ] Handler/auth tests plus Playwright happy-path and security-negative tests.
 - [ ] systemd unit, packaging and operator docs.
 
-**Exit:** An operator can inspect and safely apply configuration over
-authenticated HTTPS on a Linux box; the web process cannot mutate host state
-or bypass the control socket; v1 CLI/API behavior is unchanged.
+**Exit:** An operator can inspect and safely apply configuration over an
+authenticated loopback HTTP console (SSH tunnel for remote access); the web
+process cannot mutate host state or bypass the control socket; v1 CLI/API
+behavior is unchanged.
 
 ## 3. Effort summary
 
@@ -341,7 +343,7 @@ or bypass the control socket; v1 CLI/API behavior is unchanged.
 | 8 | Optional userspace 802.1D STP | Accepted — ADR-008 (R5) |
 | 9 | Kernel bridge offload with a veth trunk | Accepted — ADR-009 (R5) |
 | 10 | Embedded C ABI and host fd injection | Accepted — ADR-010 (R7 foundation) |
-| 11 | Optional local web admin via React/shadcn SPA | Accepted — ADR-011 (R10, post-v1; amended) |
+| 11 | Optional local web admin via server-rendered HTMX | Accepted — ADR-011 (R10, post-v1) |
 | 12 | Rename vNAT to vRouter | Accepted — ADR-012 |
 | 13 | IPv6 core in v1.0; services/NAT66 in v1.1 | Accepted — ADR-013 |
 | 14 | Config-backed live NAT updates | Accepted — ADR-014 |

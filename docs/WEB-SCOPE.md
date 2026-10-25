@@ -89,8 +89,9 @@ journal or edits the config file directly.
 
 ### What exists
 
-- `src/web/server.zig` serves a React/shadcn SPA and a small same-origin JSON
-  API backed by the Unix control socket.
+- `src/web/server.zig` serves server-rendered HTMX 4.0.0 pages and fragments
+  with embedded assets, plus a small same-origin JSON API backed by the Unix
+  control socket.
 - The configuration API is read-only: `GET /api/status`, `GET /api/nat`,
   `GET /api/conntrack`. Login and logout are POSTs but do not mutate router
   configuration.
@@ -644,8 +645,8 @@ These are not optional polish; the scope cannot be implemented without them:
 8. **Governance and docs.** An ADR for protocol v3/config apply, an ADR-011
    amendment for the group split and loopback-only/SSH-only transport,
    `PLAN.md` R10 re-baseline (including its stale LAN-bind/TLS/HTTPS exit),
-   `CORE-SCOPE.md` §9 and JSON schema updates, and a `README.md` fix for the
-   stale HTMX reference.
+   `CORE-SCOPE.md` §9 and JSON schema updates, plus `README.md`/`AGENTS.md`
+   alignment for the HTMX preview.
 
 ## 6. UX scope
 
@@ -720,7 +721,8 @@ Additional requirements:
   limiting is not meaningful on a loopback-only listener and is not in scope.
   Audit records failures without passwords.
 - Config paths are not user-controlled; symlinks are rejected.
-- React escaping remains; no `dangerouslySetInnerHTML` for control-plane data.
+- Server-side HTML escaping remains mandatory; no raw control-plane strings
+  are written into templates.
 - The listener stays loopback-only. Remote access is an SSH tunnel, not a
   browser-facing reverse proxy. A future TLS proxy needs a separate
   public-origin/trusted-proxy contract and a `Secure` cookie mode.
@@ -736,7 +738,7 @@ Threat checklist:
 | Stale overwrite | Revision check, `stale_revision`, re-diff |
 | Path traversal | Asset allowlist, no file browser, fixed config path |
 | Symlink config swap | `O_NOFOLLOW`/symlink rejection, atomic replace |
-| XSS | React escaping, CSP, no inline scripts |
+| XSS | Server-side HTML escaping, CSP, no inline scripts |
 | Session theft | HttpOnly, SameSite=Strict, short TTL, `Secure` when TLS is added |
 | Brute force | Rate limit, per-account backoff, audit, constant-time check |
 | Privilege leak | Web has no netlink/journal/config access |
@@ -780,8 +782,8 @@ reinterpreted.
   method/content-type/body limits, path traversal, read-only socket.
 - **Playwright:** login, every page, create/edit/delete, diff/confirm,
   validation errors, stale revision, rollback, restart-required banner, audit,
-  mobile and dark mode. Playwright must be added to `web/package.json`; it is
-  not a current dependency.
+  mobile and dark mode. Playwright runs through the `webapp-testing` skill; it
+  is not a runtime or build dependency and no Node build is required.
 - **Security negatives:** unauthorized write, read-only write, CSRF, session
   fixation, brute force, XSS, symlink config, oversized request, replayed
   confirm, idempotency conflict.

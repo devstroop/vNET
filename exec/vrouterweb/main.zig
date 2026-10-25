@@ -21,7 +21,6 @@ fn run(init: std.process.Init) !void {
     var listen: []const u8 = "127.0.0.1:8080";
     var control_path: ?[]const u8 = null;
     var password_file: []const u8 = default_password_file;
-    var assets_dir: []const u8 = init.environ_map.get("VROUTER_WEB_ASSETS") orelse "zig-out/share/vrouter-web";
     var hash_password = false;
     var ttl_ms: i64 = web.auth.default_session_ttl_ms;
 
@@ -55,12 +54,6 @@ fn run(init: std.process.Init) !void {
             if (i + 1 >= args.len) return error.InvalidArgument;
             i += 1;
             password_file = args[i];
-            continue;
-        }
-        if (std.mem.eql(u8, arg, "--assets")) {
-            if (i + 1 >= args.len) return error.InvalidArgument;
-            i += 1;
-            assets_dir = args[i];
             continue;
         }
         if (std.mem.eql(u8, arg, "--session-ttl-hours")) {
@@ -102,13 +95,12 @@ fn run(init: std.process.Init) !void {
         .control_path = control,
         .password_phc = phc,
         .session_ttl_ms = ttl_ms,
-        .assets_dir = assets_dir,
     });
 }
 
 fn usage(io: std.Io) !void {
     try std.Io.File.stdout().writeStreamingAll(io,
-        \\vrouterweb — read-only vRouter web admin preview
+        \\vrouterweb — read-only vRouter web admin
         \\
         \\Usage:
         \\  vrouterweb [options]
@@ -118,13 +110,13 @@ fn usage(io: std.Io) !void {
         \\  --listen <addr:port>          Default 127.0.0.1:8080; loopback only.
         \\  --control <path>              Default $VROUTER_RUN_DIR/control.sock.
         \\  --password-hash-file <path>   Default /etc/vrouter/web-password.
-        \\  --assets <dir>                Default $VROUTER_WEB_ASSETS or zig-out/share/vrouter-web.
         \\  --session-ttl-hours <n>       Default 12, maximum 168.
         \\  --version                     Print version.
         \\  -h, --help                    Print this help.
         \\
         \\The password hash is an Argon2id PHC string produced by --hash-password.
-        \\The server is read-only and obtains all state over the control socket.
+        \\The server is read-only, serves embedded HTMX assets, and obtains all
+        \\state over the control socket.
         \\
     );
 }

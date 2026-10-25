@@ -1,11 +1,13 @@
-//! Read-only web admin API and static frontend server.
-//!
-//! The process is deliberately unprivileged and derives every piece of state
-//! from the existing Unix control socket. It never mutates the host directly.
+//! Read-only web admin server. Pages are rendered in Zig and refreshed with
+//! HTMX fragments; the process stays unprivileged and reads every value from
+//! the existing Unix control socket.
 
 const std = @import("std");
 const vrouter = @import("vrouter");
 const auth = @import("auth.zig");
+const assets = @import("assets.zig");
+const html = @import("html.zig");
+const pages = @import("pages.zig");
 const protocol = vrouter.control_protocol;
 
 const cookie_name = "vrouter_session";
@@ -13,7 +15,7 @@ const max_body = 4096;
 const max_password_len = 256;
 const login_max_failures = 5;
 const login_lock_ms = 30_000;
-const max_asset_bytes = 16 * 1024 * 1024;
+const conntrack_page_limit = 200;
 
 pub const Options = struct {
     io: std.Io,
@@ -22,7 +24,6 @@ pub const Options = struct {
     control_path: []const u8 = "/run/vrouter/control.sock",
     password_phc: []const u8,
     session_ttl_ms: i64 = auth.default_session_ttl_ms,
-    assets_dir: []const u8 = "zig-out/share/vrouter-web",
 };
 
 pub fn run(options: Options) !void {
@@ -37,7 +38,6 @@ pub fn run(options: Options) !void {
         .control_path = options.control_path,
         .password_phc = options.password_phc,
         .session_ttl_ms = options.session_ttl_ms,
-        .assets_dir = options.assets_dir,
         .sessions = auth.Store.init(options.gpa),
     };
     defer app.sessions.deinit();
@@ -114,7 +114,6 @@ const App = struct {
     control_path: []const u8,
     password_phc: []const u8,
     session_ttl_ms: i64,
-    assets_dir: []const u8,
     sessions: auth.Store,
     login_failures: u32 = 0,
     login_locked_until_ms: i64 = 0,
@@ -144,7 +143,7 @@ const App = struct {
         fixMissingBodyLength(request);
 
         if (!self.hostAllowed(request)) {
-            return self.apiError(request, .bad_request, "unexpected_host", "Unexpected Host header.");
+            return self.respondText(request, .bad_request, "Unexpected Host header.\n");
         }
 
         if (std.mem.eql(u8, path, "/healthz")) {
@@ -180,8 +179,312 @@ const App = struct {
             return self.apiError(request, .not_found, "not_found", "API endpoint not found.");
         }
 
-        if (method != .GET and method != .HEAD) return self.methodNotAllowed(request);
-        return self.serveStatic(request, path);
+        if (std.mem.eql(u8, path, "/login")) {
+            if (method == .POST) return self.serveLoginForm(request);
+            if (method != .GET and method != .HEAD) return self.methodNotAllowedHtml(request);
+            return self.serveLoginPage(request);
+        }
+        if (std.mem.eql(u8, path, "/logout")) {
+            if (method != .POST) return self.methodNotAllowedHtml(request);
+            return self.serveLogoutForm(request);
+        }
+        if (std.mem.eql(u8, path, "/")) {
+            if (method != .GET and method != .HEAD) return self.methodNotAllowedHtml(request);
+            return self.redirect(request, "/overview");
+        }
+        if (std.mem.eql(u8, path, "/overview")) {
+            if (method != .GET and method != .HEAD) return self.methodNotAllowedHtml(request);
+            return self.serveOverviewPage(request);
+        }
+        if (std.mem.eql(u8, path, "/nat")) {
+            if (method != .GET and method != .HEAD) return self.methodNotAllowedHtml(request);
+            return self.serveNatPage(request);
+        }
+        if (std.mem.eql(u8, path, "/connections")) {
+            if (method != .GET and method != .HEAD) return self.methodNotAllowedHtml(request);
+            return self.serveConnectionsPage(request);
+        }
+        if (std.mem.eql(u8, path, "/system")) {
+            if (method != .GET and method != .HEAD) return self.methodNotAllowedHtml(request);
+            return self.serveSystemPage(request);
+        }
+        if (std.mem.eql(u8, path, "/partials/status")) {
+            if (method != .GET) return self.methodNotAllowed(request);
+            return self.serveStatusFragment(request);
+        }
+        if (std.mem.eql(u8, path, "/partials/nat")) {
+            if (method != .GET) return self.methodNotAllowed(request);
+            return self.serveNatFragment(request);
+        }
+        if (std.mem.eql(u8, path, "/partials/conntrack")) {
+            if (method != .GET) return self.methodNotAllowed(request);
+            return self.serveConntrackFragment(request);
+        }
+        if (std.mem.eql(u8, path, "/partials/system")) {
+            if (method != .GET) return self.methodNotAllowed(request);
+            return self.serveSystemFragment(request);
+        }
+
+        if (method != .GET and method != .HEAD) return self.methodNotAllowedHtml(request);
+        if (assets.find(path)) |asset| {
+            return self.respond(request, .ok, asset.content_type, asset.data, asset.cache, &.{});
+        }
+        return self.notFoundHtml(request);
+    }
+
+    fn serveLoginPage(self: *App, request: *std.http.Server.Request) !void {
+        if (self.sessionCsrf(request) != null) return self.redirect(request, "/overview");
+        var out: std.Io.Writer.Allocating = .init(self.gpa);
+        defer out.deinit();
+        try html.writeLoginPage(&out.writer, null);
+        return self.respondHtml(request, .ok, out.written());
+    }
+
+    fn serveLoginForm(self: *App, request: *std.http.Server.Request) !void {
+        if (!self.sameOrigin(request)) {
+            return self.renderLoginError(request, .forbidden, "Cross-origin request rejected.");
+        }
+
+        const now = self.nowMs();
+        if (now < self.login_locked_until_ms) {
+            return self.renderLoginError(request, .too_many_requests, "Too many attempts. Try again shortly.");
+        }
+
+        const body = self.readRequestBody(request) catch |err| {
+            return self.renderLoginError(request, bodyErrorStatus(err), bodyErrorMessage(err));
+        };
+        defer self.gpa.free(body);
+
+        var password_buf: [max_password_len]u8 = undefined;
+        const password = formValue(body, "password", &password_buf) orelse "";
+        if (password.len == 0 or password.len > max_password_len or
+            !auth.verifyPassword(self.io, self.gpa, self.password_phc, password))
+        {
+            self.recordLoginFailure(now);
+            return self.renderLoginError(request, .unauthorized, "Invalid password.");
+        }
+
+        self.login_failures = 0;
+        const created = try self.sessions.create(self.io, now, self.session_ttl_ms);
+        var cookie_buf: [192]u8 = undefined;
+        const cookie = try std.fmt.bufPrint(&cookie_buf, "{s}={s}; HttpOnly; SameSite=Strict; Path=/; Max-Age={d}", .{
+            cookie_name,
+            created.token,
+            @divTrunc(self.session_ttl_ms, 1000),
+        });
+        return self.redirectWithHeaders(request, "/overview", &.{
+            .{ .name = "set-cookie", .value = cookie },
+        });
+    }
+
+    fn serveLogoutForm(self: *App, request: *std.http.Server.Request) !void {
+        if (!self.sameOrigin(request)) {
+            return self.respondHtml(request, .forbidden, "<h1>Cross-origin request rejected.</h1>");
+        }
+        const token = getCookie(request, cookie_name) orelse return self.redirect(request, "/login");
+        const expected = self.sessions.csrfFor(self.io, token, self.nowMs()) orelse
+            return self.redirect(request, "/login");
+
+        const body = self.readRequestBody(request) catch |err| {
+            return self.respondHtml(request, bodyErrorStatus(err), "<h1>Invalid logout request.</h1>");
+        };
+        defer self.gpa.free(body);
+
+        var csrf_buf: [auth.token_hex_len]u8 = undefined;
+        const csrf = formValue(body, "csrf", &csrf_buf) orelse "";
+        if (csrf.len != auth.token_hex_len) {
+            return self.respondHtml(request, .forbidden, "<h1>Invalid CSRF token.</h1>");
+        }
+        var candidate: [auth.token_hex_len]u8 = undefined;
+        @memcpy(&candidate, csrf);
+        if (!std.crypto.timing_safe.eql([auth.token_hex_len]u8, expected, candidate)) {
+            return self.respondHtml(request, .forbidden, "<h1>Invalid CSRF token.</h1>");
+        }
+
+        self.sessions.remove(self.io, token);
+        return self.redirectWithHeaders(request, "/login", &.{
+            .{ .name = "set-cookie", .value = cookie_name ++ "=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0" },
+        });
+    }
+
+    fn serveOverviewPage(self: *App, request: *std.http.Server.Request) !void {
+        const csrf = (try self.requireSession(request)) orelse return;
+        const now = self.nowMs();
+        var response = self.call("status", null, null) catch |err| {
+            return self.renderOverviewPage(request, csrf[0..], null, @errorName(err), now);
+        };
+        defer response.deinit();
+        const status = response.value.status orelse
+            return self.renderOverviewPage(request, csrf[0..], null, "Missing status", now);
+        return self.renderOverviewPage(request, csrf[0..], status, null, now);
+    }
+
+    fn serveStatusFragment(self: *App, request: *std.http.Server.Request) !void {
+        const csrf = (try self.requireSessionFragment(request)) orelse return;
+        _ = csrf;
+        const now = self.nowMs();
+        var out: std.Io.Writer.Allocating = .init(self.gpa);
+        defer out.deinit();
+        var response = self.call("status", null, null) catch |err| {
+            try pages.overviewFragment(&out.writer, null, @errorName(err), now);
+            return self.respondHtml(request, .ok, out.written());
+        };
+        defer response.deinit();
+        const status = response.value.status orelse {
+            try pages.overviewFragment(&out.writer, null, "Missing status", now);
+            return self.respondHtml(request, .ok, out.written());
+        };
+        try pages.overviewFragment(&out.writer, status, null, now);
+        return self.respondHtml(request, .ok, out.written());
+    }
+
+    fn serveNatPage(self: *App, request: *std.http.Server.Request) !void {
+        const csrf = (try self.requireSession(request)) orelse return;
+        const now = self.nowMs();
+        var response = self.call("nat.list", null, null) catch |err| {
+            return self.renderNatPage(request, csrf[0..], null, @errorName(err), now);
+        };
+        defer response.deinit();
+        const nat = response.value.nat orelse
+            return self.renderNatPage(request, csrf[0..], null, "Missing NAT snapshot", now);
+        return self.renderNatPage(request, csrf[0..], nat, null, now);
+    }
+
+    fn serveNatFragment(self: *App, request: *std.http.Server.Request) !void {
+        if ((try self.requireSessionFragment(request)) == null) return;
+        const now = self.nowMs();
+        var out: std.Io.Writer.Allocating = .init(self.gpa);
+        defer out.deinit();
+        var response = self.call("nat.list", null, null) catch |err| {
+            try pages.natFragment(&out.writer, null, @errorName(err), now);
+            return self.respondHtml(request, .ok, out.written());
+        };
+        defer response.deinit();
+        const nat = response.value.nat orelse {
+            try pages.natFragment(&out.writer, null, "Missing NAT snapshot", now);
+            return self.respondHtml(request, .ok, out.written());
+        };
+        try pages.natFragment(&out.writer, nat, null, now);
+        return self.respondHtml(request, .ok, out.written());
+    }
+
+    fn serveConnectionsPage(self: *App, request: *std.http.Server.Request) !void {
+        const csrf = (try self.requireSession(request)) orelse return;
+        const now = self.nowMs();
+        var state_buf: [32]u8 = undefined;
+        var query_buf: [256]u8 = undefined;
+        const state_filter = queryValue(request.head.target, "state", &state_buf) orelse "all";
+        const query = queryValue(request.head.target, "q", &query_buf) orelse "";
+
+        var response = self.call("conntrack.list", protocolStateFilter(state_filter), conntrack_page_limit) catch |err| {
+            return self.renderConnectionsPage(request, csrf[0..], null, state_filter, query, @errorName(err), now);
+        };
+        defer response.deinit();
+        const conntrack = response.value.conntrack orelse
+            return self.renderConnectionsPage(request, csrf[0..], null, state_filter, query, "Missing conntrack snapshot", now);
+        return self.renderConnectionsPage(request, csrf[0..], conntrack, state_filter, query, null, now);
+    }
+
+    fn serveConntrackFragment(self: *App, request: *std.http.Server.Request) !void {
+        if ((try self.requireSessionFragment(request)) == null) return;
+        const now = self.nowMs();
+        var state_buf: [32]u8 = undefined;
+        var query_buf: [256]u8 = undefined;
+        const state_filter = queryValue(request.head.target, "state", &state_buf) orelse "all";
+        const query = queryValue(request.head.target, "q", &query_buf) orelse "";
+
+        var out: std.Io.Writer.Allocating = .init(self.gpa);
+        defer out.deinit();
+        var response = self.call("conntrack.list", protocolStateFilter(state_filter), conntrack_page_limit) catch |err| {
+            try pages.connectionsFragment(&out.writer, null, state_filter, query, @errorName(err), now);
+            return self.respondHtml(request, .ok, out.written());
+        };
+        defer response.deinit();
+        const conntrack = response.value.conntrack orelse {
+            try pages.connectionsFragment(&out.writer, null, state_filter, query, "Missing conntrack snapshot", now);
+            return self.respondHtml(request, .ok, out.written());
+        };
+        try pages.connectionsFragment(&out.writer, conntrack, state_filter, query, null, now);
+        return self.respondHtml(request, .ok, out.written());
+    }
+
+    fn serveSystemPage(self: *App, request: *std.http.Server.Request) !void {
+        const csrf = (try self.requireSession(request)) orelse return;
+        const now = self.nowMs();
+        var response = self.call("status", null, null) catch |err| {
+            return self.renderSystemPage(request, csrf[0..], null, @errorName(err), now);
+        };
+        defer response.deinit();
+        const status = response.value.status orelse
+            return self.renderSystemPage(request, csrf[0..], null, "Missing status", now);
+        return self.renderSystemPage(request, csrf[0..], status, null, now);
+    }
+
+    fn serveSystemFragment(self: *App, request: *std.http.Server.Request) !void {
+        if ((try self.requireSessionFragment(request)) == null) return;
+        const now = self.nowMs();
+        var out: std.Io.Writer.Allocating = .init(self.gpa);
+        defer out.deinit();
+        var response = self.call("status", null, null) catch |err| {
+            try pages.systemFragment(&out.writer, null, @errorName(err), now);
+            return self.respondHtml(request, .ok, out.written());
+        };
+        defer response.deinit();
+        const status = response.value.status orelse {
+            try pages.systemFragment(&out.writer, null, "Missing status", now);
+            return self.respondHtml(request, .ok, out.written());
+        };
+        try pages.systemFragment(&out.writer, status, null, now);
+        return self.respondHtml(request, .ok, out.written());
+    }
+
+    fn renderOverviewPage(self: *App, request: *std.http.Server.Request, csrf: []const u8, status: ?protocol.Status, err: ?[]const u8, now: i64) !void {
+        var out: std.Io.Writer.Allocating = .init(self.gpa);
+        defer out.deinit();
+        try pages.overviewPage(self.gpa, &out.writer, csrf, status, err, now);
+        return self.respondHtml(request, .ok, out.written());
+    }
+
+    fn renderNatPage(self: *App, request: *std.http.Server.Request, csrf: []const u8, nat: ?protocol.Nat, err: ?[]const u8, now: i64) !void {
+        var out: std.Io.Writer.Allocating = .init(self.gpa);
+        defer out.deinit();
+        try pages.natPage(self.gpa, &out.writer, csrf, nat, err, now);
+        return self.respondHtml(request, .ok, out.written());
+    }
+
+    fn renderConnectionsPage(self: *App, request: *std.http.Server.Request, csrf: []const u8, conntrack: ?protocol.Conntrack, state_filter: []const u8, query: []const u8, err: ?[]const u8, now: i64) !void {
+        var out: std.Io.Writer.Allocating = .init(self.gpa);
+        defer out.deinit();
+        try pages.connectionsPage(self.gpa, &out.writer, csrf, conntrack, state_filter, query, err, now);
+        return self.respondHtml(request, .ok, out.written());
+    }
+
+    fn renderSystemPage(self: *App, request: *std.http.Server.Request, csrf: []const u8, status: ?protocol.Status, err: ?[]const u8, now: i64) !void {
+        var out: std.Io.Writer.Allocating = .init(self.gpa);
+        defer out.deinit();
+        try pages.systemPage(self.gpa, &out.writer, csrf, status, err, now);
+        return self.respondHtml(request, .ok, out.written());
+    }
+
+    fn renderLoginError(self: *App, request: *std.http.Server.Request, status: std.http.Status, message: []const u8) !void {
+        var out: std.Io.Writer.Allocating = .init(self.gpa);
+        defer out.deinit();
+        try html.writeLoginPage(&out.writer, message);
+        return self.respondHtml(request, status, out.written());
+    }
+
+    fn requireSession(self: *App, request: *std.http.Server.Request) !?[auth.token_hex_len]u8 {
+        if (self.sessionCsrf(request)) |csrf| return csrf;
+        try self.redirect(request, "/login");
+        return null;
+    }
+
+    fn requireSessionFragment(self: *App, request: *std.http.Server.Request) !?[auth.token_hex_len]u8 {
+        if (self.sessionCsrf(request)) |csrf| return csrf;
+        try self.respondHtmlWithHeaders(request, .unauthorized, "Sign in required.", &.{
+            .{ .name = "hx-redirect", .value = "/login" },
+        });
+        return null;
     }
 
     fn serveSession(self: *App, request: *std.http.Server.Request) !void {
@@ -199,16 +502,14 @@ const App = struct {
             return self.apiError(request, .forbidden, "cross_origin", "Cross-origin request rejected.");
         }
 
-        const now = std.Io.Clock.real.now(self.io).toMilliseconds();
+        const now = self.nowMs();
         if (now < self.login_locked_until_ms) {
             return self.apiError(request, .too_many_requests, "rate_limited", "Too many attempts. Try again shortly.");
         }
 
-        var body_buf: [max_body]u8 = undefined;
-        const body_reader = request.readerExpectContinue(&body_buf) catch
-            return self.apiError(request, .bad_request, "bad_request", "Unsupported request expectation.");
-        const body = body_reader.allocRemaining(self.gpa, .limited(max_body)) catch
-            return self.apiError(request, .bad_request, "body_too_large", "Request body is too large.");
+        const body = self.readRequestBody(request) catch |err| {
+            return self.apiError(request, bodyErrorStatus(err), "bad_request", bodyErrorMessage(err));
+        };
         defer self.gpa.free(body);
 
         var parsed = std.json.parseFromSlice(LoginRequest, self.gpa, body, .{ .allocate = .alloc_always }) catch
@@ -219,11 +520,7 @@ const App = struct {
         if (password.len == 0 or password.len > max_password_len or
             !auth.verifyPassword(self.io, self.gpa, self.password_phc, password))
         {
-            self.login_failures += 1;
-            if (self.login_failures >= login_max_failures) {
-                self.login_failures = 0;
-                self.login_locked_until_ms = now + login_lock_ms;
-            }
+            self.recordLoginFailure(now);
             return self.respondJson(request, .unauthorized, LoginPayload{
                 .ok = false,
                 .code = "invalid_credentials",
@@ -250,14 +547,12 @@ const App = struct {
         }
         const token = getCookie(request, cookie_name) orelse
             return self.apiError(request, .unauthorized, "unauthenticated", "Missing session.");
-        const expected = self.sessions.csrfFor(self.io, token, std.Io.Clock.real.now(self.io).toMilliseconds()) orelse
+        const expected = self.sessions.csrfFor(self.io, token, self.nowMs()) orelse
             return self.apiError(request, .unauthorized, "unauthenticated", "Session expired.");
 
-        var body_buf: [max_body]u8 = undefined;
-        const body_reader = request.readerExpectContinue(&body_buf) catch
-            return self.apiError(request, .bad_request, "bad_request", "Unsupported request expectation.");
-        const body = body_reader.allocRemaining(self.gpa, .limited(max_body)) catch
-            return self.apiError(request, .bad_request, "body_too_large", "Request body is too large.");
+        const body = self.readRequestBody(request) catch |err| {
+            return self.apiError(request, bodyErrorStatus(err), "bad_request", bodyErrorMessage(err));
+        };
         defer self.gpa.free(body);
 
         var parsed = std.json.parseFromSlice(LogoutRequest, self.gpa, body, .{ .allocate = .alloc_always }) catch
@@ -310,34 +605,6 @@ const App = struct {
         return self.respondJson(request, .ok, ConntrackPayload{ .conntrack = conntrack });
     }
 
-    fn serveStatic(self: *App, request: *std.http.Server.Request, path: []const u8) !void {
-        if (assetPath(path)) |relative| {
-            const cache = if (std.mem.startsWith(u8, relative, "assets/"))
-                "public, max-age=31536000, immutable"
-            else
-                "no-store";
-            return self.serveFile(request, relative, cache);
-        }
-        if (std.fs.path.extension(path).len == 0) {
-            return self.serveFile(request, "index.html", "no-store");
-        }
-        return self.apiError(request, .not_found, "not_found", "Asset not found.");
-    }
-
-    fn serveFile(self: *App, request: *std.http.Server.Request, relative: []const u8, cache: []const u8) !void {
-        const joined = try std.fs.path.join(self.gpa, &.{ self.assets_dir, relative });
-        defer self.gpa.free(joined);
-        const data = std.Io.Dir.cwd().readFileAlloc(self.io, joined, self.gpa, .limited(max_asset_bytes)) catch |err| switch (err) {
-            error.FileNotFound => return self.respondText(request, .not_found, "Frontend asset not found. Run `zig build web`.\n"),
-            else => {
-                std.log.err("failed to read frontend asset {s}: {t}", .{ joined, err });
-                return self.respondText(request, .internal_server_error, "Failed to read frontend asset.\n");
-            },
-        };
-        defer self.gpa.free(data);
-        return self.respond(request, .ok, contentType(relative), data, cache, &.{});
-    }
-
     fn call(self: *App, op: []const u8, state_filter: ?[]const u8, limit: ?u32) !std.json.Parsed(protocol.Response) {
         var client = try vrouter.control_client.Client.connect(self.io, self.gpa, self.control_path);
         defer client.deinit();
@@ -354,6 +621,14 @@ const App = struct {
 
     fn methodNotAllowed(self: *App, request: *std.http.Server.Request) !void {
         return self.apiError(request, .method_not_allowed, "method_not_allowed", "Method not allowed.");
+    }
+
+    fn methodNotAllowedHtml(self: *App, request: *std.http.Server.Request) !void {
+        return self.respondHtml(request, .method_not_allowed, "<h1>Method not allowed.</h1>");
+    }
+
+    fn notFoundHtml(self: *App, request: *std.http.Server.Request) !void {
+        return self.respondHtml(request, .not_found, "<h1>Page not found.</h1><p><a href=\"/overview\">Return to the overview</a>.</p>");
     }
 
     fn respondJson(self: *App, request: *std.http.Server.Request, status: std.http.Status, payload: anytype) !void {
@@ -373,8 +648,39 @@ const App = struct {
         return self.respond(request, status, "application/json; charset=utf-8", out.written(), "no-store", extra);
     }
 
+    fn respondHtml(self: *App, request: *std.http.Server.Request, status: std.http.Status, body: []const u8) !void {
+        return self.respondHtmlWithHeaders(request, status, body, &.{});
+    }
+
+    fn respondHtmlWithHeaders(
+        self: *App,
+        request: *std.http.Server.Request,
+        status: std.http.Status,
+        body: []const u8,
+        extra: []const std.http.Header,
+    ) !void {
+        return self.respond(request, status, "text/html; charset=utf-8", body, "no-store", extra);
+    }
+
     fn respondText(self: *App, request: *std.http.Server.Request, status: std.http.Status, body: []const u8) !void {
         return self.respond(request, status, "text/plain; charset=utf-8", body, "no-store", &.{});
+    }
+
+    fn redirect(self: *App, request: *std.http.Server.Request, location: []const u8) !void {
+        return self.redirectWithHeaders(request, location, &.{});
+    }
+
+    fn redirectWithHeaders(self: *App, request: *std.http.Server.Request, location: []const u8, extra: []const std.http.Header) !void {
+        var headers: [4]std.http.Header = undefined;
+        var n: usize = 0;
+        headers[n] = .{ .name = "location", .value = location };
+        n += 1;
+        for (extra) |header| {
+            if (n == headers.len) return error.TooManyHeaders;
+            headers[n] = header;
+            n += 1;
+        }
+        return self.respond(request, .see_other, "text/plain; charset=utf-8", "", "no-store", headers[0..n]);
     }
 
     fn respond(
@@ -412,9 +718,27 @@ const App = struct {
         try request.respond(body, .{ .status = status, .extra_headers = headers[0..n] });
     }
 
+    fn readRequestBody(self: *App, request: *std.http.Server.Request) ![]u8 {
+        var body_buf: [max_body]u8 = undefined;
+        const body_reader = try request.readerExpectContinue(&body_buf);
+        return body_reader.allocRemaining(self.gpa, .limited(max_body));
+    }
+
+    fn recordLoginFailure(self: *App, now: i64) void {
+        self.login_failures += 1;
+        if (self.login_failures >= login_max_failures) {
+            self.login_failures = 0;
+            self.login_locked_until_ms = now + login_lock_ms;
+        }
+    }
+
+    fn nowMs(self: *App) i64 {
+        return std.Io.Clock.real.now(self.io).toMilliseconds();
+    }
+
     fn sessionCsrf(self: *App, request: *std.http.Server.Request) ?[auth.token_hex_len]u8 {
         const token = getCookie(request, cookie_name) orelse return null;
-        return self.sessions.csrfFor(self.io, token, std.Io.Clock.real.now(self.io).toMilliseconds());
+        return self.sessions.csrfFor(self.io, token, self.nowMs());
     }
 
     fn hostAllowed(self: *App, request: *std.http.Server.Request) bool {
@@ -432,7 +756,6 @@ const App = struct {
     }
 
     fn sameOrigin(self: *App, request: *std.http.Server.Request) bool {
-        _ = self;
         var origin: ?[]const u8 = null;
         var host: ?[]const u8 = null;
         var headers = request.iterateHeaders();
@@ -441,12 +764,60 @@ const App = struct {
             if (std.ascii.eqlIgnoreCase(header.name, "host")) host = header.value;
         }
         const value = origin orelse return true;
+        // Some local browser contexts report Origin: null for a same-document
+        // form post. Host is already pinned to loopback and session cookies are
+        // SameSite=Strict, so treat that as a local request rather than breaking
+        // the sign-in form.
+        if (std.mem.eql(u8, value, "null")) return self.hostAllowed(request);
         const host_value = host orelse return false;
         var expected: [256]u8 = undefined;
         const expected_origin = std.fmt.bufPrint(&expected, "http://{s}", .{host_value}) catch return false;
         return std.mem.eql(u8, value, expected_origin);
     }
 };
+
+fn bodyErrorStatus(err: anyerror) std.http.Status {
+    return if (err == error.StreamTooLong) .payload_too_large else .bad_request;
+}
+
+fn bodyErrorMessage(err: anyerror) []const u8 {
+    return if (err == error.StreamTooLong) "Request body is too large." else "Unsupported request body.";
+}
+
+fn protocolStateFilter(state: []const u8) ?[]const u8 {
+    if (state.len == 0 or std.mem.eql(u8, state, "all") or std.mem.eql(u8, state, "other")) return null;
+    return state;
+}
+
+fn formValue(body: []const u8, name: []const u8, out: []u8) ?[]const u8 {
+    var pairs = std.mem.splitScalar(u8, body, '&');
+    while (pairs.next()) |pair| {
+        const eq = std.mem.indexOfScalar(u8, pair, '=') orelse continue;
+        if (!std.mem.eql(u8, pair[0..eq], name)) continue;
+        return decodeComponent(pair[eq + 1 ..], out);
+    }
+    return null;
+}
+
+fn queryValue(target: []const u8, name: []const u8, out: []u8) ?[]const u8 {
+    const question = std.mem.indexOfScalar(u8, target, '?') orelse return null;
+    var pairs = std.mem.splitScalar(u8, target[question + 1 ..], '&');
+    while (pairs.next()) |pair| {
+        const eq = std.mem.indexOfScalar(u8, pair, '=') orelse continue;
+        if (!std.mem.eql(u8, pair[0..eq], name)) continue;
+        return decodeComponent(pair[eq + 1 ..], out);
+    }
+    return null;
+}
+
+fn decodeComponent(raw: []const u8, out: []u8) ?[]const u8 {
+    if (raw.len > out.len) return null;
+    @memcpy(out[0..raw.len], raw);
+    for (out[0..raw.len]) |*byte| {
+        if (byte.* == '+') byte.* = ' ';
+    }
+    return std.Uri.percentDecodeInPlace(out[0..raw.len]);
+}
 
 fn fixMissingBodyLength(request: *std.http.Server.Request) void {
     if (request.head.method.requestHasBody() and
@@ -472,41 +843,18 @@ fn getCookie(request: *std.http.Server.Request, name: []const u8) ?[]const u8 {
     return null;
 }
 
-fn assetPath(path: []const u8) ?[]const u8 {
-    if (std.mem.eql(u8, path, "/") or std.mem.eql(u8, path, "/index.html")) return "index.html";
-    if (std.mem.eql(u8, path, "/favicon.svg") or std.mem.eql(u8, path, "/theme-init.js")) return path[1..];
-    if (!std.mem.startsWith(u8, path, "/assets/")) return null;
-    const relative = path[1..];
-    if (std.mem.indexOf(u8, relative, "..") != null) return null;
-    if (std.mem.indexOfScalar(u8, relative, '\\') != null) return null;
-    return relative;
+test "form and query decoding handles plus and percent escapes" {
+    var out: [64]u8 = undefined;
+    try std.testing.expectEqualStrings("a b+c", formValue("x=1&note=a+b%2Bc", "note", &out).?);
+    try std.testing.expectEqualStrings("established", queryValue("/partials/conntrack?state=established&q=10.0.0.1", "state", &out).?);
+    try std.testing.expectEqualStrings("10.0.0.1", queryValue("/partials/conntrack?state=established&q=10.0.0.1", "q", &out).?);
+    try std.testing.expect(formValue("x=1", "note", &out) == null);
 }
 
-fn contentType(path: []const u8) []const u8 {
-    const ext = std.fs.path.extension(path);
-    if (std.mem.eql(u8, ext, ".html")) return "text/html; charset=utf-8";
-    if (std.mem.eql(u8, ext, ".js")) return "text/javascript; charset=utf-8";
-    if (std.mem.eql(u8, ext, ".css")) return "text/css; charset=utf-8";
-    if (std.mem.eql(u8, ext, ".json")) return "application/json; charset=utf-8";
-    if (std.mem.eql(u8, ext, ".svg")) return "image/svg+xml";
-    if (std.mem.eql(u8, ext, ".png")) return "image/png";
-    if (std.mem.eql(u8, ext, ".webp")) return "image/webp";
-    if (std.mem.eql(u8, ext, ".woff2")) return "font/woff2";
-    return "application/octet-stream";
-}
-
-test "asset paths reject traversal and accept hashed bundles" {
-    try std.testing.expectEqualStrings("index.html", assetPath("/").?);
-    try std.testing.expectEqualStrings("index.html", assetPath("/index.html").?);
-    try std.testing.expectEqualStrings("assets/index-abc.js", assetPath("/assets/index-abc.js").?);
-    try std.testing.expect(assetPath("/assets/../secret") == null);
-    try std.testing.expect(assetPath("/overview") == null);
-}
-
-test "content types" {
-    try std.testing.expectEqualStrings("text/html; charset=utf-8", contentType("index.html"));
-    try std.testing.expectEqualStrings("text/javascript; charset=utf-8", contentType("assets/app.js"));
-    try std.testing.expectEqualStrings("font/woff2", contentType("assets/font.woff2"));
+test "protocol state filter passes only concrete states" {
+    try std.testing.expect(protocolStateFilter("all") == null);
+    try std.testing.expect(protocolStateFilter("other") == null);
+    try std.testing.expectEqualStrings("established", protocolStateFilter("established").?);
 }
 
 test "loopback detection" {
