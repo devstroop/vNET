@@ -4,7 +4,7 @@
 const std = @import("std");
 const assets = @import("assets.zig");
 
-pub const Page = enum { overview, nat, connections, system };
+pub const Page = enum { overview, nat, dhcp, dns, connections, system };
 
 pub const PageOptions = struct {
     title: []const u8,
@@ -114,6 +114,8 @@ fn writeNav(w: *std.Io.Writer, active: Page) !void {
     const items = [_]struct { page: Page, href: []const u8, label: []const u8 }{
         .{ .page = .overview, .href = "/overview", .label = "Overview" },
         .{ .page = .nat, .href = "/nat", .label = "NAT" },
+        .{ .page = .dhcp, .href = "/dhcp", .label = "DHCP" },
+        .{ .page = .dns, .href = "/dns", .label = "DNS" },
         .{ .page = .connections, .href = "/connections", .label = "Connections" },
         .{ .page = .system, .href = "/system", .label = "System" },
     };

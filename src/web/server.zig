@@ -212,6 +212,38 @@ const App = struct {
             if (method != .GET and method != .HEAD) return self.methodNotAllowedHtml(request);
             return self.serveNatPage(request);
         }
+        if (std.mem.eql(u8, path, "/dhcp/rules")) {
+            if (method != .POST) return self.methodNotAllowedHtml(request);
+            return self.serveDhcpRules(request);
+        }
+        if (std.mem.eql(u8, path, "/dhcp/review")) {
+            if (method != .POST) return self.methodNotAllowedHtml(request);
+            return self.serveDhcpReview(request);
+        }
+        if (std.mem.eql(u8, path, "/dhcp/apply")) {
+            if (method != .POST) return self.methodNotAllowedHtml(request);
+            return self.serveDhcpApply(request);
+        }
+        if (std.mem.eql(u8, path, "/dhcp")) {
+            if (method != .GET and method != .HEAD) return self.methodNotAllowedHtml(request);
+            return self.serveDhcpPage(request);
+        }
+        if (std.mem.eql(u8, path, "/dns/rules")) {
+            if (method != .POST) return self.methodNotAllowedHtml(request);
+            return self.serveDnsRules(request);
+        }
+        if (std.mem.eql(u8, path, "/dns/review")) {
+            if (method != .POST) return self.methodNotAllowedHtml(request);
+            return self.serveDnsReview(request);
+        }
+        if (std.mem.eql(u8, path, "/dns/apply")) {
+            if (method != .POST) return self.methodNotAllowedHtml(request);
+            return self.serveDnsApply(request);
+        }
+        if (std.mem.eql(u8, path, "/dns")) {
+            if (method != .GET and method != .HEAD) return self.methodNotAllowedHtml(request);
+            return self.serveDnsPage(request);
+        }
         if (std.mem.eql(u8, path, "/connections")) {
             if (method != .GET and method != .HEAD) return self.methodNotAllowedHtml(request);
             return self.serveConnectionsPage(request);
@@ -227,6 +259,14 @@ const App = struct {
         if (std.mem.eql(u8, path, "/partials/nat")) {
             if (method != .GET) return self.methodNotAllowed(request);
             return self.serveNatFragment(request);
+        }
+        if (std.mem.eql(u8, path, "/partials/dhcp")) {
+            if (method != .GET) return self.methodNotAllowed(request);
+            return self.serveDhcpFragment(request);
+        }
+        if (std.mem.eql(u8, path, "/partials/dns")) {
+            if (method != .GET) return self.methodNotAllowed(request);
+            return self.serveDnsFragment(request);
         }
         if (std.mem.eql(u8, path, "/partials/conntrack")) {
             if (method != .GET) return self.methodNotAllowed(request);
@@ -653,10 +693,14 @@ const App = struct {
     fn configGet(self: *App) !std.json.Parsed(protocol.Response) {
         var client = try vrouter.control_client.Client.connect(self.io, self.gpa, self.control_path);
         defer client.deinit();
-        var status = try client.call(.{ .version = protocol.version, .op = "status" });
+        var status = try v3Status(&client);
         defer status.deinit();
-        const instance = if (status.value.status) |status_value| status_value.instance else return error.MissingStatus;
-        return client.call(.{ .version = protocol.version, .op = "config.get", .instance = instance });
+        const status_value = status.value.status orelse return error.MissingStatus;
+        return client.call(.{
+            .version = protocol.version,
+            .op = "config.get",
+            .instance = status_value.instance,
+        });
     }
 
     fn configCall(
@@ -669,18 +713,47 @@ const App = struct {
     ) !std.json.Parsed(protocol.Response) {
         var client = try vrouter.control_client.Client.connect(self.io, self.gpa, self.control_path);
         defer client.deinit();
-        var status = try client.call(.{ .version = protocol.version, .op = "status" });
+        var status = try v3Status(&client);
         defer status.deinit();
-        const instance = if (status.value.status) |status_value| status_value.instance else return error.MissingStatus;
+        const status_value = status.value.status orelse return error.MissingStatus;
         return client.call(.{
             .version = protocol.version,
             .op = op,
-            .instance = instance,
+            .instance = status_value.instance,
             .revision = revision,
             .confirm = confirm,
             .idempotency_key = idempotency_key,
             .config = config,
         });
+    }
+
+    fn v3Status(client: *vrouter.control_client.Client) !std.json.Parsed(protocol.Response) {
+        var status = try client.call(.{ .version = protocol.version, .op = "status" });
+        if (status.value.ok) {
+            const status_value = status.value.status orelse {
+                status.deinit();
+                return error.MissingStatus;
+            };
+            const version = status_value.protocol_version orelse {
+                status.deinit();
+                return error.ProtocolVersionUnsupported;
+            };
+            if (version < protocol.version) {
+                status.deinit();
+                return error.ProtocolVersionUnsupported;
+            }
+            return status;
+        }
+        const code = status.value.error_code orelse "";
+        const rejected_v3 = std.mem.eql(u8, code, "invalid_request") or
+            std.mem.eql(u8, code, "version_unsupported");
+        status.deinit();
+        if (rejected_v3) {
+            var legacy = try client.call(.{ .version = protocol.v2_version, .op = "status" });
+            defer legacy.deinit();
+            if (legacy.value.ok) return error.ProtocolVersionUnsupported;
+        }
+        return error.ControlStatusFailed;
     }
 
     fn callNatApply(self: *App, nat: protocol.NatApply) !std.json.Parsed(protocol.Response) {
@@ -734,6 +807,464 @@ const App = struct {
             return;
         }
         return error.InvalidAction;
+    }
+
+    fn serveDhcpPage(self: *App, request: *std.http.Server.Request) !void {
+        const csrf = (try self.requireSession(request)) orelse return;
+        var arena = std.heap.ArenaAllocator.init(self.gpa);
+        defer arena.deinit();
+        const allocator = arena.allocator();
+
+        var response = self.call("dhcp.list", null, null) catch |err| {
+            return self.renderDhcpPageView(request, .{ .csrf = csrf[0..], .draft_json = "", .err = @errorName(err) });
+        };
+        defer response.deinit();
+        const running = response.value.dhcp orelse
+            return self.renderDhcpPageView(request, .{ .csrf = csrf[0..], .draft_json = "", .err = "Missing DHCP snapshot" });
+        const draft_json = jsonStringify(allocator, running) catch |err|
+            return self.renderDhcpPageView(request, .{ .csrf = csrf[0..], .draft_json = "", .err = @errorName(err) });
+        const view = buildDhcpView(allocator, csrf[0..], running, running, draft_json, null, null, null) catch |err|
+            return self.renderDhcpPageView(request, .{ .csrf = csrf[0..], .draft_json = "", .err = @errorName(err) });
+        return self.renderDhcpPageView(request, view);
+    }
+
+    fn serveDhcpFragment(self: *App, request: *std.http.Server.Request) !void {
+        const csrf = (try self.requireSessionFragment(request)) orelse return;
+        var arena = std.heap.ArenaAllocator.init(self.gpa);
+        defer arena.deinit();
+        const allocator = arena.allocator();
+
+        var response = self.call("dhcp.list", null, null) catch |err| {
+            return self.renderDhcpFragmentView(request, .{ .csrf = csrf[0..], .draft_json = "", .err = @errorName(err) });
+        };
+        defer response.deinit();
+        const running = response.value.dhcp orelse
+            return self.renderDhcpFragmentView(request, .{ .csrf = csrf[0..], .draft_json = "", .err = "Missing DHCP snapshot" });
+        const draft_json = jsonStringify(allocator, running) catch |err|
+            return self.renderDhcpFragmentView(request, .{ .csrf = csrf[0..], .draft_json = "", .err = @errorName(err) });
+        const view = buildDhcpView(allocator, csrf[0..], running, running, draft_json, null, null, null) catch |err|
+            return self.renderDhcpFragmentView(request, .{ .csrf = csrf[0..], .draft_json = "", .err = @errorName(err) });
+        return self.renderDhcpFragmentView(request, view);
+    }
+
+    fn serveDhcpRules(self: *App, request: *std.http.Server.Request) !void {
+        if (!self.sameOrigin(request)) {
+            return self.respondHtml(request, .forbidden, "<h1>Cross-origin request rejected.</h1>");
+        }
+        const csrf = (try self.requireSessionFragment(request)) orelse return;
+        const body = self.readRequestBody(request) catch |err| {
+            return self.renderDhcpFragmentView(request, .{ .csrf = csrf[0..], .draft_json = "", .err = bodyErrorMessage(err) });
+        };
+        defer self.gpa.free(body);
+        if (!try self.verifyFormCsrf(request, csrf, body)) return;
+
+        var action_buf: [64]u8 = undefined;
+        const action = formValue(body, "action", &action_buf) orelse
+            return self.renderDhcpFragmentView(request, .{ .csrf = csrf[0..], .draft_json = "", .err = "Missing DHCP action." });
+
+        var arena = std.heap.ArenaAllocator.init(self.gpa);
+        defer arena.deinit();
+        const allocator = arena.allocator();
+        var running_response = self.call("dhcp.list", null, null) catch |err|
+            return self.renderDhcpFragmentView(request, .{ .csrf = csrf[0..], .draft_json = "", .err = @errorName(err) });
+        defer running_response.deinit();
+        const running = running_response.value.dhcp;
+        var input = readDraftInput(allocator, body) catch |err|
+            return self.renderDhcpDraftError(request, csrf[0..], allocator, running, null, dhcpFormError(err));
+        const servers = switch (input.value) {
+            .array => |*array| array,
+            else => return self.renderDhcpDraftError(request, csrf[0..], allocator, running, null, dhcpFormError(error.InvalidDraft)),
+        };
+        applyDhcpForm(allocator, servers, body, action) catch |err|
+            return self.renderDhcpDraftError(request, csrf[0..], allocator, running, input.value, dhcpFormError(err));
+        const draft_json = jsonStringify(allocator, input.value) catch |err|
+            return self.renderDhcpDraftError(request, csrf[0..], allocator, running, input.value, @errorName(err));
+        const view = buildDhcpView(allocator, csrf[0..], running, input.value, draft_json, null, null, null) catch |err|
+            return self.renderDhcpFragmentView(request, .{ .csrf = csrf[0..], .draft_json = "", .err = @errorName(err) });
+        return self.renderDhcpFragmentView(request, view);
+    }
+
+    fn serveDhcpReview(self: *App, request: *std.http.Server.Request) !void {
+        if (!self.sameOrigin(request)) {
+            return self.respondHtml(request, .forbidden, "<h1>Cross-origin request rejected.</h1>");
+        }
+        const csrf = (try self.requireSessionFragment(request)) orelse return;
+        const body = self.readRequestBody(request) catch |err| {
+            return self.renderDhcpFragmentView(request, .{ .csrf = csrf[0..], .draft_json = "", .err = bodyErrorMessage(err) });
+        };
+        defer self.gpa.free(body);
+        if (!try self.verifyFormCsrf(request, csrf, body)) return;
+
+        var arena = std.heap.ArenaAllocator.init(self.gpa);
+        defer arena.deinit();
+        const allocator = arena.allocator();
+        var running_response = self.call("dhcp.list", null, null) catch |err|
+            return self.renderDhcpFragmentView(request, .{ .csrf = csrf[0..], .draft_json = "", .err = @errorName(err) });
+        defer running_response.deinit();
+        const running = running_response.value.dhcp;
+        const input = readDraftInput(allocator, body) catch |err|
+            return self.renderDhcpDraftError(request, csrf[0..], allocator, running, null, dhcpFormError(err));
+        if (input.value != .array) return self.renderDhcpDraftError(request, csrf[0..], allocator, running, null, dhcpFormError(error.InvalidDraft));
+        const draft_json = jsonStringify(allocator, input.value) catch |err|
+            return self.renderDhcpDraftError(request, csrf[0..], allocator, running, input.value, @errorName(err));
+        const review = self.reviewConfigSection(allocator, "dhcp", input.value) catch |err|
+            return self.renderDhcpDraftError(request, csrf[0..], allocator, running, input.value, @errorName(err));
+        const view = buildDhcpView(allocator, csrf[0..], running, input.value, draft_json, null, null, review) catch |err|
+            return self.renderDhcpFragmentView(request, .{ .csrf = csrf[0..], .draft_json = "", .err = @errorName(err) });
+        return self.renderDhcpFragmentView(request, view);
+    }
+
+    fn serveDhcpApply(self: *App, request: *std.http.Server.Request) !void {
+        if (!self.sameOrigin(request)) {
+            return self.respondHtml(request, .forbidden, "<h1>Cross-origin request rejected.</h1>");
+        }
+        const csrf = (try self.requireSessionFragment(request)) orelse return;
+        const body = self.readRequestBody(request) catch |err| {
+            return self.renderDhcpFragmentView(request, .{ .csrf = csrf[0..], .draft_json = "", .err = bodyErrorMessage(err) });
+        };
+        defer self.gpa.free(body);
+        if (!try self.verifyFormCsrf(request, csrf, body)) return;
+
+        var arena = std.heap.ArenaAllocator.init(self.gpa);
+        defer arena.deinit();
+        const allocator = arena.allocator();
+        var running_response = self.call("dhcp.list", null, null) catch |err|
+            return self.renderDhcpFragmentView(request, .{ .csrf = csrf[0..], .draft_json = "", .err = @errorName(err) });
+        defer running_response.deinit();
+        const running = running_response.value.dhcp;
+        const input = readDraftInput(allocator, body) catch |err|
+            return self.renderDhcpDraftError(request, csrf[0..], allocator, running, null, dhcpFormError(err));
+        if (input.value != .array) return self.renderDhcpDraftError(request, csrf[0..], allocator, running, null, dhcpFormError(error.InvalidDraft));
+        var config_response = self.configGet() catch |err|
+            return self.renderDhcpDraftError(request, csrf[0..], allocator, running, input.value, @errorName(err));
+        defer config_response.deinit();
+        const config_value = if (config_response.value.config) |*value| value else return self.renderDhcpDraftError(request, csrf[0..], allocator, running, input.value, "Missing config from daemon.");
+        const root = switch (config_value.*) {
+            .object => |*object| object,
+            else => return self.renderDhcpDraftError(request, csrf[0..], allocator, running, input.value, "Config is not an object."),
+        };
+        const config_allocator = config_response.arena.allocator();
+        root.put(config_allocator, "dhcp", input.value) catch |err|
+            return self.renderDhcpDraftError(request, csrf[0..], allocator, running, input.value, @errorName(err));
+        const revision = config_response.value.revision orelse
+            return self.renderDhcpDraftError(request, csrf[0..], allocator, running, input.value, "Missing config revision.");
+        var diff_response = self.configCall("config.diff", config_value.*, revision, null, null) catch |err|
+            return self.renderDhcpDraftError(request, csrf[0..], allocator, running, input.value, @errorName(err));
+        defer diff_response.deinit();
+        if (!diff_response.value.ok) {
+            return self.renderDhcpDraftError(request, csrf[0..], allocator, running, input.value, diff_response.value.message orelse "Config diff failed.");
+        }
+        const no_affected = if (diff_response.value.affected) |affected| affected.len == 0 else true;
+        if (isNoopResult(diff_response.value.result) or no_affected) {
+            return self.renderDhcpApplied(request, csrf[0..], allocator, "DHCP is already up to date.");
+        }
+        const confirm = diff_response.value.confirm orelse
+            return self.renderDhcpDraftError(request, csrf[0..], allocator, running, input.value, "Daemon did not return a confirm token.");
+        var raw_key: [32]u8 = undefined;
+        try self.io.randomSecure(&raw_key);
+        const idempotency_key = std.fmt.bytesToHex(raw_key, .lower);
+        var apply_response = self.configCall("config.apply", config_value.*, revision, confirm, &idempotency_key) catch |err|
+            return self.renderDhcpDraftError(request, csrf[0..], allocator, running, input.value, @errorName(err));
+        defer apply_response.deinit();
+        if (!apply_response.value.ok) {
+            return self.renderDhcpDraftError(request, csrf[0..], allocator, running, input.value, apply_response.value.message orelse "Config apply failed.");
+        }
+        return self.renderDhcpApplied(request, csrf[0..], allocator, "DHCP configuration saved. Restart vrouterd to activate it.");
+    }
+
+    fn reviewConfigSection(
+        self: *App,
+        allocator: std.mem.Allocator,
+        section: []const u8,
+        draft_value: std.json.Value,
+    ) !pages.ConfigReview {
+        var config_response = try self.configGet();
+        defer config_response.deinit();
+        const config_value = if (config_response.value.config) |*value| value else return error.MissingConfig;
+        const root = switch (config_value.*) {
+            .object => |*object| object,
+            else => return error.InvalidConfig,
+        };
+        const config_allocator = config_response.arena.allocator();
+        try root.put(config_allocator, section, draft_value);
+        const revision = config_response.value.revision orelse return error.MissingRevision;
+        var diff_response = try self.configCall("config.diff", config_value.*, revision, null, null);
+        defer diff_response.deinit();
+        if (!diff_response.value.ok) {
+            const message = diff_response.value.message orelse "Config diff failed.";
+            return .{ .message = try allocator.dupe(u8, message) };
+        }
+        const diff = diff_response.value.diff orelse "";
+        if (diff.len == 0 or isNoopResult(diff_response.value.result)) {
+            return .{ .message = "No changes to review." };
+        }
+        const affected = diff_response.value.affected orelse &.{};
+        const diff_copy = try allocator.dupe(u8, diff);
+        const affected_copy = try allocator.alloc([]const u8, affected.len);
+        for (affected, 0..) |item, index| {
+            affected_copy[index] = try allocator.dupe(u8, item);
+        }
+        return .{
+            .diff = diff_copy,
+            .affected = affected_copy,
+            .restart_required = diff_response.value.restart_required orelse false,
+        };
+    }
+
+    fn renderDhcpApplied(self: *App, request: *std.http.Server.Request, csrf: []const u8, allocator: std.mem.Allocator, notice: []const u8) !void {
+        var response = self.call("dhcp.list", null, null) catch |err| {
+            return self.renderDhcpFragmentView(request, .{ .csrf = csrf, .draft_json = "", .err = @errorName(err) });
+        };
+        defer response.deinit();
+        const running = response.value.dhcp orelse {
+            return self.renderDhcpFragmentView(request, .{ .csrf = csrf, .draft_json = "", .err = "Missing DHCP snapshot after save" });
+        };
+        const draft_json = jsonStringify(allocator, running) catch |err|
+            return self.renderDhcpFragmentView(request, .{ .csrf = csrf, .draft_json = "", .err = @errorName(err) });
+        const view = buildDhcpView(allocator, csrf, running, running, draft_json, notice, null, null) catch |err|
+            return self.renderDhcpFragmentView(request, .{ .csrf = csrf, .draft_json = "", .err = @errorName(err) });
+        return self.renderDhcpFragmentView(request, view);
+    }
+
+    fn renderDhcpDraftError(
+        self: *App,
+        request: *std.http.Server.Request,
+        csrf: []const u8,
+        allocator: std.mem.Allocator,
+        running: ?std.json.Value,
+        value: ?std.json.Value,
+        message: []const u8,
+    ) !void {
+        if (value) |draft_value| {
+            const draft_json = jsonStringify(allocator, draft_value) catch "";
+            const view = buildDhcpView(allocator, csrf, running, draft_value, draft_json, null, message, null) catch
+                return self.renderDhcpFragmentView(request, .{ .csrf = csrf, .draft_json = "", .err = message });
+            return self.renderDhcpFragmentView(request, view);
+        }
+        return self.renderDhcpFragmentView(request, .{ .csrf = csrf, .draft_json = "", .err = message });
+    }
+
+    fn renderDhcpPageView(self: *App, request: *std.http.Server.Request, view: pages.DhcpView) !void {
+        var out: std.Io.Writer.Allocating = .init(self.gpa);
+        defer out.deinit();
+        try pages.dhcpPage(self.gpa, &out.writer, view);
+        return self.respondHtml(request, .ok, out.written());
+    }
+
+    fn renderDhcpFragmentView(self: *App, request: *std.http.Server.Request, view: pages.DhcpView) !void {
+        var out: std.Io.Writer.Allocating = .init(self.gpa);
+        defer out.deinit();
+        try pages.dhcpFragment(&out.writer, view);
+        return self.respondHtml(request, .ok, out.written());
+    }
+
+    fn serveDnsPage(self: *App, request: *std.http.Server.Request) !void {
+        const csrf = (try self.requireSession(request)) orelse return;
+        var arena = std.heap.ArenaAllocator.init(self.gpa);
+        defer arena.deinit();
+        const allocator = arena.allocator();
+        var response = self.call("dns.list", null, null) catch |err| {
+            return self.renderDnsPageView(request, .{ .csrf = csrf[0..], .draft_json = "", .err = @errorName(err) });
+        };
+        defer response.deinit();
+        const running = response.value.dns orelse
+            return self.renderDnsPageView(request, .{ .csrf = csrf[0..], .draft_json = "", .err = "Missing DNS snapshot" });
+        const draft_json = jsonStringify(allocator, running) catch |err|
+            return self.renderDnsPageView(request, .{ .csrf = csrf[0..], .draft_json = "", .err = @errorName(err) });
+        const view = buildDnsView(allocator, csrf[0..], running, running, draft_json, null, null, null) catch |err|
+            return self.renderDnsPageView(request, .{ .csrf = csrf[0..], .draft_json = "", .err = @errorName(err) });
+        return self.renderDnsPageView(request, view);
+    }
+
+    fn serveDnsFragment(self: *App, request: *std.http.Server.Request) !void {
+        const csrf = (try self.requireSessionFragment(request)) orelse return;
+        var arena = std.heap.ArenaAllocator.init(self.gpa);
+        defer arena.deinit();
+        const allocator = arena.allocator();
+        var response = self.call("dns.list", null, null) catch |err| {
+            return self.renderDnsFragmentView(request, .{ .csrf = csrf[0..], .draft_json = "", .err = @errorName(err) });
+        };
+        defer response.deinit();
+        const running = response.value.dns orelse
+            return self.renderDnsFragmentView(request, .{ .csrf = csrf[0..], .draft_json = "", .err = "Missing DNS snapshot" });
+        const draft_json = jsonStringify(allocator, running) catch |err|
+            return self.renderDnsFragmentView(request, .{ .csrf = csrf[0..], .draft_json = "", .err = @errorName(err) });
+        const view = buildDnsView(allocator, csrf[0..], running, running, draft_json, null, null, null) catch |err|
+            return self.renderDnsFragmentView(request, .{ .csrf = csrf[0..], .draft_json = "", .err = @errorName(err) });
+        return self.renderDnsFragmentView(request, view);
+    }
+
+    fn serveDnsRules(self: *App, request: *std.http.Server.Request) !void {
+        if (!self.sameOrigin(request)) {
+            return self.respondHtml(request, .forbidden, "<h1>Cross-origin request rejected.</h1>");
+        }
+        const csrf = (try self.requireSessionFragment(request)) orelse return;
+        const body = self.readRequestBody(request) catch |err| {
+            return self.renderDnsFragmentView(request, .{ .csrf = csrf[0..], .draft_json = "", .err = bodyErrorMessage(err) });
+        };
+        defer self.gpa.free(body);
+        if (!try self.verifyFormCsrf(request, csrf, body)) return;
+
+        var action_buf: [64]u8 = undefined;
+        const action = formValue(body, "action", &action_buf) orelse
+            return self.renderDnsFragmentView(request, .{ .csrf = csrf[0..], .draft_json = "", .err = "Missing DNS action." });
+
+        var arena = std.heap.ArenaAllocator.init(self.gpa);
+        defer arena.deinit();
+        const allocator = arena.allocator();
+        var running_response = self.call("dns.list", null, null) catch |err|
+            return self.renderDnsFragmentView(request, .{ .csrf = csrf[0..], .draft_json = "", .err = @errorName(err) });
+        defer running_response.deinit();
+        const running = running_response.value.dns;
+        var input = readDraftInput(allocator, body) catch |err|
+            return self.renderDnsDraftError(request, csrf[0..], allocator, running, null, dnsFormError(err));
+        const draft_object = switch (input.value) {
+            .object => |*object| object,
+            else => return self.renderDnsDraftError(request, csrf[0..], allocator, running, null, dnsFormError(error.InvalidDraft)),
+        };
+        applyDnsForm(allocator, draft_object, body, action) catch |err|
+            return self.renderDnsDraftError(request, csrf[0..], allocator, running, input.value, dnsFormError(err));
+        const draft_json = jsonStringify(allocator, input.value) catch |err|
+            return self.renderDnsDraftError(request, csrf[0..], allocator, running, input.value, @errorName(err));
+        const view = buildDnsView(allocator, csrf[0..], running, input.value, draft_json, null, null, null) catch |err|
+            return self.renderDnsFragmentView(request, .{ .csrf = csrf[0..], .draft_json = "", .err = @errorName(err) });
+        return self.renderDnsFragmentView(request, view);
+    }
+
+    fn serveDnsReview(self: *App, request: *std.http.Server.Request) !void {
+        if (!self.sameOrigin(request)) {
+            return self.respondHtml(request, .forbidden, "<h1>Cross-origin request rejected.</h1>");
+        }
+        const csrf = (try self.requireSessionFragment(request)) orelse return;
+        const body = self.readRequestBody(request) catch |err| {
+            return self.renderDnsFragmentView(request, .{ .csrf = csrf[0..], .draft_json = "", .err = bodyErrorMessage(err) });
+        };
+        defer self.gpa.free(body);
+        if (!try self.verifyFormCsrf(request, csrf, body)) return;
+
+        var arena = std.heap.ArenaAllocator.init(self.gpa);
+        defer arena.deinit();
+        const allocator = arena.allocator();
+        var running_response = self.call("dns.list", null, null) catch |err|
+            return self.renderDnsFragmentView(request, .{ .csrf = csrf[0..], .draft_json = "", .err = @errorName(err) });
+        defer running_response.deinit();
+        const running = running_response.value.dns;
+        const input = readDraftInput(allocator, body) catch |err|
+            return self.renderDnsDraftError(request, csrf[0..], allocator, running, null, dnsFormError(err));
+        if (input.value != .object) return self.renderDnsDraftError(request, csrf[0..], allocator, running, null, dnsFormError(error.InvalidDraft));
+        const draft_json = jsonStringify(allocator, input.value) catch |err|
+            return self.renderDnsDraftError(request, csrf[0..], allocator, running, input.value, @errorName(err));
+        const review = self.reviewConfigSection(allocator, "dns", input.value) catch |err|
+            return self.renderDnsDraftError(request, csrf[0..], allocator, running, input.value, @errorName(err));
+        const view = buildDnsView(allocator, csrf[0..], running, input.value, draft_json, null, null, review) catch |err|
+            return self.renderDnsFragmentView(request, .{ .csrf = csrf[0..], .draft_json = "", .err = @errorName(err) });
+        return self.renderDnsFragmentView(request, view);
+    }
+
+    fn serveDnsApply(self: *App, request: *std.http.Server.Request) !void {
+        if (!self.sameOrigin(request)) {
+            return self.respondHtml(request, .forbidden, "<h1>Cross-origin request rejected.</h1>");
+        }
+        const csrf = (try self.requireSessionFragment(request)) orelse return;
+        const body = self.readRequestBody(request) catch |err| {
+            return self.renderDnsFragmentView(request, .{ .csrf = csrf[0..], .draft_json = "", .err = bodyErrorMessage(err) });
+        };
+        defer self.gpa.free(body);
+        if (!try self.verifyFormCsrf(request, csrf, body)) return;
+
+        var arena = std.heap.ArenaAllocator.init(self.gpa);
+        defer arena.deinit();
+        const allocator = arena.allocator();
+        var running_response = self.call("dns.list", null, null) catch |err|
+            return self.renderDnsFragmentView(request, .{ .csrf = csrf[0..], .draft_json = "", .err = @errorName(err) });
+        defer running_response.deinit();
+        const running = running_response.value.dns;
+        const input = readDraftInput(allocator, body) catch |err|
+            return self.renderDnsDraftError(request, csrf[0..], allocator, running, null, dnsFormError(err));
+        if (input.value != .object) return self.renderDnsDraftError(request, csrf[0..], allocator, running, null, dnsFormError(error.InvalidDraft));
+
+        var config_response = self.configGet() catch |err|
+            return self.renderDnsDraftError(request, csrf[0..], allocator, running, input.value, @errorName(err));
+        defer config_response.deinit();
+        const config_value = if (config_response.value.config) |*value| value else return self.renderDnsDraftError(request, csrf[0..], allocator, running, input.value, "Missing config from daemon.");
+        const root = switch (config_value.*) {
+            .object => |*object| object,
+            else => return self.renderDnsDraftError(request, csrf[0..], allocator, running, input.value, "Config is not an object."),
+        };
+        const config_allocator = config_response.arena.allocator();
+        root.put(config_allocator, "dns", input.value) catch |err|
+            return self.renderDnsDraftError(request, csrf[0..], allocator, running, input.value, @errorName(err));
+        const revision = config_response.value.revision orelse
+            return self.renderDnsDraftError(request, csrf[0..], allocator, running, input.value, "Missing config revision.");
+        var diff_response = self.configCall("config.diff", config_value.*, revision, null, null) catch |err|
+            return self.renderDnsDraftError(request, csrf[0..], allocator, running, input.value, @errorName(err));
+        defer diff_response.deinit();
+        if (!diff_response.value.ok) {
+            return self.renderDnsDraftError(request, csrf[0..], allocator, running, input.value, diff_response.value.message orelse "Config diff failed.");
+        }
+        const no_affected = if (diff_response.value.affected) |affected| affected.len == 0 else true;
+        if (isNoopResult(diff_response.value.result) or no_affected) {
+            return self.renderDnsApplied(request, csrf[0..], allocator, "DNS is already up to date.");
+        }
+        const confirm = diff_response.value.confirm orelse
+            return self.renderDnsDraftError(request, csrf[0..], allocator, running, input.value, "Daemon did not return a confirm token.");
+        var raw_key: [32]u8 = undefined;
+        try self.io.randomSecure(&raw_key);
+        const idempotency_key = std.fmt.bytesToHex(raw_key, .lower);
+        var apply_response = self.configCall("config.apply", config_value.*, revision, confirm, &idempotency_key) catch |err|
+            return self.renderDnsDraftError(request, csrf[0..], allocator, running, input.value, @errorName(err));
+        defer apply_response.deinit();
+        if (!apply_response.value.ok) {
+            return self.renderDnsDraftError(request, csrf[0..], allocator, running, input.value, apply_response.value.message orelse "Config apply failed.");
+        }
+        return self.renderDnsApplied(request, csrf[0..], allocator, "DNS configuration saved. Restart vrouterd to activate it.");
+    }
+
+    fn renderDnsApplied(self: *App, request: *std.http.Server.Request, csrf: []const u8, allocator: std.mem.Allocator, notice: []const u8) !void {
+        var response = self.call("dns.list", null, null) catch |err| {
+            return self.renderDnsFragmentView(request, .{ .csrf = csrf, .draft_json = "", .err = @errorName(err) });
+        };
+        defer response.deinit();
+        const running = response.value.dns orelse {
+            return self.renderDnsFragmentView(request, .{ .csrf = csrf, .draft_json = "", .err = "Missing DNS snapshot after save" });
+        };
+        const draft_json = jsonStringify(allocator, running) catch |err|
+            return self.renderDnsFragmentView(request, .{ .csrf = csrf, .draft_json = "", .err = @errorName(err) });
+        const view = buildDnsView(allocator, csrf, running, running, draft_json, notice, null, null) catch |err|
+            return self.renderDnsFragmentView(request, .{ .csrf = csrf, .draft_json = "", .err = @errorName(err) });
+        return self.renderDnsFragmentView(request, view);
+    }
+
+    fn renderDnsDraftError(
+        self: *App,
+        request: *std.http.Server.Request,
+        csrf: []const u8,
+        allocator: std.mem.Allocator,
+        running: ?std.json.Value,
+        value: ?std.json.Value,
+        message: []const u8,
+    ) !void {
+        if (value) |draft_value| {
+            const draft_json = jsonStringify(allocator, draft_value) catch "";
+            const view = buildDnsView(allocator, csrf, running, draft_value, draft_json, null, message, null) catch
+                return self.renderDnsFragmentView(request, .{ .csrf = csrf, .draft_json = "", .err = message });
+            return self.renderDnsFragmentView(request, view);
+        }
+        return self.renderDnsFragmentView(request, .{ .csrf = csrf, .draft_json = "", .err = message });
+    }
+
+    fn renderDnsPageView(self: *App, request: *std.http.Server.Request, view: pages.DnsView) !void {
+        var out: std.Io.Writer.Allocating = .init(self.gpa);
+        defer out.deinit();
+        try pages.dnsPage(self.gpa, &out.writer, view);
+        return self.respondHtml(request, .ok, out.written());
+    }
+
+    fn renderDnsFragmentView(self: *App, request: *std.http.Server.Request, view: pages.DnsView) !void {
+        var out: std.Io.Writer.Allocating = .init(self.gpa);
+        defer out.deinit();
+        try pages.dnsFragment(&out.writer, view);
+        return self.respondHtml(request, .ok, out.written());
     }
 
     fn serveConnectionsPage(self: *App, request: *std.http.Server.Request) !void {
@@ -983,7 +1514,11 @@ const App = struct {
     fn call(self: *App, op: []const u8, state_filter: ?[]const u8, limit: ?u32) !std.json.Parsed(protocol.Response) {
         var client = try vrouter.control_client.Client.connect(self.io, self.gpa, self.control_path);
         defer client.deinit();
-        return client.callOp(op, state_filter, limit);
+        const version: ?u32 = if (protocol.isV3Only(op) or std.mem.eql(u8, op, "nat.list"))
+            protocol.version
+        else
+            null;
+        return client.callOpVersion(version, op, state_filter, limit);
     }
 
     fn controlError(self: *App, request: *std.http.Server.Request, err: anyerror) !void {
@@ -1158,6 +1693,8 @@ const NatDraft = struct {
 
 const NatDraftMasquerade = struct {
     out: []const u8 = "",
+    src: ?[]const u8 = null,
+    addr: ?[]const u8 = null,
 };
 
 const NatDraftForward = struct {
@@ -1165,6 +1702,8 @@ const NatDraftForward = struct {
     ext_port: u16 = 0,
     to: []const u8 = "",
     ingress: ?[]const u8 = null,
+    description: ?[]const u8 = null,
+    enabled: bool = true,
 };
 
 const DraftInput = struct {
@@ -1174,10 +1713,7 @@ const DraftInput = struct {
 fn readDraftInput(allocator: std.mem.Allocator, body: []const u8) !DraftInput {
     const text = (try formValueAlloc(allocator, body, "draft")) orelse return error.MissingDraft;
     const value = std.json.parseFromSliceLeaky(std.json.Value, allocator, text, .{}) catch return error.InvalidDraft;
-    return switch (value) {
-        .object => .{ .value = value },
-        else => error.InvalidDraft,
-    };
+    return .{ .value = value };
 }
 
 fn formValueAlloc(allocator: std.mem.Allocator, body: []const u8, name: []const u8) !?[]u8 {
@@ -1199,6 +1735,14 @@ fn jsonStringify(allocator: std.mem.Allocator, value: std.json.Value) ![]const u
     return try allocator.dupe(u8, out.written());
 }
 
+fn jsonValuesEqual(allocator: std.mem.Allocator, a: std.json.Value, b: std.json.Value) !bool {
+    const a_bytes = try vrouter.config_apply.canonicalize(allocator, a);
+    defer allocator.free(a_bytes);
+    const b_bytes = try vrouter.config_apply.canonicalize(allocator, b);
+    defer allocator.free(b_bytes);
+    return std.mem.eql(u8, a_bytes, b_bytes);
+}
+
 fn installDraftConfig(allocator: std.mem.Allocator, root: *std.json.ObjectMap, draft_value: std.json.Value) !void {
     switch (draft_value) {
         .object => {},
@@ -1209,6 +1753,420 @@ fn installDraftConfig(allocator: std.mem.Allocator, root: *std.json.ObjectMap, d
 
 fn isNoopResult(result: ?[]const u8) bool {
     return if (result) |value| std.mem.eql(u8, value, "noop") else false;
+}
+
+fn buildDhcpView(
+    allocator: std.mem.Allocator,
+    csrf: []const u8,
+    running: ?std.json.Value,
+    draft: ?std.json.Value,
+    draft_json: []const u8,
+    notice: ?[]const u8,
+    err: ?[]const u8,
+    review: ?pages.ConfigReview,
+) !pages.DhcpView {
+    var view = pages.DhcpView{
+        .csrf = csrf,
+        .draft_json = draft_json,
+        .notice = notice,
+        .err = err,
+        .review = review,
+    };
+    if (draft) |value| {
+        view.servers = try dhcpServersFromValue(allocator, value);
+    }
+    if (draft_json.len != 0) {
+        if (running) |running_value| {
+            if (draft) |draft_value| {
+                if (!try jsonValuesEqual(allocator, running_value, draft_value)) view.pending = 1;
+            }
+        }
+    }
+    return view;
+}
+
+fn dhcpServersFromValue(allocator: std.mem.Allocator, value: std.json.Value) ![]pages.DhcpServerRow {
+    const servers = switch (value) {
+        .array => |array| array,
+        else => return error.InvalidDraft,
+    };
+    const rows = try allocator.alloc(pages.DhcpServerRow, servers.items.len);
+    for (servers.items, 0..) |server_value, index| {
+        const server = switch (server_value) {
+            .object => |object| object,
+            else => return error.InvalidDraft,
+        };
+        rows[index] = .{
+            .iface = objectString(server, "iface") orelse "",
+            .pool = objectString(server, "pool") orelse "",
+            .lease = objectString(server, "lease") orelse "12h",
+            .dns = objectString(server, "dns"),
+            .domain = objectString(server, "domain"),
+            .mtu = if (server.get("mtu")) |mtu_value| switch (mtu_value) {
+                .integer => |number| if (number >= 0 and number <= 65535) @intCast(number) else null,
+                else => null,
+            } else null,
+            .ntp = objectString(server, "ntp"),
+            .reservations = try dhcpReservationsFromValue(allocator, server),
+        };
+    }
+    return rows;
+}
+
+fn dhcpReservationsFromValue(allocator: std.mem.Allocator, server: std.json.ObjectMap) ![]pages.DhcpReservationRow {
+    const field = server.get("reservations") orelse return &.{};
+    const reservations = switch (field) {
+        .array => |array| array,
+        else => return error.InvalidDraft,
+    };
+    const rows = try allocator.alloc(pages.DhcpReservationRow, reservations.items.len);
+    for (reservations.items, 0..) |reservation_value, index| {
+        const reservation = switch (reservation_value) {
+            .object => |object| object,
+            else => return error.InvalidDraft,
+        };
+        rows[index] = .{
+            .mac = objectString(reservation, "mac") orelse "",
+            .ip = objectString(reservation, "ip") orelse "",
+        };
+    }
+    return rows;
+}
+
+fn objectString(object: std.json.ObjectMap, name: []const u8) ?[]const u8 {
+    const value = object.get(name) orelse return null;
+    return switch (value) {
+        .string => |text| if (text.len == 0) null else text,
+        .null => null,
+        else => null,
+    };
+}
+
+fn buildDnsView(
+    allocator: std.mem.Allocator,
+    csrf: []const u8,
+    running: ?std.json.Value,
+    draft: ?std.json.Value,
+    draft_json: []const u8,
+    notice: ?[]const u8,
+    err: ?[]const u8,
+    review: ?pages.ConfigReview,
+) !pages.DnsView {
+    var view = pages.DnsView{
+        .csrf = csrf,
+        .draft_json = draft_json,
+        .notice = notice,
+        .err = err,
+        .review = review,
+    };
+    if (draft) |value| {
+        const object = switch (value) {
+            .object => |object| object,
+            else => return error.InvalidDraft,
+        };
+        view.upstreams = try joinJsonStrings(allocator, object.get("upstreams"));
+        if (object.get("listen")) |listen| {
+            view.listen = switch (listen) {
+                .string => |text| text,
+                .null => "",
+                else => return error.InvalidDraft,
+            };
+        }
+        if (object.get("cache")) |cache| {
+            view.cache = switch (cache) {
+                .bool => |flag| flag,
+                else => return error.InvalidDraft,
+            };
+        }
+        if (object.get("tcp")) |tcp| {
+            view.tcp = switch (tcp) {
+                .bool => |flag| flag,
+                else => return error.InvalidDraft,
+            };
+        }
+        if (object.get("max_entries")) |entries| {
+            view.max_entries = switch (entries) {
+                .integer => |number| if (number >= 0 and number <= 1_000_000) @intCast(number) else return error.InvalidDraft,
+                else => return error.InvalidDraft,
+            };
+        }
+        view.zones = try dnsZonesFromValue(allocator, object.get("zones"));
+    }
+    if (draft_json.len != 0) {
+        if (running) |running_value| {
+            if (draft) |draft_value| {
+                if (!try jsonValuesEqual(allocator, running_value, draft_value)) view.pending = 1;
+            }
+        }
+    }
+    return view;
+}
+
+fn joinJsonStrings(allocator: std.mem.Allocator, value: ?std.json.Value) ![]const u8 {
+    const field = value orelse return "";
+    const array = switch (field) {
+        .array => |array| array,
+        else => return error.InvalidDraft,
+    };
+    var out: std.Io.Writer.Allocating = .init(allocator);
+    defer out.deinit();
+    for (array.items, 0..) |item, index| {
+        const text = switch (item) {
+            .string => |string| string,
+            else => return error.InvalidDraft,
+        };
+        if (index != 0) try out.writer.writeAll(", ");
+        try out.writer.writeAll(text);
+    }
+    return try allocator.dupe(u8, out.written());
+}
+
+fn dnsZonesFromValue(allocator: std.mem.Allocator, value: ?std.json.Value) ![]pages.DnsZoneRow {
+    const field = value orelse return &.{};
+    const array = switch (field) {
+        .array => |array| array,
+        else => return error.InvalidDraft,
+    };
+    const rows = try allocator.alloc(pages.DnsZoneRow, array.items.len);
+    for (array.items, 0..) |item, index| {
+        const object = switch (item) {
+            .object => |object| object,
+            else => return error.InvalidDraft,
+        };
+        rows[index] = .{
+            .suffix = objectString(object, "suffix") orelse "",
+            .upstreams = try joinJsonStrings(allocator, object.get("upstreams")),
+        };
+    }
+    return rows;
+}
+
+fn applyDnsForm(allocator: std.mem.Allocator, object: *std.json.ObjectMap, body: []const u8, action: []const u8) !void {
+    if (std.mem.eql(u8, action, "save_settings")) {
+        var upstreams_buf: [2048]u8 = undefined;
+        var listen_buf: [64]u8 = undefined;
+        var entries_buf: [32]u8 = undefined;
+        const upstreams_text = formValue(body, "upstreams", &upstreams_buf) orelse "";
+        const listen = formValue(body, "listen", &listen_buf) orelse "";
+        const entries_text = formValue(body, "max_entries", &entries_buf) orelse "1024";
+        const upstreams = try dnsUpstreamArray(allocator, upstreams_text, false);
+        if (listen.len != 0) {
+            _ = vrouter.types.Ipv4.parse(listen) catch return error.InvalidField;
+        }
+        const zones_nonempty = if (object.get("zones")) |zones| switch (zones) {
+            .array => |array| array.items.len != 0,
+            else => false,
+        } else false;
+        if (listen.len == 0 and (upstreams.items.len != 0 or zones_nonempty)) return error.InvalidField;
+        const max_entries = std.fmt.parseInt(u32, entries_text, 10) catch return error.InvalidField;
+        if (max_entries == 0 or max_entries > 1_000_000) return error.InvalidField;
+        try object.put(allocator, "upstreams", .{ .array = upstreams });
+        try object.put(allocator, "cache", .{ .bool = formChecked(body, "cache") });
+        try object.put(allocator, "tcp", .{ .bool = formChecked(body, "tcp") });
+        try object.put(allocator, "max_entries", .{ .integer = max_entries });
+        if (listen.len == 0) {
+            _ = object.orderedRemove("listen");
+        } else {
+            try object.put(allocator, "listen", .{ .string = try allocator.dupe(u8, listen) });
+        }
+        return;
+    }
+    if (std.mem.eql(u8, action, "add_zone")) {
+        const zones = try ensureArrayField(allocator, object, "zones");
+        try zones.append(.{ .object = try dnsZoneFromForm(allocator, body) });
+        return;
+    }
+    if (std.mem.eql(u8, action, "edit_zone")) {
+        const index = try formIndex(body);
+        const zones = try ensureArrayField(allocator, object, "zones");
+        if (index >= zones.items.len) return error.InvalidIndex;
+        zones.items[index] = .{ .object = try dnsZoneFromForm(allocator, body) };
+        return;
+    }
+    if (std.mem.eql(u8, action, "remove_zone")) {
+        const index = try formIndex(body);
+        const zones = try ensureArrayField(allocator, object, "zones");
+        if (index >= zones.items.len) return error.InvalidIndex;
+        _ = zones.orderedRemove(index);
+        return;
+    }
+    return error.InvalidAction;
+}
+
+fn dnsZoneFromForm(allocator: std.mem.Allocator, body: []const u8) !std.json.ObjectMap {
+    var suffix_buf: [256]u8 = undefined;
+    var upstreams_buf: [2048]u8 = undefined;
+    const suffix = formValue(body, "suffix", &suffix_buf) orelse return error.MissingField;
+    const upstreams_text = formValue(body, "zone_upstreams", &upstreams_buf) orelse return error.MissingField;
+    if (suffix.len == 0 or suffix.len > 255) return error.InvalidField;
+    const upstreams = try dnsUpstreamArray(allocator, upstreams_text, true);
+    var zone = try std.json.ObjectMap.init(allocator, &.{}, &.{});
+    try zone.put(allocator, "suffix", .{ .string = try allocator.dupe(u8, suffix) });
+    try zone.put(allocator, "upstreams", .{ .array = upstreams });
+    return zone;
+}
+
+fn dnsUpstreamArray(allocator: std.mem.Allocator, text: []const u8, required: bool) !std.json.Array {
+    var array = std.json.Array.init(allocator);
+    var tokens = std.mem.tokenizeAny(u8, text, ", \t\r\n");
+    while (tokens.next()) |token| {
+        _ = vrouter.types.Ipv4.parse(token) catch return error.InvalidField;
+        try array.append(.{ .string = try allocator.dupe(u8, token) });
+    }
+    if (required and array.items.len == 0) return error.InvalidField;
+    return array;
+}
+
+fn formChecked(body: []const u8, name: []const u8) bool {
+    var pairs = std.mem.splitScalar(u8, body, '&');
+    while (pairs.next()) |pair| {
+        const eq = std.mem.indexOfScalar(u8, pair, '=') orelse continue;
+        const key = pair[0..eq];
+        if (!std.mem.eql(u8, key, name)) continue;
+        const value = pair[eq + 1 ..];
+        return value.len != 0 and !std.mem.eql(u8, value, "0") and !std.mem.eql(u8, value, "false");
+    }
+    return false;
+}
+
+fn dnsFormError(err: anyerror) []const u8 {
+    return switch (err) {
+        error.MissingField => "A required field is missing.",
+        error.InvalidField => "A field has an invalid value. Use IPv4 addresses and a listener when upstreams or zones are set.",
+        error.InvalidIndex => "That DNS zone no longer exists.",
+        error.InvalidAction => "Unknown DNS action.",
+        error.MissingDraft => "The draft is missing. Reload the page and try again.",
+        error.InvalidDraft => "The draft is invalid. Reload the page and try again.",
+        else => @errorName(err),
+    };
+}
+
+fn applyDhcpForm(allocator: std.mem.Allocator, servers: *std.json.Array, body: []const u8, action: []const u8) !void {
+    if (std.mem.eql(u8, action, "add_server")) {
+        try servers.append(.{ .object = try dhcpServerFromForm(allocator, body) });
+        return;
+    }
+    if (std.mem.eql(u8, action, "edit_server")) {
+        const index = try formIndex(body);
+        if (index >= servers.items.len) return error.InvalidIndex;
+        const old = switch (servers.items[index]) {
+            .object => |object| object,
+            else => return error.InvalidDraft,
+        };
+        var server = try dhcpServerFromForm(allocator, body);
+        if (old.get("reservations")) |reservations| {
+            try server.put(allocator, "reservations", reservations);
+        }
+        servers.items[index] = .{ .object = server };
+        return;
+    }
+    if (std.mem.eql(u8, action, "remove_server")) {
+        const index = try formIndex(body);
+        if (index >= servers.items.len) return error.InvalidIndex;
+        _ = servers.orderedRemove(index);
+        return;
+    }
+    if (std.mem.eql(u8, action, "add_reservation")) {
+        const index = try formIndex(body);
+        if (index >= servers.items.len) return error.InvalidIndex;
+        const server = switch (servers.items[index]) {
+            .object => |*object| object,
+            else => return error.InvalidDraft,
+        };
+        const reservations = try ensureArrayField(allocator, server, "reservations");
+        try reservations.append(.{ .object = try dhcpReservationFromForm(allocator, body) });
+        return;
+    }
+    if (std.mem.eql(u8, action, "edit_reservation")) {
+        const index = try formIndex(body);
+        if (index >= servers.items.len) return error.InvalidIndex;
+        const server = switch (servers.items[index]) {
+            .object => |*object| object,
+            else => return error.InvalidDraft,
+        };
+        const reservations = try ensureArrayField(allocator, server, "reservations");
+        const res_index = try formReservationIndex(body);
+        if (res_index >= reservations.items.len) return error.InvalidIndex;
+        reservations.items[res_index] = .{ .object = try dhcpReservationFromForm(allocator, body) };
+        return;
+    }
+    if (std.mem.eql(u8, action, "remove_reservation")) {
+        const index = try formIndex(body);
+        if (index >= servers.items.len) return error.InvalidIndex;
+        const server = switch (servers.items[index]) {
+            .object => |*object| object,
+            else => return error.InvalidDraft,
+        };
+        const reservations = try ensureArrayField(allocator, server, "reservations");
+        const res_index = try formReservationIndex(body);
+        if (res_index >= reservations.items.len) return error.InvalidIndex;
+        _ = reservations.orderedRemove(res_index);
+        return;
+    }
+    return error.InvalidAction;
+}
+
+fn dhcpServerFromForm(allocator: std.mem.Allocator, body: []const u8) !std.json.ObjectMap {
+    var iface_buf: [256]u8 = undefined;
+    var pool_buf: [256]u8 = undefined;
+    var lease_buf: [64]u8 = undefined;
+    var dns_buf: [64]u8 = undefined;
+    var domain_buf: [256]u8 = undefined;
+    var mtu_buf: [16]u8 = undefined;
+    var ntp_buf: [64]u8 = undefined;
+    const iface = formValue(body, "iface", &iface_buf) orelse return error.MissingField;
+    const pool = formValue(body, "pool", &pool_buf) orelse return error.MissingField;
+    const lease = formValue(body, "lease", &lease_buf) orelse "12h";
+    const dns = formValue(body, "dns", &dns_buf) orelse "";
+    const domain = formValue(body, "domain", &domain_buf) orelse "";
+    const mtu_text = formValue(body, "mtu", &mtu_buf) orelse "";
+    const ntp = formValue(body, "ntp", &ntp_buf) orelse "";
+    if (iface.len == 0 or pool.len == 0) return error.MissingField;
+    var server = try std.json.ObjectMap.init(allocator, &.{}, &.{});
+    try server.put(allocator, "iface", .{ .string = try allocator.dupe(u8, iface) });
+    try server.put(allocator, "pool", .{ .string = try allocator.dupe(u8, pool) });
+    if (lease.len != 0) try server.put(allocator, "lease", .{ .string = try allocator.dupe(u8, lease) });
+    if (dns.len != 0) try server.put(allocator, "dns", .{ .string = try allocator.dupe(u8, dns) });
+    if (domain.len != 0) try server.put(allocator, "domain", .{ .string = try allocator.dupe(u8, domain) });
+    if (mtu_text.len != 0) {
+        const mtu = std.fmt.parseInt(u16, mtu_text, 10) catch return error.InvalidField;
+        if (mtu < 576) return error.InvalidField;
+        try server.put(allocator, "mtu", .{ .integer = mtu });
+    }
+    if (ntp.len != 0) try server.put(allocator, "ntp", .{ .string = try allocator.dupe(u8, ntp) });
+    return server;
+}
+
+fn dhcpReservationFromForm(allocator: std.mem.Allocator, body: []const u8) !std.json.ObjectMap {
+    var mac_buf: [64]u8 = undefined;
+    var ip_buf: [64]u8 = undefined;
+    const mac = formValue(body, "mac", &mac_buf) orelse return error.MissingField;
+    const ip = formValue(body, "ip", &ip_buf) orelse return error.MissingField;
+    if (mac.len == 0 or ip.len == 0) return error.MissingField;
+    _ = vrouter.types.Mac.parse(mac) catch return error.InvalidField;
+    _ = vrouter.types.Ipv4.parse(ip) catch return error.InvalidField;
+    var reservation = try std.json.ObjectMap.init(allocator, &.{}, &.{});
+    try reservation.put(allocator, "mac", .{ .string = try allocator.dupe(u8, mac) });
+    try reservation.put(allocator, "ip", .{ .string = try allocator.dupe(u8, ip) });
+    return reservation;
+}
+
+fn formReservationIndex(body: []const u8) !usize {
+    var index_buf: [24]u8 = undefined;
+    const text = formValue(body, "res_index", &index_buf) orelse return error.MissingField;
+    return std.fmt.parseInt(usize, text, 10) catch error.InvalidField;
+}
+
+fn dhcpFormError(err: anyerror) []const u8 {
+    return switch (err) {
+        error.MissingField => "A required field is missing.",
+        error.InvalidField => "A field has an invalid value.",
+        error.InvalidIndex => "That DHCP entry no longer exists.",
+        error.InvalidAction => "Unknown DHCP action.",
+        error.MissingDraft => "The draft is missing. Reload the page and try again.",
+        error.InvalidDraft => "The draft is invalid. Reload the page and try again.",
+        else => @errorName(err),
+    };
 }
 
 fn buildNatView(
@@ -1231,19 +2189,26 @@ fn buildNatView(
     if (draft) |value| {
         const masquerade = try allocator.alloc(pages.NatMasqueradeRow, value.masquerade.len);
         for (value.masquerade, 0..) |rule, index| {
+            const live = findSnat(running, rule.out);
             masquerade[index] = .{
                 .out = rule.out,
-                .addr = findSnatAddr(running, rule.out),
+                .src = rule.src,
+                .addr = rule.addr,
+                .translated = if (live) |snat| snat.addr else "",
             };
         }
         view.masquerade = masquerade;
         const port_forward = try allocator.alloc(pages.NatForwardRow, value.port_forward.len);
         for (value.port_forward, 0..) |rule, index| {
+            const parsed = splitHostPort(rule.to);
             port_forward[index] = .{
                 .proto = rule.proto,
                 .ext_port = rule.ext_port,
-                .to = rule.to,
+                .to_addr = if (parsed) |target| target.host else "",
+                .to_port = if (parsed) |target| target.port else 0,
                 .ingress = rule.ingress,
+                .description = rule.description,
+                .enabled = rule.enabled,
             };
         }
         view.port_forward = port_forward;
@@ -1252,19 +2217,23 @@ fn buildNatView(
     return view;
 }
 
-fn findSnatAddr(running: ?protocol.Nat, out: []const u8) []const u8 {
+fn findSnat(running: ?protocol.Nat, out: []const u8) ?protocol.Snat {
     if (running) |nat| {
         for (nat.snat) |rule| {
-            if (std.mem.eql(u8, rule.out, out)) return rule.addr;
+            if (std.mem.eql(u8, rule.out, out)) return rule;
         }
     }
-    return "";
+    return null;
 }
 
 fn natDraftFromRunning(allocator: std.mem.Allocator, nat: protocol.Nat) !NatDraft {
     const masquerade = try allocator.alloc(NatDraftMasquerade, nat.snat.len);
     for (nat.snat, 0..) |rule, index| {
-        masquerade[index] = .{ .out = rule.out };
+        masquerade[index] = .{
+            .out = rule.out,
+            .src = rule.src,
+            .addr = if (rule.explicit) rule.addr else null,
+        };
     }
     const port_forward = try allocator.alloc(NatDraftForward, nat.port_forward.len);
     for (nat.port_forward, 0..) |rule, index| {
@@ -1273,6 +2242,8 @@ fn natDraftFromRunning(allocator: std.mem.Allocator, nat: protocol.Nat) !NatDraf
             .ext_port = rule.ext_port,
             .to = try std.fmt.allocPrint(allocator, "{s}:{d}", .{ rule.to_addr, rule.to_port }),
             .ingress = rule.ingress,
+            .description = rule.description,
+            .enabled = rule.enabled,
         };
     }
     return .{ .masquerade = masquerade, .port_forward = port_forward };
@@ -1301,7 +2272,9 @@ fn natDraftFromValue(allocator: std.mem.Allocator, value: std.json.Value) !NatDr
                 else => return error.InvalidDraft,
             };
             if (out.len == 0) return error.InvalidDraft;
-            masquerade[index] = .{ .out = out };
+            const src = optionalDraftString(rule, "src") catch return error.InvalidDraft;
+            const addr = optionalDraftString(rule, "addr") catch return error.InvalidDraft;
+            masquerade[index] = .{ .out = out, .src = src, .addr = addr };
         }
     }
 
@@ -1335,16 +2308,32 @@ fn natDraftFromValue(allocator: std.mem.Allocator, value: std.json.Value) !NatDr
                 .string => |text| text,
                 else => return error.InvalidDraft,
             } else null;
+            const description = optionalDraftString(rule, "description") catch return error.InvalidDraft;
+            const enabled = if (rule.get("enabled")) |enabled_value| switch (enabled_value) {
+                .bool => |flag| flag,
+                else => return error.InvalidDraft,
+            } else true;
             port_forward[index] = .{
                 .proto = proto,
                 .ext_port = @intCast(ext_port),
                 .to = to,
                 .ingress = ingress,
+                .description = description,
+                .enabled = enabled,
             };
         }
     }
 
     return .{ .masquerade = masquerade, .port_forward = port_forward };
+}
+
+fn optionalDraftString(object: std.json.ObjectMap, name: []const u8) !?[]const u8 {
+    const value = object.get(name) orelse return null;
+    return switch (value) {
+        .string => |text| if (text.len == 0) null else text,
+        .null => null,
+        else => error.InvalidDraft,
+    };
 }
 
 fn natDraftValue(allocator: std.mem.Allocator, draft: NatDraft) !std.json.Value {
@@ -1353,6 +2342,12 @@ fn natDraftValue(allocator: std.mem.Allocator, draft: NatDraft) !std.json.Value 
     for (draft.masquerade) |source| {
         var rule = try std.json.ObjectMap.init(allocator, &.{}, &.{});
         try rule.put(allocator, "out", .{ .string = source.out });
+        if (source.src) |src| {
+            if (src.len != 0) try rule.put(allocator, "src", .{ .string = src });
+        }
+        if (source.addr) |addr| {
+            if (addr.len != 0) try rule.put(allocator, "addr", .{ .string = addr });
+        }
         try masquerade.append(.{ .object = rule });
     }
     try root.put(allocator, "masquerade", .{ .array = masquerade });
@@ -1366,6 +2361,10 @@ fn natDraftValue(allocator: std.mem.Allocator, draft: NatDraft) !std.json.Value 
         if (source.ingress) |ingress| {
             if (ingress.len > 0) try rule.put(allocator, "in", .{ .string = ingress });
         }
+        if (source.description) |description| {
+            if (description.len > 0) try rule.put(allocator, "description", .{ .string = description });
+        }
+        if (!source.enabled) try rule.put(allocator, "enabled", .{ .bool = false });
         try port_forward.append(.{ .object = rule });
     }
     try root.put(allocator, "port_forward", .{ .array = port_forward });
@@ -1386,7 +2385,7 @@ fn natChangeCount(allocator: std.mem.Allocator, running: ?protocol.Nat, draft: N
     for (draft.masquerade) |candidate| {
         var found = false;
         for (nat.snat, 0..) |current, index| {
-            if (!masquerade_used[index] and std.mem.eql(u8, current.out, candidate.out)) {
+            if (!masquerade_used[index] and masqueradeMatches(candidate, current)) {
                 masquerade_used[index] = true;
                 found = true;
                 break;
@@ -1417,13 +2416,21 @@ fn natChangeCount(allocator: std.mem.Allocator, running: ?protocol.Nat, draft: N
     return changes;
 }
 
+fn masqueradeMatches(draft: NatDraftMasquerade, running: protocol.Snat) bool {
+    return std.mem.eql(u8, draft.out, running.out) and
+        optionalStringEql(draft.src, running.src) and
+        optionalStringEql(draft.addr, if (running.explicit) running.addr else null);
+}
+
 fn forwardMatches(draft: NatDraftForward, running: protocol.PortForward) bool {
     const parsed = splitHostPort(draft.to) orelse return false;
     return std.mem.eql(u8, draft.proto, running.proto) and
         draft.ext_port == running.ext_port and
         std.mem.eql(u8, parsed.host, running.to_addr) and
         parsed.port == running.to_port and
-        optionalStringEql(draft.ingress, running.ingress);
+        optionalStringEql(draft.ingress, running.ingress) and
+        optionalStringEql(draft.description, running.description) and
+        draft.enabled == running.enabled;
 }
 
 fn optionalStringEql(a: ?[]const u8, b: ?[]const u8) bool {
@@ -1446,10 +2453,21 @@ fn ensureArrayField(allocator: std.mem.Allocator, root: *std.json.ObjectMap, nam
 
 fn masqueradeRuleFromForm(allocator: std.mem.Allocator, body: []const u8) !std.json.ObjectMap {
     var out_buf: [256]u8 = undefined;
+    var src_buf: [256]u8 = undefined;
+    var addr_buf: [64]u8 = undefined;
     const out = formValue(body, "out", &out_buf) orelse return error.MissingField;
+    const src = formValue(body, "src", &src_buf) orelse "";
+    const addr = formValue(body, "addr", &addr_buf) orelse "";
     if (out.len == 0) return error.MissingField;
+    if (src.len != 0) _ = vrouter.types.Prefix4.parse(src) catch return error.InvalidField;
+    if (addr.len != 0) {
+        const parsed = vrouter.types.Ipv4.parse(addr) catch return error.InvalidField;
+        if (parsed.isUnspecified() or parsed.isMulticast()) return error.InvalidField;
+    }
     var rule = try std.json.ObjectMap.init(allocator, &.{}, &.{});
     try rule.put(allocator, "out", .{ .string = try allocator.dupe(u8, out) });
+    if (src.len != 0) try rule.put(allocator, "src", .{ .string = try allocator.dupe(u8, src) });
+    if (addr.len != 0) try rule.put(allocator, "addr", .{ .string = try allocator.dupe(u8, addr) });
     return rule;
 }
 
@@ -1457,13 +2475,29 @@ fn forwardRuleFromForm(allocator: std.mem.Allocator, body: []const u8) !std.json
     var proto_buf: [16]u8 = undefined;
     var port_buf: [16]u8 = undefined;
     var to_buf: [256]u8 = undefined;
+    var to_addr_buf: [64]u8 = undefined;
+    var to_port_buf: [16]u8 = undefined;
     var ingress_buf: [128]u8 = undefined;
+    var description_buf: [256]u8 = undefined;
+    var enabled_buf: [8]u8 = undefined;
     const proto = formValue(body, "proto", &proto_buf) orelse "tcp";
     const port_text = formValue(body, "ext_port", &port_buf) orelse return error.MissingField;
-    const to = formValue(body, "to", &to_buf) orelse return error.MissingField;
+    const combined = formValue(body, "to", &to_buf);
+    const to_addr = formValue(body, "to_addr", &to_addr_buf) orelse "";
+    const to_port_text = formValue(body, "to_port", &to_port_buf) orelse "";
     const ingress = formValue(body, "ingress", &ingress_buf) orelse "";
+    const description = formValue(body, "description", &description_buf) orelse "";
     const ext_port = std.fmt.parseInt(u16, port_text, 10) catch return error.InvalidField;
-    if (ext_port == 0 or to.len == 0) return error.InvalidField;
+    if (ext_port == 0) return error.InvalidField;
+    if (description.len > 128) return error.InvalidField;
+    const to = if (combined) |value| value else blk: {
+        if (to_addr.len == 0 or to_port_text.len == 0) return error.MissingField;
+        const to_port = std.fmt.parseInt(u16, to_port_text, 10) catch return error.InvalidField;
+        if (to_port == 0) return error.InvalidField;
+        const ip = vrouter.types.Ipv4.parse(to_addr) catch return error.InvalidField;
+        if (ip.isUnspecified() or ip.isMulticast()) return error.InvalidField;
+        break :blk try std.fmt.allocPrint(allocator, "{s}:{d}", .{ to_addr, to_port });
+    };
     _ = splitHostPort(to) orelse return error.InvalidField;
     var rule = try std.json.ObjectMap.init(allocator, &.{}, &.{});
     try rule.put(allocator, "proto", .{ .string = try allocator.dupe(u8, proto) });
@@ -1471,6 +2505,12 @@ fn forwardRuleFromForm(allocator: std.mem.Allocator, body: []const u8) !std.json
     try rule.put(allocator, "to", .{ .string = try allocator.dupe(u8, to) });
     if (ingress.len != 0) {
         try rule.put(allocator, "in", .{ .string = try allocator.dupe(u8, ingress) });
+    }
+    if (description.len != 0) {
+        try rule.put(allocator, "description", .{ .string = try allocator.dupe(u8, description) });
+    }
+    if (formValue(body, "enabled", &enabled_buf) == null) {
+        try rule.put(allocator, "enabled", .{ .bool = false });
     }
     return rule;
 }
@@ -1525,7 +2565,15 @@ fn natApplyFromConfig(allocator: std.mem.Allocator, config: std.json.Value) !pro
                 .string => |value_string| value_string,
                 else => return error.InvalidConfig,
             };
-            masquerade[index] = .{ .out = out };
+            const src = if (rule.get("src")) |value_string| switch (value_string) {
+                .string => |text| text,
+                else => return error.InvalidConfig,
+            } else null;
+            const addr = if (rule.get("addr")) |value_string| switch (value_string) {
+                .string => |text| text,
+                else => return error.InvalidConfig,
+            } else null;
+            masquerade[index] = .{ .out = out, .src = src, .addr = addr };
         }
     }
 
@@ -1559,11 +2607,18 @@ fn natApplyFromConfig(allocator: std.mem.Allocator, config: std.json.Value) !pro
                 .string => |value_string| value_string,
                 else => return error.InvalidConfig,
             } else null;
+            const description = optionalDraftString(rule, "description") catch return error.InvalidDraft;
+            const enabled = if (rule.get("enabled")) |enabled_value| switch (enabled_value) {
+                .bool => |flag| flag,
+                else => return error.InvalidDraft,
+            } else true;
             port_forward[index] = .{
                 .proto = proto,
                 .ext_port = @intCast(ext_port),
                 .to = to,
                 .ingress = ingress,
+                .description = description,
+                .enabled = enabled,
             };
         }
     }
@@ -1602,6 +2657,7 @@ test "NAT draft stages edits and counts pending changes" {
     const staged = try natDraftFromValue(allocator, value);
     try std.testing.expectEqual(@as(usize, 2), staged.masquerade.len);
     try std.testing.expectEqual(@as(usize, 1), try natChangeCount(allocator, running, staged));
+    try std.testing.expectEqualStrings("wan0", staged.port_forward[0].ingress.?);
     const json = try jsonStringify(allocator, value);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"wan1\"") != null);
 }
@@ -1617,6 +2673,132 @@ test "NAT draft rejects invalid rules" {
         .{},
     );
     try std.testing.expectError(error.InvalidDraft, natDraftFromValue(allocator, parsed.value));
+}
+
+test "DHCP form stages servers and reservations" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var servers = std.json.Array.init(allocator);
+
+    try applyDhcpForm(
+        allocator,
+        &servers,
+        "action=add_server&iface=lan0&pool=10.0.0.100-10.0.0.199&lease=1h&dns=10.0.0.1&domain=lan&mtu=1400",
+        "add_server",
+    );
+    try std.testing.expectEqual(@as(usize, 1), servers.items.len);
+    const server = switch (servers.items[0]) {
+        .object => |object| object,
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expectEqualStrings("lan0", server.get("iface").?.string);
+    try std.testing.expectEqual(@as(i64, 1400), server.get("mtu").?.integer);
+
+    try applyDhcpForm(
+        allocator,
+        &servers,
+        "action=add_reservation&index=0&mac=aa%3Abb%3Acc%3Add%3Aee%3Aff&ip=10.0.0.50",
+        "add_reservation",
+    );
+    const with_reservation = switch (servers.items[0]) {
+        .object => |object| object,
+        else => return error.TestUnexpectedResult,
+    };
+    const reservations = with_reservation.get("reservations").?.array;
+    try std.testing.expectEqual(@as(usize, 1), reservations.items.len);
+    try std.testing.expectEqualStrings("aa:bb:cc:dd:ee:ff", reservations.items[0].object.get("mac").?.string);
+
+    try applyDhcpForm(
+        allocator,
+        &servers,
+        "action=edit_server&index=0&iface=lan9&pool=10.9.0.100-10.9.0.150&lease=2h",
+        "edit_server",
+    );
+    const edited = switch (servers.items[0]) {
+        .object => |object| object,
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expectEqualStrings("lan9", edited.get("iface").?.string);
+    try std.testing.expectEqual(@as(usize, 1), edited.get("reservations").?.array.items.len);
+}
+
+test "DNS form stages resolver settings and zones" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var dns = try std.json.ObjectMap.init(allocator, &.{}, &.{});
+
+    try applyDnsForm(
+        allocator,
+        &dns,
+        "action=save_settings&upstreams=1.1.1.1%2C+8.8.8.8&listen=10.0.0.1&max_entries=2048&cache=1&tcp=1",
+        "save_settings",
+    );
+    try std.testing.expectEqual(@as(usize, 2), dns.get("upstreams").?.array.items.len);
+    try std.testing.expectEqualStrings("10.0.0.1", dns.get("listen").?.string);
+    try std.testing.expectEqual(@as(i64, 2048), dns.get("max_entries").?.integer);
+    try std.testing.expect(dns.get("cache").?.bool);
+    try std.testing.expect(dns.get("tcp").?.bool);
+
+    try applyDnsForm(
+        allocator,
+        &dns,
+        "action=add_zone&suffix=corp.example&zone_upstreams=10.0.0.53",
+        "add_zone",
+    );
+    const zones = dns.get("zones").?.array;
+    try std.testing.expectEqual(@as(usize, 1), zones.items.len);
+    try std.testing.expectEqualStrings("corp.example", zones.items[0].object.get("suffix").?.string);
+    try std.testing.expectEqualStrings("10.0.0.53", zones.items[0].object.get("upstreams").?.array.items[0].string);
+
+    try applyDnsForm(allocator, &dns, "action=remove_zone&index=0", "remove_zone");
+    try std.testing.expectEqual(@as(usize, 0), dns.get("zones").?.array.items.len);
+}
+
+test "DHCP drafts may be JSON arrays" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const input = try readDraftInput(arena.allocator(), "draft=%5B%5D");
+    try std.testing.expect(input.value == .array);
+}
+
+test "pending detection ignores object order and null optionals" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var running = try std.json.parseFromSlice(
+        std.json.Value,
+        std.testing.allocator,
+        \\[{"iface":"lan0","pool":"192.168.1.100/24","lease":"12h","dns":null,"reservations":[]}]
+    ,
+        .{ .allocate = .alloc_always },
+    );
+    defer running.deinit();
+    var draft = try std.json.parseFromSlice(
+        std.json.Value,
+        std.testing.allocator,
+        \\[{"reservations":[],"lease":"12h","pool":"192.168.1.100/24","iface":"lan0"}]
+    ,
+        .{ .allocate = .alloc_always },
+    );
+    defer draft.deinit();
+
+    const view = try buildDhcpView(allocator, "csrf", running.value, draft.value, "[]", null, null, null);
+    try std.testing.expectEqual(@as(u8, 0), view.pending);
+    try std.testing.expectEqual(@as(usize, 1), view.servers.len);
+
+    var changed = try std.json.parseFromSlice(
+        std.json.Value,
+        std.testing.allocator,
+        \\[{"iface":"lan0","pool":"192.168.1.200/24","lease":"12h","reservations":[]}]
+    ,
+        .{ .allocate = .alloc_always },
+    );
+    defer changed.deinit();
+    const pending = try buildDhcpView(allocator, "csrf", running.value, changed.value, "[]", null, null, null);
+    try std.testing.expectEqual(@as(u8, 1), pending.pending);
 }
 
 test "NAT form mutates the config document" {

@@ -62,16 +62,17 @@
     if (confirm) {
       event.preventDefault();
       const dialog = document.getElementById(confirm.getAttribute("data-confirm-open"));
-      const form = document.getElementById("nat-confirm-form");
-      if (!dialog || !form) return;
-      const action = form.querySelector('input[name="action"]');
-      const index = form.querySelector('input[name="index"]');
+      if (!dialog) return;
+      const form = dialog.querySelector("form");
+      if (!form) return;
+      for (const input of form.querySelectorAll("[data-confirm-field]")) {
+        const field = input.getAttribute("data-confirm-field");
+        if (field) input.value = confirm.getAttribute(`data-${field}`) || "";
+      }
       const message = dialog.querySelector("[data-confirm-message]");
-      if (action) action.value = confirm.getAttribute("data-action") || "";
-      if (index) index.value = confirm.getAttribute("data-index") || "";
       if (message) {
         const label = confirm.getAttribute("data-label") || "this rule";
-        message.textContent = `Stage removal of ${label}? Nothing changes until you apply the draft.`;
+        message.textContent = `Stage removal of ${label}? Nothing changes until you save the draft.`;
       }
       openDialog(dialog.id);
       return;

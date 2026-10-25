@@ -145,14 +145,19 @@ fn healthCard(w: *std.Io.Writer, drops: u64, table_full: u64) !void {
 
 pub const NatMasqueradeRow = struct {
     out: []const u8 = "",
-    addr: []const u8 = "",
+    src: ?[]const u8 = null,
+    addr: ?[]const u8 = null,
+    translated: []const u8 = "",
 };
 
 pub const NatForwardRow = struct {
     proto: []const u8 = "",
     ext_port: u16 = 0,
-    to: []const u8 = "",
+    to_addr: []const u8 = "",
+    to_port: u16 = 0,
     ingress: ?[]const u8 = null,
+    description: ?[]const u8 = null,
+    enabled: bool = true,
 };
 
 pub const NatReview = struct {
@@ -161,6 +166,8 @@ pub const NatReview = struct {
     restart_required: bool = false,
     message: ?[]const u8 = null,
 };
+
+pub const ConfigReview = NatReview;
 
 pub const NatView = struct {
     csrf: []const u8,
@@ -257,12 +264,20 @@ pub fn natFragment(w: *std.Io.Writer, view: NatView) !void {
     if (view.masquerade.len == 0) {
         try html.writeEmpty(w, "No masquerade rules", "Use Add masquerade to stage an outbound interface.");
     } else {
-        try w.writeAll("<div class=\"table-wrap\"><table><thead><tr><th>Outbound interface</th><th>Translated address</th><th></th></tr></thead><tbody>");
+        try w.writeAll("<div class=\"table-wrap\"><table><thead><tr><th>Outbound interface</th><th>Source network</th><th>Translated address</th><th></th></tr></thead><tbody>");
         for (view.masquerade, 0..) |rule, index| {
             try w.writeAll("<tr><td class=\"strong\">");
             try html.writeEscaped(w, if (rule.out.len == 0) "—" else rule.out);
+            try w.writeAll("</td><td class=\"mono muted\">");
+            try html.writeEscaped(w, if (rule.src) |src| if (src.len == 0) "any" else src else "any");
             try w.writeAll("</td><td class=\"mono\">");
-            try html.writeEscaped(w, if (rule.addr.len == 0) "—" else rule.addr);
+            const translated = if (rule.translated.len != 0)
+                rule.translated
+            else if (rule.addr) |addr|
+                if (addr.len == 0) "interface address" else addr
+            else
+                "interface address";
+            try html.writeEscaped(w, translated);
             try w.writeAll("</td><td class=\"right\"><div class=\"row-actions\"><button class=\"button button-ghost button-small\" type=\"button\" data-dialog-open=\"nat-edit-masq-");
             try html.writeNumber(w, index);
             try w.writeAll("\">Edit</button><button class=\"button button-ghost button-small\" type=\"button\" data-confirm-open=\"nat-confirm\" data-action=\"remove_masquerade\" data-index=\"");
@@ -281,16 +296,30 @@ pub fn natFragment(w: *std.Io.Writer, view: NatView) !void {
     if (view.port_forward.len == 0) {
         try html.writeEmpty(w, "No port forwards", "Use Add port forward to stage a destination NAT rule.");
     } else {
-        try w.writeAll("<div class=\"table-wrap\"><table><thead><tr><th>Protocol</th><th>External port</th><th>Destination</th><th>Ingress</th><th></th></tr></thead><tbody>");
+        try w.writeAll("<div class=\"table-wrap\"><table><thead><tr><th>Name</th><th>Protocol</th><th>External</th><th>Internal</th><th>Ingress</th><th>Status</th><th></th></tr></thead><tbody>");
         for (view.port_forward, 0..) |rule, index| {
-            try w.writeAll("<tr><td><span class=\"badge badge-muted\">");
+            try w.writeAll("<tr><td>");
+            try html.writeEscaped(w, if (rule.description) |description| if (description.len == 0) "—" else description else "—");
+            try w.writeAll("</td><td><span class=\"badge badge-muted\">");
             try html.writeEscaped(w, if (rule.proto.len == 0) "any" else rule.proto);
             try w.writeAll("</span></td><td class=\"mono\">");
             try html.writeNumber(w, rule.ext_port);
             try w.writeAll("</td><td class=\"mono\">");
-            try html.writeEscaped(w, if (rule.to.len == 0) "—" else rule.to);
+            if (rule.to_addr.len == 0) {
+                try w.writeAll("—");
+            } else {
+                try html.writeEscaped(w, rule.to_addr);
+                try w.writeAll(":");
+                try html.writeNumber(w, rule.to_port);
+            }
             try w.writeAll("</td><td class=\"muted\">");
             try html.writeEscaped(w, if (rule.ingress) |ingress| if (ingress.len == 0) "any" else ingress else "any");
+            try w.writeAll("</td><td>");
+            if (rule.enabled) {
+                try w.writeAll("<span class=\"badge badge-ok\">Enabled</span>");
+            } else {
+                try w.writeAll("<span class=\"badge badge-muted\">Disabled</span>");
+            }
             try w.writeAll("</td><td class=\"right\"><div class=\"row-actions\"><button class=\"button button-ghost button-small\" type=\"button\" data-dialog-open=\"nat-edit-fwd-");
             try html.writeNumber(w, index);
             try w.writeAll("\">Edit</button><button class=\"button button-ghost button-small\" type=\"button\" data-confirm-open=\"nat-confirm\" data-action=\"remove_forward\" data-index=\"");
@@ -308,31 +337,48 @@ pub fn natFragment(w: *std.Io.Writer, view: NatView) !void {
     for (view.masquerade, 0..) |rule, index| {
         var id_buf: [64]u8 = undefined;
         const id = try std.fmt.bufPrint(&id_buf, "nat-edit-masq-{d}", .{index});
-        try writeMasqueradeDialog(w, view, id, "Edit masquerade", "Update the outbound interface used for source NAT.", "edit_masquerade", index, rule.out, "Stage change");
+        try writeMasqueradeDialog(w, view, id, "Edit masquerade", "Match a source network and translate it out of this interface.", "edit_masquerade", index, rule.out, rule.src, rule.addr, "Stage change");
     }
     for (view.port_forward, 0..) |rule, index| {
         var id_buf: [64]u8 = undefined;
         const id = try std.fmt.bufPrint(&id_buf, "nat-edit-fwd-{d}", .{index});
-        try writeForwardDialog(w, view, id, "Edit port forward", "Change the external port or destination host.", "edit_forward", index, rule.proto, rule.ext_port, rule.to, rule.ingress, "Stage change");
+        try writeForwardDialog(w, view, id, "Edit port forward", "Change the external port, internal host, or rule state.", "edit_forward", index, rule.proto, rule.ext_port, rule.to_addr, rule.to_port, rule.ingress, rule.description, rule.enabled, "Stage change");
     }
-    try writeMasqueradeDialog(w, view, "nat-add-masq", "Add masquerade", "Translate traffic leaving this interface to the router address.", "add_masquerade", null, "", "Stage rule");
-    try writeForwardDialog(w, view, "nat-add-fwd", "Add port forward", "Redirect an external port to a host behind the router.", "add_forward", null, "tcp", null, "", null, "Stage rule");
+    try writeMasqueradeDialog(w, view, "nat-add-masq", "Add masquerade", "Translate a source network leaving this interface.", "add_masquerade", null, "", null, null, "Stage rule");
+    try writeForwardDialog(w, view, "nat-add-fwd", "Add port forward", "Redirect an external port to a host behind the router.", "add_forward", null, "tcp", null, "", null, null, null, true, "Stage rule");
 
     try w.writeAll("<dialog id=\"nat-confirm\" class=\"dialog dialog-sm\"><div class=\"dialog-card\"><header class=\"dialog-head\"><div><h3>Remove rule?</h3><p>This stages a removal. The running router changes only after Apply.</p></div><button class=\"icon-button\" type=\"button\" data-dialog-close aria-label=\"Close\">×</button></header><form id=\"nat-confirm-form\" class=\"dialog-form\" method=\"post\" action=\"/nat/rules\" hx-post=\"/nat/rules\" hx-target=\"#nat-live\" hx-swap=\"innerHTML\" hx-indicator=\"#refresh-indicator\">");
     try writeDraftFields(w, view);
-    try w.writeAll("<input type=\"hidden\" name=\"action\" value=\"\"><input type=\"hidden\" name=\"index\" value=\"\"><p class=\"dialog-copy\" data-confirm-message>Remove this rule from the draft?</p><footer class=\"dialog-actions\"><button class=\"button\" type=\"button\" data-dialog-close>Cancel</button><button class=\"button button-danger\" type=\"submit\">Stage removal</button></footer></form></div></dialog>");
+    try w.writeAll("<input type=\"hidden\" name=\"action\" value=\"\" data-confirm-field=\"action\"><input type=\"hidden\" name=\"index\" value=\"\" data-confirm-field=\"index\"><p class=\"dialog-copy\" data-confirm-message>Remove this rule from the draft?</p><footer class=\"dialog-actions\"><button class=\"button\" type=\"button\" data-dialog-close>Cancel</button><button class=\"button button-danger\" type=\"submit\">Stage removal</button></footer></form></div></dialog>");
     try w.writeAll("<p class=\"refresh-note\">Drafts live in this page. Reloading or signing out discards them.</p>");
 }
 
 fn writeDraftFields(w: *std.Io.Writer, view: NatView) !void {
+    try writeStagedFields(w, view.csrf, view.draft_json);
+}
+
+fn writeStagedFields(w: *std.Io.Writer, csrf: []const u8, draft_json: []const u8) !void {
     try w.writeAll("<input type=\"hidden\" name=\"csrf\" value=\"");
-    try html.writeEscaped(w, view.csrf);
+    try html.writeEscaped(w, csrf);
     try w.writeAll("\"><input type=\"hidden\" name=\"draft\" value=\"");
-    try html.writeEscaped(w, view.draft_json);
+    try html.writeEscaped(w, draft_json);
     try w.writeAll("\">");
 }
 
 fn writeReviewDialog(w: *std.Io.Writer, view: NatView, review: NatReview) !void {
+    try writeStagedReviewDialog(w, view.csrf, view.draft_json, "/nat/apply", "#nat-live", review, "Apply changes", false);
+}
+
+fn writeStagedReviewDialog(
+    w: *std.Io.Writer,
+    csrf: []const u8,
+    draft_json: []const u8,
+    action: []const u8,
+    target: []const u8,
+    review: NatReview,
+    apply_label: []const u8,
+    allow_restart: bool,
+) !void {
     try w.writeAll("<dialog id=\"nat-review\" class=\"dialog dialog-wide\" data-auto-open><div class=\"dialog-card\"><header class=\"dialog-head\"><div><h3>Review changes</h3><p>This is the proposed diff from the running configuration. Nothing has been applied yet.</p></div><button class=\"icon-button\" type=\"button\" data-dialog-close aria-label=\"Close\">×</button></header><div class=\"dialog-body\">");
     if (review.message) |message| {
         try w.writeAll("<p class=\"dialog-copy\">");
@@ -349,7 +395,7 @@ fn writeReviewDialog(w: *std.Io.Writer, view: NatView, review: NatReview) !void 
         try w.writeAll("</div>");
     }
     if (review.restart_required) {
-        try w.writeAll("<div class=\"alert alert-warn\" role=\"alert\"><strong>Restart required.</strong> This change cannot be applied live.</div>");
+        try w.writeAll("<div class=\"alert alert-warn\" role=\"alert\"><strong>Restart required.</strong> This change cannot be applied live; it is saved and applied after vrouterd restarts.</div>");
     }
     if (review.diff.len > 0) {
         try w.writeAll("<pre class=\"diff\">");
@@ -359,10 +405,18 @@ fn writeReviewDialog(w: *std.Io.Writer, view: NatView, review: NatReview) !void 
         try w.writeAll("<p class=\"muted\">No changes were detected.</p>");
     }
     try w.writeAll("</div><footer class=\"dialog-actions\"><button class=\"button\" type=\"button\" data-dialog-close>Keep editing</button>");
-    if (review.diff.len > 0 and !review.restart_required) {
-        try w.writeAll("<form class=\"inline-form\" method=\"post\" action=\"/nat/apply\" hx-post=\"/nat/apply\" hx-target=\"#nat-live\" hx-swap=\"innerHTML\" hx-indicator=\"#refresh-indicator\">");
-        try writeDraftFields(w, view);
-        try w.writeAll("<button class=\"button button-primary button-inline\" type=\"submit\">Apply changes</button></form>");
+    if (review.diff.len > 0 and (allow_restart or !review.restart_required)) {
+        try w.writeAll("<form class=\"inline-form\" method=\"post\" action=\"");
+        try html.writeEscaped(w, action);
+        try w.writeAll("\" hx-post=\"");
+        try html.writeEscaped(w, action);
+        try w.writeAll("\" hx-target=\"");
+        try html.writeEscaped(w, target);
+        try w.writeAll("\" hx-swap=\"innerHTML\" hx-indicator=\"#refresh-indicator\">");
+        try writeStagedFields(w, csrf, draft_json);
+        try w.writeAll("<button class=\"button button-primary button-inline\" type=\"submit\">");
+        try html.writeEscaped(w, apply_label);
+        try w.writeAll("</button></form>");
     }
     try w.writeAll("</footer></div></dialog>");
 }
@@ -386,6 +440,8 @@ fn writeMasqueradeDialog(
     action: []const u8,
     index: ?usize,
     out: []const u8,
+    src: ?[]const u8,
+    addr: ?[]const u8,
     submit_label: []const u8,
 ) !void {
     try w.writeAll("<dialog id=\"");
@@ -406,7 +462,11 @@ fn writeMasqueradeDialog(
     }
     try w.writeAll("<label class=\"field\"><span>Outbound interface</span><input name=\"out\" required placeholder=\"wan\" value=\"");
     try html.writeEscaped(w, out);
-    try w.writeAll("\"></label><footer class=\"dialog-actions\"><button class=\"button\" type=\"button\" data-dialog-close>Cancel</button><button class=\"button button-primary button-inline\" type=\"submit\">");
+    try w.writeAll("\"></label><label class=\"field\"><span>Source network (optional)</span><input name=\"src\" placeholder=\"10.0.0.0/24\" value=\"");
+    if (src) |value| try html.writeEscaped(w, value);
+    try w.writeAll("\"><small>Only translate traffic from this IPv4 prefix. Leave blank for any source.</small></label><label class=\"field\"><span>Translated source address (optional)</span><input name=\"addr\" placeholder=\"203.0.113.2\" value=\"");
+    if (addr) |value| try html.writeEscaped(w, value);
+    try w.writeAll("\"><small>Leave blank to use the outbound interface address. A fixed address survives DHCP renewals.</small></label><footer class=\"dialog-actions\"><button class=\"button\" type=\"button\" data-dialog-close>Cancel</button><button class=\"button button-primary button-inline\" type=\"submit\">");
     try html.writeEscaped(w, submit_label);
     try w.writeAll("</button></footer></form></div></dialog>");
 }
@@ -421,13 +481,16 @@ fn writeForwardDialog(
     index: ?usize,
     proto: []const u8,
     ext_port: ?u16,
-    to: []const u8,
+    to_addr: []const u8,
+    to_port: ?u16,
     ingress: ?[]const u8,
+    rule_description: ?[]const u8,
+    enabled: bool,
     submit_label: []const u8,
 ) !void {
     try w.writeAll("<dialog id=\"");
     try html.writeEscaped(w, id);
-    try w.writeAll("\" class=\"dialog\"><div class=\"dialog-card\"><header class=\"dialog-head\"><div><h3>");
+    try w.writeAll("\" class=\"dialog dialog-wide\"><div class=\"dialog-card\"><header class=\"dialog-head\"><div><h3>");
     try html.writeEscaped(w, title);
     try w.writeAll("</h3><p>");
     try html.writeEscaped(w, description);
@@ -441,7 +504,9 @@ fn writeForwardDialog(
         try html.writeNumber(w, value);
         try w.writeAll("\">");
     }
-    try w.writeAll("<div class=\"dialog-grid\"><label class=\"field\"><span>Protocol</span><select name=\"proto\">");
+    try w.writeAll("<label class=\"field field-full\"><span>Name (optional)</span><input name=\"description\" maxlength=\"128\" placeholder=\"Web server\" value=\"");
+    if (rule_description) |value| try html.writeEscaped(w, value);
+    try w.writeAll("\"></label><div class=\"dialog-grid\"><label class=\"field\"><span>Protocol</span><select name=\"proto\">");
     try writeProtoOptions(w, proto);
     try w.writeAll("</select></label><label class=\"field\"><span>External port</span><input name=\"ext_port\" type=\"number\" min=\"1\" max=\"65535\" required");
     if (ext_port) |value| {
@@ -449,11 +514,19 @@ fn writeForwardDialog(
         try html.writeNumber(w, value);
         try w.writeAll("\"");
     }
-    try w.writeAll("></label><label class=\"field field-full\"><span>Destination</span><input name=\"to\" required placeholder=\"10.0.0.10:80\" value=\"");
-    try html.writeEscaped(w, to);
-    try w.writeAll("\"></label><label class=\"field field-full\"><span>Ingress (optional)</span><input name=\"ingress\" placeholder=\"wan\" value=\"");
+    try w.writeAll("></label><label class=\"field\"><span>Internal IP</span><input name=\"to_addr\" required placeholder=\"10.0.0.10\" value=\"");
+    try html.writeEscaped(w, to_addr);
+    try w.writeAll("\"></label><label class=\"field\"><span>Internal port</span><input name=\"to_port\" type=\"number\" min=\"1\" max=\"65535\" required");
+    if (to_port) |value| {
+        try w.writeAll(" value=\"");
+        try html.writeNumber(w, value);
+        try w.writeAll("\"");
+    }
+    try w.writeAll("></label><label class=\"field\"><span>Ingress (optional)</span><input name=\"ingress\" placeholder=\"wan\" value=\"");
     if (ingress) |value| try html.writeEscaped(w, value);
-    try w.writeAll("\"></label></div><footer class=\"dialog-actions\"><button class=\"button\" type=\"button\" data-dialog-close>Cancel</button><button class=\"button button-primary button-inline\" type=\"submit\">");
+    try w.writeAll("\"></label><label class=\"field checkbox-field\"><input type=\"checkbox\" name=\"enabled\" value=\"1\"");
+    if (enabled) try w.writeAll(" checked");
+    try w.writeAll("><span>Rule enabled</span></label></div><footer class=\"dialog-actions\"><button class=\"button\" type=\"button\" data-dialog-close>Cancel</button><button class=\"button button-primary button-inline\" type=\"submit\">");
     try html.writeEscaped(w, submit_label);
     try w.writeAll("</button></footer></form></div></dialog>");
 }
@@ -469,6 +542,431 @@ fn writeProtoOptions(w: *std.Io.Writer, selected: []const u8) !void {
         try html.writeEscaped(w, proto);
         try w.writeAll("</option>");
     }
+}
+
+pub const DhcpReservationRow = struct {
+    mac: []const u8 = "",
+    ip: []const u8 = "",
+};
+
+pub const DhcpServerRow = struct {
+    iface: []const u8 = "",
+    pool: []const u8 = "",
+    lease: []const u8 = "",
+    dns: ?[]const u8 = null,
+    domain: ?[]const u8 = null,
+    mtu: ?u16 = null,
+    ntp: ?[]const u8 = null,
+    reservations: []const DhcpReservationRow = &.{},
+};
+
+pub const DhcpView = struct {
+    csrf: []const u8,
+    draft_json: []const u8,
+    servers: []const DhcpServerRow = &.{},
+    pending: usize = 0,
+    notice: ?[]const u8 = null,
+    err: ?[]const u8 = null,
+    review: ?ConfigReview = null,
+};
+
+pub fn dhcpPage(gpa: std.mem.Allocator, w: *std.Io.Writer, view: DhcpView) !void {
+    var body: std.Io.Writer.Allocating = .init(gpa);
+    defer body.deinit();
+    try writeDhcpBody(&body.writer, view);
+    try html.writePage(w, .{
+        .title = "DHCP",
+        .subtitle = "Address pools, lease policy and static reservations. Saved changes take effect after vrouterd restarts.",
+        .active = .dhcp,
+        .csrf = view.csrf,
+        .body = body.written(),
+    });
+}
+
+fn writeDhcpBody(w: *std.Io.Writer, view: DhcpView) !void {
+    try w.writeAll("<section class=\"page-head\"><div><p class=\"eyebrow\">Network services</p><h2>DHCP</h2></div><div class=\"page-actions\">");
+    if (view.draft_json.len > 0) {
+        try w.writeAll("<button class=\"button\" type=\"button\" data-dialog-open=\"dhcp-add-server\">Add DHCP server</button>");
+    }
+    try w.writeAll("</div></section><div id=\"nat-live\">");
+    try dhcpFragment(w, view);
+    try w.writeAll("</div>\n");
+}
+
+pub fn dhcpFragment(w: *std.Io.Writer, view: DhcpView) !void {
+    if (view.review) |review| {
+        try writeStagedReviewDialog(w, view.csrf, view.draft_json, "/dhcp/apply", "#nat-live", review, "Save changes", true);
+    } else if (view.notice) |message| {
+        try writeMessageDialog(w, "DHCP result", message, false);
+    } else if (view.err) |message| {
+        try writeMessageDialog(w, "DHCP change failed", message, true);
+    }
+
+    try w.writeAll("<section class=\"config-bar");
+    if (view.pending > 0) try w.writeAll(" config-bar-pending");
+    try w.writeAll("\"><div class=\"config-state\">");
+    if (view.pending > 0) {
+        try w.writeAll("<span class=\"badge badge-warn\">Pending</span><div><strong>");
+        try html.writeNumber(w, view.pending);
+        try w.writeAll(" pending change");
+        if (view.pending != 1) try w.writeAll("s");
+        try w.writeAll("</strong><p>DHCP config is staged. Saving writes the config file; restart vrouterd to activate it.</p></div>");
+    } else {
+        try w.writeAll("<span class=\"badge badge-ok\">Running</span><div><strong>Running configuration</strong><p>Add or edit servers to stage a draft. Nothing changes until Save.</p></div>");
+    }
+    try w.writeAll("</div><div class=\"config-actions\">");
+    if (view.pending > 0) {
+        try w.writeAll("<form class=\"inline-form\" method=\"post\" action=\"/dhcp/review\" hx-post=\"/dhcp/review\" hx-target=\"#nat-live\" hx-swap=\"innerHTML\" hx-indicator=\"#refresh-indicator\">");
+        try writeStagedFields(w, view.csrf, view.draft_json);
+        try w.writeAll("<button class=\"button\" type=\"submit\">Review changes</button></form><form class=\"inline-form\" method=\"post\" action=\"/dhcp/apply\" hx-post=\"/dhcp/apply\" hx-target=\"#nat-live\" hx-swap=\"innerHTML\" hx-indicator=\"#refresh-indicator\">");
+        try writeStagedFields(w, view.csrf, view.draft_json);
+        try w.writeAll("<button class=\"button button-primary button-inline\" type=\"submit\">Save changes</button></form><button class=\"button button-ghost\" type=\"button\" hx-get=\"/partials/dhcp\" hx-target=\"#nat-live\" hx-swap=\"innerHTML\" hx-indicator=\"#refresh-indicator\">Discard</button>");
+    }
+    try w.writeAll("</div></section>");
+
+    var reservation_count: usize = 0;
+    for (view.servers) |server| reservation_count += server.reservations.len;
+    try w.writeAll("<div class=\"stat-grid stat-grid-2\">");
+    try statCard(w, "DHCP servers", view.servers.len, "Interfaces serving addresses", "ok");
+    try statCard(w, "Reservations", reservation_count, "Static MAC-to-IP bindings", "info");
+    try w.writeAll("</div>");
+
+    if (view.servers.len == 0) {
+        try w.writeAll("<section class=\"card\">");
+        try html.writeEmpty(w, "No DHCP servers", "Use Add DHCP server to stage a pool.");
+        try w.writeAll("</section>");
+    }
+    for (view.servers, 0..) |server, index| {
+        try w.writeAll("<article class=\"card\"><header class=\"card-head\"><div><h3>");
+        try html.writeEscaped(w, if (server.iface.len == 0) "Unnamed interface" else server.iface);
+        try w.writeAll("</h3><p>");
+        try html.writeEscaped(w, server.pool);
+        try w.writeAll(" · lease ");
+        try html.writeEscaped(w, server.lease);
+        try w.writeAll("</p></div><div class=\"row-actions\"><button class=\"button button-ghost button-small\" type=\"button\" data-dialog-open=\"dhcp-edit-server-");
+        try html.writeNumber(w, index);
+        try w.writeAll("\">Edit</button><button class=\"button button-ghost button-small\" type=\"button\" data-confirm-open=\"dhcp-confirm\" data-action=\"remove_server\" data-index=\"");
+        try html.writeNumber(w, index);
+        try w.writeAll("\" data-resindex=\"\" data-label=\"DHCP server on ");
+        try html.writeEscaped(w, server.iface);
+        try w.writeAll("\">Remove</button></div></header><div class=\"table-wrap\"><table><tbody><tr><th>Pool</th><td class=\"mono\">");
+        try html.writeEscaped(w, server.pool);
+        try w.writeAll("</td><th>Lease</th><td class=\"mono\">");
+        try html.writeEscaped(w, server.lease);
+        try w.writeAll("</td></tr><tr><th>DNS</th><td class=\"mono\">");
+        try html.writeEscaped(w, if (server.dns) |value| if (value.len == 0) "—" else value else "—");
+        try w.writeAll("</td><th>Domain</th><td class=\"mono\">");
+        try html.writeEscaped(w, if (server.domain) |value| if (value.len == 0) "—" else value else "—");
+        try w.writeAll("</td></tr><tr><th>MTU</th><td class=\"mono\">");
+        if (server.mtu) |mtu| try html.writeNumber(w, mtu) else try w.writeAll("—");
+        try w.writeAll("</td><th>NTP</th><td class=\"mono\">");
+        try html.writeEscaped(w, if (server.ntp) |value| if (value.len == 0) "—" else value else "—");
+        try w.writeAll("</td></tr></tbody></table></div><div class=\"card-subhead\"><h4>Reservations</h4><button class=\"button button-ghost button-small\" type=\"button\" data-dialog-open=\"dhcp-add-res-");
+        try html.writeNumber(w, index);
+        try w.writeAll("\">Add reservation</button></div>");
+        if (server.reservations.len == 0) {
+            try html.writeEmpty(w, "No reservations", "Add a MAC-to-IP binding for this pool.");
+        } else {
+            try w.writeAll("<div class=\"table-wrap\"><table><thead><tr><th>MAC address</th><th>IP address</th><th></th></tr></thead><tbody>");
+            for (server.reservations, 0..) |reservation, res_index| {
+                try w.writeAll("<tr><td class=\"mono\">");
+                try html.writeEscaped(w, reservation.mac);
+                try w.writeAll("</td><td class=\"mono\">");
+                try html.writeEscaped(w, reservation.ip);
+                try w.writeAll("</td><td class=\"right\"><div class=\"row-actions\"><button class=\"button button-ghost button-small\" type=\"button\" data-dialog-open=\"dhcp-edit-res-");
+                try html.writeNumber(w, index);
+                try w.writeAll("-");
+                try html.writeNumber(w, res_index);
+                try w.writeAll("\">Edit</button><button class=\"button button-ghost button-small\" type=\"button\" data-confirm-open=\"dhcp-confirm\" data-action=\"remove_reservation\" data-index=\"");
+                try html.writeNumber(w, index);
+                try w.writeAll("\" data-resindex=\"");
+                try html.writeNumber(w, res_index);
+                try w.writeAll("\" data-label=\"reservation ");
+                try html.writeEscaped(w, reservation.mac);
+                try w.writeAll("\">Remove</button></div></td></tr>");
+            }
+            try w.writeAll("</tbody></table></div>");
+        }
+        try w.writeAll("</article>");
+    }
+
+    for (view.servers, 0..) |server, index| {
+        var id_buf: [64]u8 = undefined;
+        const id = try std.fmt.bufPrint(&id_buf, "dhcp-edit-server-{d}", .{index});
+        try writeDhcpServerDialog(w, view, id, "Edit DHCP server", "Update the pool or lease settings.", "edit_server", index, server, "Stage change");
+        const add_id = try std.fmt.bufPrint(&id_buf, "dhcp-add-res-{d}", .{index});
+        try writeDhcpReservationDialog(w, view, add_id, "Add reservation", "Bind a MAC address to a fixed address.", "add_reservation", index, null, "", "", "Stage reservation");
+        for (server.reservations, 0..) |reservation, res_index| {
+            const res_id = try std.fmt.bufPrint(&id_buf, "dhcp-edit-res-{d}-{d}", .{ index, res_index });
+            try writeDhcpReservationDialog(w, view, res_id, "Edit reservation", "Update the MAC or IP binding.", "edit_reservation", index, res_index, reservation.mac, reservation.ip, "Stage change");
+        }
+    }
+    try writeDhcpServerDialog(w, view, "dhcp-add-server", "Add DHCP server", "Serve addresses on an interface with a static address.", "add_server", null, .{}, "Stage server");
+    try w.writeAll("<dialog id=\"dhcp-confirm\" class=\"dialog dialog-sm\"><div class=\"dialog-card\"><header class=\"dialog-head\"><div><h3>Remove entry?</h3><p>This stages a removal. Nothing changes until Save.</p></div><button class=\"icon-button\" type=\"button\" data-dialog-close aria-label=\"Close\">×</button></header><form class=\"dialog-form\" method=\"post\" action=\"/dhcp/rules\" hx-post=\"/dhcp/rules\" hx-target=\"#nat-live\" hx-swap=\"innerHTML\" hx-indicator=\"#refresh-indicator\">");
+    try writeStagedFields(w, view.csrf, view.draft_json);
+    try w.writeAll("<input type=\"hidden\" name=\"action\" value=\"\" data-confirm-field=\"action\"><input type=\"hidden\" name=\"index\" value=\"\" data-confirm-field=\"index\"><input type=\"hidden\" name=\"res_index\" value=\"\" data-confirm-field=\"resindex\"><p class=\"dialog-copy\" data-confirm-message>Remove this DHCP entry?</p><footer class=\"dialog-actions\"><button class=\"button\" type=\"button\" data-dialog-close>Cancel</button><button class=\"button button-danger\" type=\"submit\">Stage removal</button></footer></form></div></dialog>");
+    try w.writeAll("<p class=\"refresh-note\">DHCP drafts live in this page. Reloading or signing out discards them.</p>");
+}
+
+fn writeDhcpServerDialog(
+    w: *std.Io.Writer,
+    view: DhcpView,
+    id: []const u8,
+    title: []const u8,
+    description: []const u8,
+    action: []const u8,
+    index: ?usize,
+    server: DhcpServerRow,
+    submit_label: []const u8,
+) !void {
+    try w.writeAll("<dialog id=\"");
+    try html.writeEscaped(w, id);
+    try w.writeAll("\" class=\"dialog\"><div class=\"dialog-card\"><header class=\"dialog-head\"><div><h3>");
+    try html.writeEscaped(w, title);
+    try w.writeAll("</h3><p>");
+    try html.writeEscaped(w, description);
+    try w.writeAll("</p></div><button class=\"icon-button\" type=\"button\" data-dialog-close aria-label=\"Close\">×</button></header><form class=\"dialog-form\" method=\"post\" action=\"/dhcp/rules\" hx-post=\"/dhcp/rules\" hx-target=\"#nat-live\" hx-swap=\"innerHTML\" hx-indicator=\"#refresh-indicator\">");
+    try writeStagedFields(w, view.csrf, view.draft_json);
+    try w.writeAll("<input type=\"hidden\" name=\"action\" value=\"");
+    try html.writeEscaped(w, action);
+    try w.writeAll("\">");
+    if (index) |value| {
+        try w.writeAll("<input type=\"hidden\" name=\"index\" value=\"");
+        try html.writeNumber(w, value);
+        try w.writeAll("\">");
+    }
+    try w.writeAll("<div class=\"dialog-grid\"><label class=\"field\"><span>Interface</span><input name=\"iface\" required placeholder=\"lan\" value=\"");
+    try html.writeEscaped(w, server.iface);
+    try w.writeAll("\"></label><label class=\"field\"><span>Pool</span><input name=\"pool\" required placeholder=\"192.168.1.100-192.168.1.200\" value=\"");
+    try html.writeEscaped(w, server.pool);
+    try w.writeAll("\"></label><label class=\"field\"><span>Lease time</span><input name=\"lease\" placeholder=\"12h\" value=\"");
+    try html.writeEscaped(w, if (server.lease.len == 0) "12h" else server.lease);
+    try w.writeAll("\"></label><label class=\"field\"><span>DNS server (optional)</span><input name=\"dns\" placeholder=\"192.168.1.1\" value=\"");
+    try html.writeEscaped(w, server.dns orelse "");
+    try w.writeAll("\"></label><label class=\"field\"><span>Domain (optional)</span><input name=\"domain\" placeholder=\"lan\" value=\"");
+    try html.writeEscaped(w, server.domain orelse "");
+    try w.writeAll("\"></label><label class=\"field\"><span>MTU (optional)</span><input name=\"mtu\" type=\"number\" min=\"576\" max=\"9000\"");
+    if (server.mtu) |mtu| {
+        try w.writeAll(" value=\"");
+        try html.writeNumber(w, mtu);
+        try w.writeAll("\"");
+    }
+    try w.writeAll("></label><label class=\"field\"><span>NTP server (optional)</span><input name=\"ntp\" placeholder=\"192.168.1.1\" value=\"");
+    try html.writeEscaped(w, server.ntp orelse "");
+    try w.writeAll("\"></label></div><footer class=\"dialog-actions\"><button class=\"button\" type=\"button\" data-dialog-close>Cancel</button><button class=\"button button-primary button-inline\" type=\"submit\">");
+    try html.writeEscaped(w, submit_label);
+    try w.writeAll("</button></footer></form></div></dialog>");
+}
+
+fn writeDhcpReservationDialog(
+    w: *std.Io.Writer,
+    view: DhcpView,
+    id: []const u8,
+    title: []const u8,
+    description: []const u8,
+    action: []const u8,
+    server_index: usize,
+    reservation_index: ?usize,
+    mac: []const u8,
+    ip: []const u8,
+    submit_label: []const u8,
+) !void {
+    try w.writeAll("<dialog id=\"");
+    try html.writeEscaped(w, id);
+    try w.writeAll("\" class=\"dialog dialog-sm\"><div class=\"dialog-card\"><header class=\"dialog-head\"><div><h3>");
+    try html.writeEscaped(w, title);
+    try w.writeAll("</h3><p>");
+    try html.writeEscaped(w, description);
+    try w.writeAll("</p></div><button class=\"icon-button\" type=\"button\" data-dialog-close aria-label=\"Close\">×</button></header><form class=\"dialog-form\" method=\"post\" action=\"/dhcp/rules\" hx-post=\"/dhcp/rules\" hx-target=\"#nat-live\" hx-swap=\"innerHTML\" hx-indicator=\"#refresh-indicator\">");
+    try writeStagedFields(w, view.csrf, view.draft_json);
+    try w.writeAll("<input type=\"hidden\" name=\"action\" value=\"");
+    try html.writeEscaped(w, action);
+    try w.writeAll("\"><input type=\"hidden\" name=\"index\" value=\"");
+    try html.writeNumber(w, server_index);
+    try w.writeAll("\">");
+    if (reservation_index) |value| {
+        try w.writeAll("<input type=\"hidden\" name=\"res_index\" value=\"");
+        try html.writeNumber(w, value);
+        try w.writeAll("\">");
+    }
+    try w.writeAll("<label class=\"field\"><span>MAC address</span><input name=\"mac\" required placeholder=\"aa:bb:cc:dd:ee:ff\" value=\"");
+    try html.writeEscaped(w, mac);
+    try w.writeAll("\"></label><label class=\"field\"><span>IP address</span><input name=\"ip\" required placeholder=\"192.168.1.50\" value=\"");
+    try html.writeEscaped(w, ip);
+    try w.writeAll("\"></label><footer class=\"dialog-actions\"><button class=\"button\" type=\"button\" data-dialog-close>Cancel</button><button class=\"button button-primary button-inline\" type=\"submit\">");
+    try html.writeEscaped(w, submit_label);
+    try w.writeAll("</button></footer></form></div></dialog>");
+}
+
+pub const DnsZoneRow = struct {
+    suffix: []const u8 = "",
+    upstreams: []const u8 = "",
+};
+
+pub const DnsView = struct {
+    csrf: []const u8,
+    draft_json: []const u8,
+    upstreams: []const u8 = "",
+    listen: []const u8 = "",
+    cache: bool = true,
+    max_entries: u32 = 1024,
+    tcp: bool = true,
+    zones: []const DnsZoneRow = &.{},
+    pending: usize = 0,
+    notice: ?[]const u8 = null,
+    err: ?[]const u8 = null,
+    review: ?ConfigReview = null,
+};
+
+pub fn dnsPage(gpa: std.mem.Allocator, w: *std.Io.Writer, view: DnsView) !void {
+    var body: std.Io.Writer.Allocating = .init(gpa);
+    defer body.deinit();
+    try writeDnsBody(&body.writer, view);
+    try html.writePage(w, .{
+        .title = "DNS",
+        .subtitle = "Forwarder upstreams, listener and split-DNS zones. Saved changes take effect after vrouterd restarts.",
+        .active = .dns,
+        .csrf = view.csrf,
+        .body = body.written(),
+    });
+}
+
+fn writeDnsBody(w: *std.Io.Writer, view: DnsView) !void {
+    try w.writeAll("<section class=\"page-head\"><div><p class=\"eyebrow\">Network services</p><h2>DNS</h2></div><div class=\"page-actions\">");
+    if (view.draft_json.len > 0) {
+        try w.writeAll("<button class=\"button\" type=\"button\" data-dialog-open=\"dns-add-zone\">Add zone</button>");
+    }
+    try w.writeAll("</div></section><div id=\"dns-live\">");
+    try dnsFragment(w, view);
+    try w.writeAll("</div>\n");
+}
+
+pub fn dnsFragment(w: *std.Io.Writer, view: DnsView) !void {
+    if (view.review) |review| {
+        try writeStagedReviewDialog(w, view.csrf, view.draft_json, "/dns/apply", "#dns-live", review, "Save changes", true);
+    } else if (view.notice) |message| {
+        try writeMessageDialog(w, "DNS result", message, false);
+    } else if (view.err) |message| {
+        try writeMessageDialog(w, "DNS change failed", message, true);
+    }
+
+    try w.writeAll("<section class=\"config-bar");
+    if (view.pending > 0) try w.writeAll(" config-bar-pending");
+    try w.writeAll("\"><div class=\"config-state\">");
+    if (view.pending > 0) {
+        try w.writeAll("<span class=\"badge badge-warn\">Pending</span><div><strong>");
+        try html.writeNumber(w, view.pending);
+        try w.writeAll(" pending change");
+        if (view.pending != 1) try w.writeAll("s");
+        try w.writeAll("</strong><p>DNS config is staged. Saving writes the config file; restart vrouterd to activate it.</p></div>");
+    } else {
+        try w.writeAll("<span class=\"badge badge-ok\">Running</span><div><strong>Running configuration</strong><p>Edit the resolver settings or add a zone to stage a draft. Nothing changes until Save.</p></div>");
+    }
+    try w.writeAll("</div><div class=\"config-actions\">");
+    if (view.pending > 0) {
+        try w.writeAll("<form class=\"inline-form\" method=\"post\" action=\"/dns/review\" hx-post=\"/dns/review\" hx-target=\"#dns-live\" hx-swap=\"innerHTML\" hx-indicator=\"#refresh-indicator\">");
+        try writeStagedFields(w, view.csrf, view.draft_json);
+        try w.writeAll("<button class=\"button\" type=\"submit\">Review changes</button></form><form class=\"inline-form\" method=\"post\" action=\"/dns/apply\" hx-post=\"/dns/apply\" hx-target=\"#dns-live\" hx-swap=\"innerHTML\" hx-indicator=\"#refresh-indicator\">");
+        try writeStagedFields(w, view.csrf, view.draft_json);
+        try w.writeAll("<button class=\"button button-primary button-inline\" type=\"submit\">Save changes</button></form><button class=\"button button-ghost\" type=\"button\" hx-get=\"/partials/dns\" hx-target=\"#dns-live\" hx-swap=\"innerHTML\" hx-indicator=\"#refresh-indicator\">Discard</button>");
+    }
+    try w.writeAll("</div></section>");
+
+    try w.writeAll("<div class=\"stat-grid stat-grid-2\">");
+    try statCard(w, "Upstreams", upstreamCount(view.upstreams), "Resolver servers", "ok");
+    try statCard(w, "Zones", view.zones.len, "Split-DNS suffixes", "info");
+    try w.writeAll("</div>");
+
+    try w.writeAll("<section class=\"card\"><header class=\"card-head\"><div><h3>Resolver</h3><p>Upstreams receive queries that no zone matches. The listener address must be assigned to a router interface.</p></div></header><form class=\"dialog-form\" method=\"post\" action=\"/dns/rules\" hx-post=\"/dns/rules\" hx-target=\"#dns-live\" hx-swap=\"innerHTML\" hx-indicator=\"#refresh-indicator\">");
+    try writeStagedFields(w, view.csrf, view.draft_json);
+    try w.writeAll("<input type=\"hidden\" name=\"action\" value=\"save_settings\"><label class=\"field\"><span>Upstream servers</span><textarea name=\"upstreams\" rows=\"3\" placeholder=\"1.1.1.1, 8.8.8.8\">");
+    try html.writeEscaped(w, view.upstreams);
+    try w.writeAll("</textarea><small>Comma or space separated IPv4 addresses.</small></label><div class=\"dialog-grid\"><label class=\"field\"><span>Listen address (optional)</span><input name=\"listen\" placeholder=\"192.168.1.1\" value=\"");
+    try html.writeEscaped(w, view.listen);
+    try w.writeAll("\"></label><label class=\"field\"><span>Cache entries</span><input name=\"max_entries\" type=\"number\" min=\"1\" max=\"1000000\" value=\"");
+    try html.writeNumber(w, view.max_entries);
+    try w.writeAll("\"></label></div><div class=\"checkbox-row\"><label class=\"checkbox-field\"><input type=\"checkbox\" name=\"cache\" value=\"1\"");
+    if (view.cache) try w.writeAll(" checked");
+    try w.writeAll("><span>Cache answers</span></label><label class=\"checkbox-field\"><input type=\"checkbox\" name=\"tcp\" value=\"1\"");
+    if (view.tcp) try w.writeAll(" checked");
+    try w.writeAll("><span>Accept TCP queries</span></label></div><footer class=\"dialog-actions\"><button class=\"button button-primary button-inline\" type=\"submit\">Stage settings</button></footer></form></section>");
+
+    if (view.zones.len == 0) {
+        try w.writeAll("<section class=\"card\">");
+        try html.writeEmpty(w, "No DNS zones", "Use Add zone to route a suffix to a different upstream.");
+        try w.writeAll("</section>");
+    } else {
+        try w.writeAll("<section class=\"card\"><header class=\"card-head\"><div><h3>Split-DNS zones</h3><p>Queries matching a suffix are forwarded to the zone upstreams instead of the global resolver.</p></div></header><div class=\"table-wrap\"><table><thead><tr><th>Suffix</th><th>Upstreams</th><th></th></tr></thead><tbody>");
+        for (view.zones, 0..) |zone, index| {
+            try w.writeAll("<tr><td class=\"mono\">");
+            try html.writeEscaped(w, zone.suffix);
+            try w.writeAll("</td><td class=\"mono\">");
+            try html.writeEscaped(w, zone.upstreams);
+            try w.writeAll("</td><td class=\"right\"><div class=\"row-actions\"><button class=\"button button-ghost button-small\" type=\"button\" data-dialog-open=\"dns-edit-zone-");
+            try html.writeNumber(w, index);
+            try w.writeAll("\">Edit</button><button class=\"button button-ghost button-small\" type=\"button\" data-confirm-open=\"dns-confirm\" data-action=\"remove_zone\" data-index=\"");
+            try html.writeNumber(w, index);
+            try w.writeAll("\" data-resindex=\"\" data-label=\"zone ");
+            try html.writeEscaped(w, zone.suffix);
+            try w.writeAll("\">Remove</button></div></td></tr>");
+        }
+        try w.writeAll("</tbody></table></div></section>");
+    }
+
+    for (view.zones, 0..) |zone, index| {
+        var id_buf: [64]u8 = undefined;
+        const id = try std.fmt.bufPrint(&id_buf, "dns-edit-zone-{d}", .{index});
+        try writeDnsZoneDialog(w, view, id, "Edit DNS zone", "Update the suffix or its resolver list.", "edit_zone", index, zone.suffix, zone.upstreams, "Stage change");
+    }
+    try writeDnsZoneDialog(w, view, "dns-add-zone", "Add DNS zone", "Route a suffix to one or more resolvers.", "add_zone", null, "", "", "Stage zone");
+    try w.writeAll("<dialog id=\"dns-confirm\" class=\"dialog dialog-sm\"><div class=\"dialog-card\"><header class=\"dialog-head\"><div><h3>Remove zone?</h3><p>This stages a removal. Nothing changes until Save.</p></div><button class=\"icon-button\" type=\"button\" data-dialog-close aria-label=\"Close\">×</button></header><form class=\"dialog-form\" method=\"post\" action=\"/dns/rules\" hx-post=\"/dns/rules\" hx-target=\"#dns-live\" hx-swap=\"innerHTML\" hx-indicator=\"#refresh-indicator\">");
+    try writeStagedFields(w, view.csrf, view.draft_json);
+    try w.writeAll("<input type=\"hidden\" name=\"action\" value=\"\" data-confirm-field=\"action\"><input type=\"hidden\" name=\"index\" value=\"\" data-confirm-field=\"index\"><input type=\"hidden\" name=\"res_index\" value=\"\" data-confirm-field=\"resindex\"><p class=\"dialog-copy\" data-confirm-message>Remove this zone?</p><footer class=\"dialog-actions\"><button class=\"button\" type=\"button\" data-dialog-close>Cancel</button><button class=\"button button-danger\" type=\"submit\">Stage removal</button></footer></form></div></dialog>");
+    try w.writeAll("<p class=\"refresh-note\">DNS drafts live in this page. Reloading or signing out discards them.</p>");
+}
+
+fn writeDnsZoneDialog(
+    w: *std.Io.Writer,
+    view: DnsView,
+    id: []const u8,
+    title: []const u8,
+    description: []const u8,
+    action: []const u8,
+    index: ?usize,
+    suffix: []const u8,
+    upstreams: []const u8,
+    submit_label: []const u8,
+) !void {
+    try w.writeAll("<dialog id=\"");
+    try html.writeEscaped(w, id);
+    try w.writeAll("\" class=\"dialog dialog-sm\"><div class=\"dialog-card\"><header class=\"dialog-head\"><div><h3>");
+    try html.writeEscaped(w, title);
+    try w.writeAll("</h3><p>");
+    try html.writeEscaped(w, description);
+    try w.writeAll("</p></div><button class=\"icon-button\" type=\"button\" data-dialog-close aria-label=\"Close\">×</button></header><form class=\"dialog-form\" method=\"post\" action=\"/dns/rules\" hx-post=\"/dns/rules\" hx-target=\"#dns-live\" hx-swap=\"innerHTML\" hx-indicator=\"#refresh-indicator\">");
+    try writeStagedFields(w, view.csrf, view.draft_json);
+    try w.writeAll("<input type=\"hidden\" name=\"action\" value=\"");
+    try html.writeEscaped(w, action);
+    try w.writeAll("\">");
+    if (index) |value| {
+        try w.writeAll("<input type=\"hidden\" name=\"index\" value=\"");
+        try html.writeNumber(w, value);
+        try w.writeAll("\">");
+    }
+    try w.writeAll("<label class=\"field\"><span>Suffix</span><input name=\"suffix\" required placeholder=\"lan\" value=\"");
+    try html.writeEscaped(w, suffix);
+    try w.writeAll("\"></label><label class=\"field\"><span>Zone upstreams</span><textarea name=\"zone_upstreams\" rows=\"3\" placeholder=\"10.0.0.53\">");
+    try html.writeEscaped(w, upstreams);
+    try w.writeAll("</textarea><small>Comma or space separated IPv4 addresses.</small></label><footer class=\"dialog-actions\"><button class=\"button\" type=\"button\" data-dialog-close>Cancel</button><button class=\"button button-primary button-inline\" type=\"submit\">");
+    try html.writeEscaped(w, submit_label);
+    try w.writeAll("</button></footer></form></div></dialog>");
+}
+
+fn upstreamCount(upstreams: []const u8) usize {
+    var count: usize = 0;
+    var tokens = std.mem.tokenizeAny(u8, upstreams, ", \t\r\n");
+    while (tokens.next()) |_| count += 1;
+    return count;
 }
 
 pub fn connectionsPage(

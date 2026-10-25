@@ -202,6 +202,8 @@ h3 { font-size: 1rem; }
 .card-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 12px; }
 .card-head h3 { margin-bottom: 3px; }
 .card-head p { color: var(--muted); font-size: 12px; max-width: 68ch; }
+.card-subhead { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 16px 0 8px; padding-top: 12px; border-top: 1px solid var(--border); }
+.card-subhead h4 { margin: 0; font-size: 13px; }
 .card-note { color: var(--muted); font-size: 11px; white-space: nowrap; }
 .card-ok { border-color: color-mix(in srgb, var(--ok) 35%, var(--border)); background: linear-gradient(180deg, var(--ok-soft), var(--surface)); }
 .card-warn { border-color: color-mix(in srgb, var(--warn) 35%, var(--border)); background: linear-gradient(180deg, var(--warn-soft), var(--surface)); }
@@ -260,6 +262,13 @@ input, select {
   border-radius: 8px; background: var(--surface); color: var(--text);
 }
 input::placeholder { color: var(--muted); opacity: 0.8; }
+.checkbox-field { display: flex; align-items: center; gap: 8px; }
+.checkbox-field input { width: 18px; min-height: 18px; margin: 0; }
+.checkbox-field > span { color: var(--text); font-size: 12.5px; font-weight: 600; letter-spacing: 0; text-transform: none; }
+textarea { min-height: 84px; padding: 9px 10px; border: 1px solid var(--border-strong); border-radius: 8px; background: var(--surface); color: var(--text); font: inherit; resize: vertical; }
+textarea::placeholder { color: var(--muted); opacity: 0.8; }
+.field small { color: var(--muted); font-size: 11px; }
+
 .htmx-indicator { position: fixed; right: 18px; bottom: 18px; z-index: 10; padding: 7px 11px; border: 1px solid var(--border); border-radius: 999px; background: var(--surface); color: var(--muted); font-size: 11px; box-shadow: var(--shadow); opacity: 0; pointer-events: none; transition: opacity 140ms ease; }
 .htmx-request .htmx-indicator, .htmx-request.htmx-indicator, .htmx-indicator.is-visible { opacity: 1; }
 
