@@ -126,7 +126,16 @@ kill -9 "$vpid"
 wait "$vpid" 2>/dev/null || true
 vpid=""
 [ -S "$VNET_RUN_DIR/control.sock" ] || die "stale control socket was not left behind"
-"$BIN/vnet" doctor -c "$CFG" | tee "$WORK/doctor-crash.log"
+for _ in $(seq 1 40); do
+    if "$BIN/vnet" doctor -c "$CFG" >"$WORK/doctor-crash.log" 2>&1; then
+        break
+    fi
+    if ! grep -q "daemon lock is held" "$WORK/doctor-crash.log"; then
+        break
+    fi
+    sleep 0.05
+done
+cat "$WORK/doctor-crash.log"
 grep -q "daemon not running (stale socket)" "$WORK/doctor-crash.log" ||
     die "doctor did not recognize the stale socket"
 grep -q "journal pending=" "$WORK/doctor-crash.log" || die "doctor did not report pending journal"
