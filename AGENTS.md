@@ -10,11 +10,12 @@ the contract for any agent working in this repo.
 | Layer | Location | Technology |
 |---|---|---|
 | Core library | `src/` | Zig, `std.Io`, `std.crypto` |
+| Shard graph | `src/shard_*.zig` | named Zig modules; ADR-018 |
 | Ports / datapath | `src/port/`, `src/l2/`, `src/l3/` | AF_PACKET, TUN/TAP, fd, netlink |
 | NAT / firewall | `src/nat/`, `src/firewall/` | conntrack, SNAT/DNAT, rules |
 | Services | `src/services/` | DHCPv4, DNS forwarder |
-| CLI / daemon | `src/cli/`, `src/app/` | Zig |
-| Executables | `exec/` | `vnet`, `vnetd`; `vnet-web` post-v1 |
+| CLI / daemon | `src/app/`, `exec/` | Zig |
+| Executables | `exec/` | `vnet`, `vnetd`; `vnetweb` post-v1 |
 | C ABI | `src/ffi.zig`, `include/vnet.h` | for Android/iOS/desktop hosts |
 | Control plane | `src/control/` | config diff, journal, unix socket API |
 | Web admin (post-v1) | `src/web/`, `exec/vnetweb/` | Zig HTTP server + server-rendered HTMX 4, embedded assets, Unix-socket client |
@@ -25,7 +26,7 @@ the contract for any agent working in this repo.
 ```bash
 zig build                      # debug build
 zig build --release=fast       # release
-zig build test                 # unit tests + fuzz corpus smoke
+zig build test                 # shard + umbrella tests + fuzz smoke
 zig build test -Dtest-filter=ipv4
 zig build fuzz --fuzz=10K      # parser fuzz campaign (iterations per target)
 zig build shared-lib           # .so
@@ -69,6 +70,10 @@ Always run `zig build test`. For port/forwarding changes, also run
 9. **No secrets in logs.** Never log packet payloads, keys or tokens above
    debug level.
 10. **One concern per PR.** Protocol/behavior changes need an ADR and tests.
+11. **Respect shard boundaries.** Import another subsystem only through its
+    declared `vnet-*` module. Shards may not import the composition layer
+    (`src/lib.zig`, `src/app/`, `src/ffi.zig`), and `vnet-l3` may not import
+    NAT, firewall or services. See ADR-018.
 
 ## Code style
 

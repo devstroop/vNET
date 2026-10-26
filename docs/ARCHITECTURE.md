@@ -18,7 +18,7 @@
    tables and swapped atomically.
 5. **Journal before mutation.** Every host change has a recorded inverse.
 6. **No GUI in v1, one API.** CLI and a Unix-socket API are the only v1
-   interfaces; the C ABI is for hosts (Android). A post-v1 optional `vnet-web`
+   interfaces; the C ABI is for hosts (Android). A post-v1 optional `vnetweb`
    adapter is an unprivileged client of the same API (ADR-011).
 7. **Hostile input.** Decoders are bounds-checked and fuzzed; no `unreachable`
    on wire data.
@@ -40,8 +40,17 @@ vnet/
 │   ├── SOURCES.md
 │   └── adr/
 ├── src/
-│   ├── lib.zig                  public Zig API
+│   ├── lib.zig                  public Zig API / shard composition
 │   ├── ffi.zig                  C ABI (R7)
+│   ├── shard_core.zig           vnet-core module root
+│   ├── shard_port.zig           vnet-port module root
+│   ├── shard_l2.zig             vnet-l2 module root
+│   ├── shard_l3.zig             vnet-l3 module root
+│   ├── shard_conntrack.zig      vnet-conntrack module root
+│   ├── shard_nat.zig            vnet-nat module root
+│   ├── shard_dhcp.zig           vnet-dhcp module root
+│   ├── shard_dns.zig            vnet-dns module root
+│   ├── shard_ctl.zig            vnet-ctl module root
 │   ├── thread.zig               std/pthread thread backend
 │   ├── io.zig                   std.Io wiring, timers, cancellation
 │   ├── log.zig                  leveled text/JSON logger
@@ -123,6 +132,26 @@ vnet/
     ├── nat_matrix.sh
     └── perf.sh
 ```
+
+### 2.1 Build graph
+
+The shard roots are compiled as named Zig modules (ADR-018). They are thin
+re-export surfaces; implementation files stay in the directories above until
+the forwarding-engine split.
+
+| Module | Allowed dependencies |
+|---|---|
+| `vnet-core` | none |
+| `vnet-port`, `vnet-l2`, `vnet-l3`, `vnet-dhcp`, `vnet-conntrack` | core |
+| `vnet-nat` | core, l3, conntrack |
+| `vnet-dns` | core, thread |
+| `vnet-ctl` | core, port, dns, thread |
+| `vnet-fw`, `vnet-tunnel` | reserved; not built yet |
+
+`src/lib.zig`, `src/app/service.zig` and `src/ffi.zig` are the composition
+layer. Shards may not import the composition layer, and `vnet-l3` may not import
+NAT, firewall or services. CLI and FFI builds map `vnet-thread` to different
+backends, so `vnet-dns` and `vnet-ctl` are built once per profile.
 
 ## 3. Core interfaces
 
@@ -314,7 +343,7 @@ CLI / API ──▶ config::diff ──▶ mutation list ──▶ journal ─�
   diff/apply path. Restart-required: ports, bridges, addresses.
 - Events: `port_up/down`, `link_change`, `addr_change`, `dhcp_lease`,
   `nat_expired`, `config_applied`, `error`.
-- Post-v1, an optional `vnet-web` adapter may expose this API over
+- Post-v1, an optional `vnetweb` adapter may expose this API over
   authenticated HTTP. It remains an unprivileged client of the Unix socket and
   never mutates host state directly (ADR-011).
 

@@ -19,6 +19,11 @@ All notable changes to vNET are documented here. The format follows
 
 ### Added
 
+- **Compiler-checked shard graph (ADR-018):** `vnet-core`, `vnet-port`,
+  `vnet-l2`, `vnet-l3`, `vnet-conntrack`, `vnet-nat`, `vnet-dhcp`, `vnet-dns`
+  and `vnet-ctl` are now named Zig modules with declared dependencies and
+  per-shard test artifacts. The public `vnet` umbrella and C ABI are unchanged;
+  the CLI keeps the `std.Thread` backend while the C ABI keeps pthread.
 - **Live DNS, link and lease actions (P2):** the DNS page sends read-only
   A/AAAA diagnostic queries through `dns.query`; the daemon resolves against
   the configured listener with a 2 s timeout. Interfaces lists kernel links and
