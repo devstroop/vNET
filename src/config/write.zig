@@ -35,6 +35,12 @@ pub fn renderNat(
             for (nat.masquerade) |rule| {
                 var item: std.json.ObjectMap = .empty;
                 try item.put(a, "out", .{ .string = rule.out });
+                if (rule.src) |src| {
+                    if (src.len != 0) try item.put(a, "src", .{ .string = src });
+                }
+                if (rule.addr) |addr| {
+                    if (addr.len != 0) try item.put(a, "addr", .{ .string = addr });
+                }
                 try items.append(.{ .object = item });
             }
             try nat_object.put(a, "masquerade", .{ .array = items });
@@ -47,8 +53,12 @@ pub fn renderNat(
                 try item.put(a, "ext_port", .{ .integer = rule.ext_port });
                 try item.put(a, "to", .{ .string = rule.to });
                 if (rule.in_iface) |name| {
-                    try item.put(a, "in", .{ .string = name });
+                    if (name.len != 0) try item.put(a, "in", .{ .string = name });
                 }
+                if (rule.description) |description| {
+                    if (description.len != 0) try item.put(a, "description", .{ .string = description });
+                }
+                if (!rule.enabled) try item.put(a, "enabled", .{ .bool = false });
                 try items.append(.{ .object = item });
             }
             try nat_object.put(a, "port_forward", .{ .array = items });
@@ -142,12 +152,14 @@ test "renderNat round-trips masquerade and port forwards" {
         \\{"version":1,"instance":"test","ports":{"wan":{"kind":"l2","device":"eth0"}},"interfaces":{"wanif":{"port":"wan","address":"10.0.0.1/24"}}}
     ;
     const nat: schema.NatConfig = .{
-        .masquerade = &.{.{ .out = "wanif" }},
+        .masquerade = &.{.{ .out = "wanif", .src = "10.0.0.0/24", .addr = "203.0.113.7" }},
         .port_forward = &.{.{
             .proto = .tcp,
             .ext_port = 8080,
             .to = "10.0.0.2:80",
             .in_iface = "wanif",
+            .description = "web ui",
+            .enabled = false,
         }},
     };
     const rendered = try renderNat(std.testing.allocator, source, nat);
@@ -158,26 +170,30 @@ test "renderNat round-trips masquerade and port forwards" {
     try validate.validate(&parsed.config);
     try std.testing.expectEqual(@as(usize, 1), parsed.config.nat.masquerade.len);
     try std.testing.expectEqualStrings("wanif", parsed.config.nat.masquerade[0].out);
+    try std.testing.expectEqualStrings("10.0.0.0/24", parsed.config.nat.masquerade[0].src.?);
+    try std.testing.expectEqualStrings("203.0.113.7", parsed.config.nat.masquerade[0].addr.?);
     try std.testing.expectEqual(@as(usize, 1), parsed.config.nat.port_forward.len);
     try std.testing.expectEqual(@as(u16, 8080), parsed.config.nat.port_forward[0].ext_port);
     try std.testing.expectEqualStrings("wanif", parsed.config.nat.port_forward[0].in_iface.?);
+    try std.testing.expectEqualStrings("web ui", parsed.config.nat.port_forward[0].description.?);
+    try std.testing.expect(!parsed.config.nat.port_forward[0].enabled);
 }
 
 test "saveNat rotates an existing file atomically" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     const source = "{\"version\":1,\"instance\":\"test\",\"ports\":{\"wan\":{\"kind\":\"l2\",\"device\":\"eth0\"}},\"interfaces\":{\"wanif\":{\"port\":\"wan\",\"address\":\"10.0.0.1/24\"}}}\n";
-    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "vrouter.json", .data = source });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "vnet.json", .data = source });
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
     const dir = try tmp.dir.realPath(std.testing.io, &path_buf);
-    const path = try std.fmt.allocPrint(std.testing.allocator, "{s}/vrouter.json", .{path_buf[0..dir]});
+    const path = try std.fmt.allocPrint(std.testing.allocator, "{s}/vnet.json", .{path_buf[0..dir]});
     defer std.testing.allocator.free(path);
 
     try saveNat(std.testing.io, std.testing.allocator, path, source, .{
         .masquerade = &.{.{ .out = "wanif" }},
     });
 
-    const saved = try tmp.dir.readFileAlloc(std.testing.io, "vrouter.json", std.testing.allocator, .limited(4096));
+    const saved = try tmp.dir.readFileAlloc(std.testing.io, "vnet.json", std.testing.allocator, .limited(4096));
     defer std.testing.allocator.free(saved);
     try std.testing.expect(std.mem.indexOf(u8, saved, "\"masquerade\"") != null);
 }

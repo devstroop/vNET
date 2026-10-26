@@ -3,13 +3,15 @@
 //! rewrites of the same packet adjust the checksum instead of rescanning L4.
 
 const std = @import("std");
-const types = @import("../types.zig");
-const ipv4 = @import("../l3/ipv4.zig");
-const icmp = @import("../l3/icmp.zig");
+const types = @import("vnet-core").types;
+const ipv4 = @import("vnet-l3").ipv4;
+const icmp = @import("vnet-l3").icmp;
 
 pub const Rule = struct {
     port: types.PortId,
     addr: types.Ipv4,
+    src: ?types.Prefix4 = null,
+    explicit: bool = false,
 };
 
 pub const ForwardRule = struct {
@@ -18,6 +20,8 @@ pub const ForwardRule = struct {
     to_addr: types.Ipv4,
     to_port: u16,
     ingress: ?types.PortId = null,
+    description: []const u8 = "",
+    enabled: bool = true,
 };
 
 pub fn rewriteSource(packet: []u8, addr: types.Ipv4, port: u16) bool {

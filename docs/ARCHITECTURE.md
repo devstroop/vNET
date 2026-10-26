@@ -1,4 +1,4 @@
-# vRouter — Architecture
+# vNET — Architecture
 
 > Router-first design. The overlay/P2P work from the earlier draft is deferred
 > to a future uplink module (ADR-004); the engine described here is the product.
@@ -18,7 +18,7 @@
    tables and swapped atomically.
 5. **Journal before mutation.** Every host change has a recorded inverse.
 6. **No GUI in v1, one API.** CLI and a Unix-socket API are the only v1
-   interfaces; the C ABI is for hosts (Android). A post-v1 optional `vrouter-web`
+   interfaces; the C ABI is for hosts (Android). A post-v1 optional `vnetweb`
    adapter is an unprivileged client of the same API (ADR-011).
 7. **Hostile input.** Decoders are bounds-checked and fuzzed; no `unreachable`
    on wire data.
@@ -26,10 +26,14 @@
 ## 2. Repository layout
 
 ```
-vrouter/
+vnet/
 ├── build.zig
 ├── build.zig.zon
+├── test.zig
+├── fuzz.zig
 ├── AGENTS.md
+├── CHANGELOG.md
+├── README.md
 ├── docs/
 │   ├── PRODUCT.md
 │   ├── CORE-SCOPE.md
@@ -38,20 +42,34 @@ vrouter/
 │   ├── PLAN.md
 │   ├── RESEARCH.md
 │   ├── SOURCES.md
+│   ├── WEB.md
+│   ├── WEB-SCOPE.md
 │   └── adr/
 ├── src/
-│   ├── lib.zig                  public Zig API
+│   ├── lib.zig                  public Zig API / shard composition
 │   ├── ffi.zig                  C ABI (R7)
+│   ├── shard_core.zig           vnet-core module root
+│   ├── shard_port.zig           vnet-port module root
+│   ├── shard_l2.zig             vnet-l2 module root
+│   ├── shard_l3.zig             vnet-l3 module root
+│   ├── shard_conntrack.zig      vnet-conntrack module root
+│   ├── shard_nat.zig            vnet-nat module root
+│   ├── shard_dhcp.zig           vnet-dhcp module root
+│   ├── shard_dns.zig            vnet-dns module root
+│   ├── shard_ctl.zig            vnet-ctl module root
 │   ├── thread.zig               std/pthread thread backend
 │   ├── io.zig                   std.Io wiring, timers, cancellation
 │   ├── log.zig                  leveled text/JSON logger
 │   ├── types.zig                PortId, Mac, IpAddr, Mtu, VlanId
+│   ├── errors.zig               typed error taxonomy
 │   ├── app/
-│   │   └── service.zig           shared daemon/FFI lifecycle
+│   │   └── service.zig          shared daemon/FFI lifecycle
 │   ├── config/
 │   │   ├── schema.zig           typed config model
 │   │   ├── parse.zig            strict JSON parser
-│   │   └── validate.zig         references, subnets, conflicts
+│   │   ├── validate.zig         references, subnets, conflicts
+│   │   ├── write.zig            canonical writer
+│   │   └── store.zig            revisioned on-disk config
 │   ├── port/
 │   │   ├── port.zig             Port vtable, PortInfo, Stats
 │   │   ├── manager.zig          config → ports, hotplug pump
@@ -64,65 +82,105 @@ vrouter/
 │   │   │   ├── af_packet.zig    L2 port (TPACKET_V3 later)
 │   │   │   ├── tun.zig          TUN (IFF_NO_PI) and TAP
 │   │   │   └── netlink.zig      link dump + link/addr/neigh monitor
-│   │   └── android/             R7/R8: VpnService fd, raw, JNI
+│   │   └── android/             R7/R8 (planned)
 │   ├── l2/
 │   │   ├── ethernet.zig         Ethernet II + 802.1Q parse/build (R2)
-│   │   ├── bridge.zig           FDB, flooding, aging
-│   │   ├── vlan.zig             PVID/trunk/filtering
 │   │   └── stp.zig              optional 802.1D
 │   ├── l3/
 │   │   ├── ipv4.zig             header, checksum, TTL (R2)
 │   │   ├── ipv6.zig             header, extension parsing, checksums
 │   │   ├── fib.zig              IPv4 LPM (flat R2, trie R3)
 │   │   ├── fib6.zig             IPv6 LPM (parallel to fib.zig)
-│   │   ├── rib.zig              route sources + policy rules
 │   │   ├── arp.zig              cache + request/reply (R2)
 │   │   ├── ndp.zig              NS/NA + neighbor cache (RA v1.1)
 │   │   ├── icmp.zig             IPv4 errors + echo (R2)
 │   │   ├── icmpv6.zig           ICMPv6 errors + echo
-│   │   ├── forward.zig          IPv4/IPv6 forwarding, L2 + TUN ingress
-│   │   └── mtu.zig              MSS clamp, PMTU errors
+│   │   ├── rate.zig             ICMP/ARP error rate limiting
+│   │   └── forward.zig          composition engine: bridge, FW, services, L2/TUN
 │   ├── nat/
 │   │   ├── conntrack.zig        5-tuple table, timeouts, GC, port allocator (R3)
 │   │   └── nat.zig              SNAT/DNAT rewrite, RFC 1624 checksum adjust (R3)
 │   ├── services/
-│   │   ├── dhcp/message.zig     wire parser/builder
-│   │   ├── dhcp/server.zig      pool, reservations, options, DECLINE
-│   │   ├── dhcp/leases.zig      atomic JSON lease persistence
-│   │   └── dns/                 message, cache, UDP forwarder
-│   ├── firewall/
-│   │   ├── rules.zig            ordered rules, match/actions
-│   │   └── compile.zig          rule set → fast matcher
+│   │   ├── dhcp/
+│   │   │   ├── message.zig      wire parser/builder
+│   │   │   ├── server.zig       pool, reservations, options, DECLINE
+│   │   │   └── leases.zig       atomic JSON lease persistence
+│   │   └── dns/
+│   │       ├── message.zig      wire parser/builder
+│   │       ├── cache.zig        TTL cache
+│   │       ├── probe.zig        diagnostics client
+│   │       └── service.zig      UDP/TCP forwarder and split zones
 │   ├── control/
 │   │   ├── server.zig           unix socket, JSON lines (R7)
-│   │   ├── commands.zig         CLI verbs → core operations (R7)
+│   │   ├── client.zig           CLI/web client
+│   │   ├── protocol.zig         request/response schema
+│   │   ├── transport.zig        framing
+│   │   ├── unix.zig             socket helpers
 │   │   ├── journal.zig          JSONL forward ops, ownership, rollback (R2)
 │   │   ├── host.zig             iface/route mutations + journal (R2)
 │   │   ├── offload.zig          kernel bridge plan + veth trunk (R5, Linux)
-│   │   └── events.zig           event bus
-│   ├── web/                     POST-V1: HTTP, templates, auth (ADR-011)
-│   └── overlay/                 FUTURE: uplink overlay (ADR-004)
+│   │   ├── config_apply.zig     canonical diff and apply
+│   │   ├── transaction.zig      staged apply/rollback
+│   │   ├── state.zig            snapshot publication
+│   │   ├── read_model.zig       typed read views
+│   │   └── firewall_counters.zig
+│   └── web/
+│       ├── root.zig             module surface
+│       ├── server.zig           HTTP, auth, CSRF
+│       ├── pages.zig            server-rendered pages
+│       ├── operations.zig       control-socket operations
+│       ├── auth.zig             password/session handling
+│       ├── html.zig             template helpers
+│       └── assets/              embedded CSS, JS, HTMX 4
 ├── exec/
-│   ├── vrouter/main.zig            CLI (`validate`, `port`, `status`, `iface`, `route`, `down`, `journal`, `selftest`)
-│   ├── vrouterd/main.zig           daemon (config, netlink, IPv4 forwarding loop)
-│   └── vrouterweb/main.zig         POST-V1: unprivileged web admin (ADR-011)
-├── include/vrouter.h
+│   ├── vnet/main.zig            CLI
+│   ├── vnetd/main.zig           daemon
+│   └── vnetweb/main.zig         POST-V1: unprivileged web admin (ADR-011)
+├── include/vnet.h
 ├── test/
-│   ├── unit/
-│   ├── netns/                   Linux topologies
-│   ├── fuzz/
-│   └── interop/
+│   ├── examples.zig
+│   ├── fuzz.zig
+│   ├── golden.zig
+│   └── ffi_smoke.c
 └── scripts/
-    ├── build_android.sh
     ├── test_netns.sh
     ├── test_route.sh
+    ├── test_tun.sh
     ├── test_ipv6.sh
     ├── test_journal.sh
     ├── test_crash.sh
     ├── test_offload.sh
+    ├── test_dhcp.sh
+    ├── test_dns.sh
+    ├── test_firewall.sh
+    ├── test_vlan.sh
     ├── nat_matrix.sh
     └── perf.sh
 ```
+
+Planned phase-2 moves from ADR-018: `l2/bridge.zig`, `l2/vlan.zig`,
+`firewall/`, `l3/rib.zig`, `l3/mtu.zig`, `control/events.zig` and `overlay/`.
+The paths above describe the current tree; those files are not present yet.
+
+### 2.1 Build graph
+
+The shard roots are compiled as named Zig modules (ADR-018). They are thin
+re-export surfaces; implementation files stay in the directories above until
+the forwarding-engine split.
+
+| Module | Allowed dependencies |
+|---|---|
+| `vnet-core` | none |
+| `vnet-port`, `vnet-l2`, `vnet-l3`, `vnet-dhcp`, `vnet-conntrack` | core |
+| `vnet-nat` | core, l3, conntrack |
+| `vnet-dns` | core, thread |
+| `vnet-ctl` | core, port, dns, thread |
+| `vnet-fw`, `vnet-tunnel` | reserved; not built yet |
+
+`src/lib.zig`, `src/app/service.zig` and `src/ffi.zig` are the composition
+layer. Shards may not import the composition layer, and `vnet-l3` may not import
+NAT, firewall or services. CLI and FFI builds map `vnet-thread` to different
+backends, so `vnet-dns` and `vnet-ctl` are built once per profile.
 
 ## 3. Core interfaces
 
@@ -314,7 +372,7 @@ CLI / API ──▶ config::diff ──▶ mutation list ──▶ journal ─�
   diff/apply path. Restart-required: ports, bridges, addresses.
 - Events: `port_up/down`, `link_change`, `addr_change`, `dhcp_lease`,
   `nat_expired`, `config_applied`, `error`.
-- Post-v1, an optional `vrouter-web` adapter may expose this API over
+- Post-v1, an optional `vnetweb` adapter may expose this API over
   authenticated HTTP. It remains an unprivileged client of the Unix socket and
   never mutates host state directly (ADR-011).
 
@@ -393,11 +451,11 @@ Wintun/Npcap, IP Helper, WFP/New-NetNat.
 
 - Strict schema, versioned; unknown keys rejected.
 - Validation is pure (no side effects) and runs before apply.
-- R2 journal: `$VROUTER_RUN_DIR/<instance>.journal` (default `/run/vrouter`),
+- R2 journal: `$VNET_RUN_DIR/<instance>.journal` (default `/run/vnet`),
   one forward op per JSON line, fsynced and atomically replaced before the
-  netlink mutation. `vrouter down` derives inverses in reverse order; deletes are
+  netlink mutation. `vnet down` derives inverses in reverse order; deletes are
   gated by journal ownership; a failed apply removes its record.
-- The R7 control socket, read-only status, `vrouter doctor` diagnostics, and the
+- The R7 control socket, read-only status, `vnet doctor` diagnostics, and the
   run-dir daemon lock are implemented. Pending/applied reconciliation and
   batch apply remain.
 - Secrets (if any) come from env/file descriptors, never the config file.
@@ -440,12 +498,12 @@ throughput or latency claim is made without that report and its host details.
 | Forwarding | Two-host netns ping + TCP (`scripts/test_route.sh`) |
 | IPv6 | NDP, ping6 and TCP repair (`scripts/test_ipv6.sh`) |
 | TUN | Kernel TUN peer ↔ veth host, ICMP + TCP (`scripts/test_tun.sh`) |
-| Journal | iface/route mutations + `vrouter down` (`scripts/test_journal.sh`) |
+| Journal | iface/route mutations + `vnet down` (`scripts/test_journal.sh`) |
 | NAT/conntrack | SNAT UDP/ICMP/TCP, DNAT/hairpin, live add/del (`scripts/nat_matrix.sh`) |
 | NAT matrix | Emulated EIM/EDM, hairpin, port-forward, exhaustion |
 | DHCP/DNS | Client emulators; lease persistence across restart |
 | Security/privilege | Journal rollback, default-deny policy, netns isolation |
-| Crash safety | kill -9, journal replay, `vrouter doctor --repair` (`scripts/test_crash.sh`) |
+| Crash safety | kill -9, journal replay, `vnet doctor --repair` (`scripts/test_crash.sh`) |
 | Android | Emulator (VPN mode), rooted device (root mode) |
 | Performance | `iperf3`, `pktgen`, 64 B and 1500 B, multi-flow |
 
@@ -464,6 +522,10 @@ throughput or latency claim is made without that report and its host details.
 | [009](adr/009-kernel-bridge-offload.md) | Kernel bridge offload with a veth trunk |
 | [010](adr/010-embedded-c-abi.md) | Embedded C ABI and host fd injection |
 | [011](adr/011-web-admin.md) | Optional local web admin (post-v1) |
-| [012](adr/012-project-rename.md) | Rename vNAT to vRouter |
+| [012](adr/012-project-rename.md) | Rename vNAT to vRouter (superseded) |
 | [013](adr/013-ipv6-r9-core.md) | IPv6 core for v1.0 |
 | [014](adr/014-live-nat-updates.md) | Config-backed live NAT updates |
+| [015](adr/015-control-protocol-v3.md) | Versioned control protocol and staged writes |
+| [016](adr/016-network-model-and-staged-config.md) | Network model and staged configuration |
+| [017](adr/017-project-rename-vnet.md) | Rename vRouter to vNET |
+| [018](adr/018-shard-build-graph.md) | Named shard build graph |

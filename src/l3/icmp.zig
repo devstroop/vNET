@@ -118,8 +118,8 @@ test "icmp error quotes header and eight bytes" {
     var packet: [64]u8 = undefined;
     const n = try ipv4_mod.write(
         &packet,
-        try @import("../types.zig").Ipv4.parse("10.0.1.2"),
-        try @import("../types.zig").Ipv4.parse("10.0.2.2"),
+        try @import("vnet-core").types.Ipv4.parse("10.0.1.2"),
+        try @import("vnet-core").types.Ipv4.parse("10.0.2.2"),
         ipv4_mod.Protocol.udp,
         64,
         1,
@@ -141,8 +141,8 @@ test "icmp frag-needed carries mtu" {
     var packet: [32]u8 = undefined;
     const n = try ipv4_mod.write(
         &packet,
-        try @import("../types.zig").Ipv4.parse("10.0.1.2"),
-        try @import("../types.zig").Ipv4.parse("10.0.2.2"),
+        try @import("vnet-core").types.Ipv4.parse("10.0.1.2"),
+        try @import("vnet-core").types.Ipv4.parse("10.0.2.2"),
         ipv4_mod.Protocol.udp,
         64,
         1,

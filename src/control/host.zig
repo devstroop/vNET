@@ -1,13 +1,13 @@
 //! Linux host mutations with journal-before-apply semantics. Ownership is
 //! derived from the journal: `iface del` and `route del` only touch state that
-//! vRouter added, and `down` replays the inverse of every recorded operation.
+//! vNET added, and `down` replays the inverse of every recorded operation.
 
 const std = @import("std");
-const types = @import("../types.zig");
+const types = @import("vnet-core").types;
 const journal = @import("journal.zig");
-const netlink = @import("../port/linux/netlink.zig");
-const iface_mod = @import("../port/linux/iface.zig");
-const PortError = @import("../errors.zig").PortError;
+const netlink = @import("vnet-port").linux.netlink;
+const iface_mod = @import("vnet-port").linux.iface;
+const PortError = @import("vnet-core").PortError;
 
 pub const Change = enum {
     applied,

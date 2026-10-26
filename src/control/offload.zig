@@ -1,19 +1,19 @@
 //! Linux kernel-bridge offload planning and setup.
 //!
-//! An offloaded bridge is owned by the kernel bridge driver. vRouter keeps
+//! An offloaded bridge is owned by the kernel bridge driver. vNET keeps
 //! routing, DHCP, NAT and firewall in userspace by attaching one veth trunk
 //! per bridge: the bridge-side end is enslaved (and configured as a VLAN
-//! trunk), while vRouter opens the peer as its only synthetic L2 port.
+//! trunk), while vNET opens the peer as its only synthetic L2 port.
 //!
 //! All host mutations go through `Host`, so a failed apply can be rolled back
-//! to the exact journal checkpoint it started from and `vrouter down` restores
+//! to the exact journal checkpoint it started from and `vnet down` restores
 //! the pre-start state.
 
 const std = @import("std");
-const schema = @import("../config/schema.zig");
+const schema = @import("vnet-core").config_schema;
 const Host = @import("host.zig").Host;
-const netlink = @import("../port/linux/netlink.zig");
-const iface = @import("../port/linux/iface.zig");
+const netlink = @import("vnet-port").linux.netlink;
+const iface = @import("vnet-port").linux.iface;
 
 pub const SyntheticPort = struct {
     config_name: []const u8,
@@ -23,7 +23,7 @@ pub const SyntheticPort = struct {
 pub const Device = struct {
     bridge_name: []const u8,
     kernel_bridge: []const u8,
-    veth_vrouter: []const u8,
+    veth_vnet: []const u8,
     veth_bridge: []const u8,
     vlan_aware: bool,
     stp: bool,
@@ -86,14 +86,14 @@ pub fn apply(
         try devices.append(a, .{
             .bridge_name = bridge_name,
             .kernel_bridge = names.bridge,
-            .veth_vrouter = names.vrouter,
+            .veth_vnet = names.vnet,
             .veth_bridge = names.bridge_side,
             .vlan_aware = bridge.vlan_aware,
             .stp = bridge.stp,
         });
         try synthetic.append(a, .{
             .config_name = bridge_name,
-            .device = names.vrouter,
+            .device = names.vnet,
         });
         for (bridge.ports) |port_name| {
             try skipped.append(a, port_name);
@@ -113,7 +113,7 @@ pub fn apply(
         const bridge = cfg.bridges.getPtr(device.bridge_name) orelse return error.NotFound;
 
         _ = try host.ifaceAddBridge(device.kernel_bridge, bridge.stp, bridge.vlan_aware);
-        _ = try host.ifaceAddVeth(device.veth_vrouter, device.veth_bridge);
+        _ = try host.ifaceAddVeth(device.veth_vnet, device.veth_bridge);
         _ = try host.ifaceSetMaster(device.veth_bridge, device.kernel_bridge);
 
         for (bridge.ports) |port_name| {
@@ -138,7 +138,7 @@ pub fn apply(
         }
 
         _ = try host.ifaceSetUp(device.kernel_bridge, true);
-        _ = try host.ifaceSetUp(device.veth_vrouter, true);
+        _ = try host.ifaceSetUp(device.veth_vnet, true);
         _ = try host.ifaceSetUp(device.veth_bridge, true);
         for (bridge.ports) |port_name| {
             const port = cfg.ports.get(port_name) orelse return error.NotFound;
@@ -151,16 +151,16 @@ pub fn apply(
 
 const DeviceNames = struct {
     bridge: []const u8,
-    vrouter: []const u8,
+    vnet: []const u8,
     bridge_side: []const u8,
 };
 
 fn deviceNames(a: std.mem.Allocator, instance: []const u8, bridge_name: []const u8) !DeviceNames {
     const suffix = nameHash(instance, bridge_name);
     return .{
-        .bridge = try std.fmt.allocPrint(a, "vrbr{x}", .{suffix}),
-        .vrouter = try std.fmt.allocPrint(a, "vrpt{x}", .{suffix}),
-        .bridge_side = try std.fmt.allocPrint(a, "vrbs{x}", .{suffix}),
+        .bridge = try std.fmt.allocPrint(a, "vnbr{x}", .{suffix}),
+        .vnet = try std.fmt.allocPrint(a, "vnpt{x}", .{suffix}),
+        .bridge_side = try std.fmt.allocPrint(a, "vnbs{x}", .{suffix}),
     };
 }
 
@@ -187,7 +187,7 @@ fn preflight(
     names: DeviceNames,
 ) !void {
     try ensureAbsent(names.bridge);
-    try ensureAbsent(names.vrouter);
+    try ensureAbsent(names.vnet);
     try ensureAbsent(names.bridge_side);
 
     for (bridge.ports) |port_name| {
@@ -271,25 +271,25 @@ test "offload device names fit IFNAMSIZ and are stable" {
     const one = try deviceNames(a, "instance", "lan-bridge");
     defer {
         a.free(one.bridge);
-        a.free(one.vrouter);
+        a.free(one.vnet);
         a.free(one.bridge_side);
     }
     const two = try deviceNames(a, "instance", "lan-bridge");
     defer {
         a.free(two.bridge);
-        a.free(two.vrouter);
+        a.free(two.vnet);
         a.free(two.bridge_side);
     }
     try testing.expect(one.bridge.len < 16);
-    try testing.expect(one.vrouter.len < 16);
+    try testing.expect(one.vnet.len < 16);
     try testing.expect(one.bridge_side.len < 16);
     try testing.expectEqualStrings(one.bridge, two.bridge);
-    try testing.expectEqualStrings(one.vrouter, two.vrouter);
+    try testing.expectEqualStrings(one.vnet, two.vnet);
     try testing.expectEqualStrings(one.bridge_side, two.bridge_side);
 }
 
 test "trunk VLANs union members and SVIs" {
-    var parsed = try @import("../config/parse.zig").parse(testing.allocator,
+    var parsed = try @import("vnet-core").config_parse.parse(testing.allocator,
         \\{ "version": 1, "instance": "x",
         \\  "ports": {
         \\    "a": { "kind": "l2", "device": "eth1", "pvid": 10, "tagged": [20, 30] },
@@ -311,7 +311,7 @@ test "trunk VLANs union members and SVIs" {
 }
 
 test "trunk VLANs rejects out-of-range VLAN IDs" {
-    var parsed = try @import("../config/parse.zig").parse(testing.allocator,
+    var parsed = try @import("vnet-core").config_parse.parse(testing.allocator,
         \\{ "version": 1, "instance": "x",
         \\  "ports": { "lan": { "kind": "l2", "device": "eth1", "pvid": 5000 } },
         \\  "bridges": { "br": { "ports": ["lan"], "vlan_aware": true, "offload": "kernel" } } }
@@ -326,7 +326,7 @@ test "trunk VLANs rejects out-of-range VLAN IDs" {
 }
 
 test "offload is disabled without kernel bridges" {
-    var parsed = try @import("../config/parse.zig").parse(testing.allocator,
+    var parsed = try @import("vnet-core").config_parse.parse(testing.allocator,
         \\{ "version": 1, "instance": "x",
         \\  "ports": { "lan": { "kind": "l2", "device": "eth1" } },
         \\  "bridges": { "br": { "ports": ["lan"] } } }
@@ -336,7 +336,7 @@ test "offload is disabled without kernel bridges" {
 }
 
 test "kernel offload is detected" {
-    var parsed = try @import("../config/parse.zig").parse(testing.allocator,
+    var parsed = try @import("vnet-core").config_parse.parse(testing.allocator,
         \\{ "version": 1, "instance": "x",
         \\  "ports": { "lan": { "kind": "l2", "device": "eth1" } },
         \\  "bridges": { "br": { "ports": ["lan"], "offload": "kernel" } } }

@@ -1,21 +1,21 @@
 #!/usr/bin/env bash
-# IPv4 forwarding test: two isolated hosts talk through vrouterd across two L2
+# IPv4 forwarding test: two isolated hosts talk through vnetd across two L2
 # ports. Exercises ARP, TTL decrement, ICMP echo and TCP checksum repair.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-if [ "${VROUTER_ROUTE_NETNS:-0}" != "1" ]; then
+if [ "${VNET_ROUTE_NETNS:-0}" != "1" ]; then
     ZIG="${ZIG:-zig}"
     command -v "$ZIG" >/dev/null 2>&1 || {
         echo "FAIL: zig not found (set ZIG=/path/to/zig)" >&2
         exit 1
     }
     if [ "${EUID}" -eq 0 ]; then
-        exec unshare -n env VROUTER_ROUTE_NETNS=1 "ZIG=$(command -v "$ZIG")" bash "$0" "$@"
+        exec unshare -n env VNET_ROUTE_NETNS=1 "ZIG=$(command -v "$ZIG")" bash "$0" "$@"
     fi
-    exec unshare -rn env VROUTER_ROUTE_NETNS=1 "ZIG=$(command -v "$ZIG")" bash "$0" "$@"
+    exec unshare -rn env VNET_ROUTE_NETNS=1 "ZIG=$(command -v "$ZIG")" bash "$0" "$@"
 fi
 
 ZIG="${ZIG:-zig}"
@@ -25,10 +25,10 @@ command -v "$ZIG" >/dev/null 2>&1 || {
 }
 
 WORK="$(mktemp -d)"
-export VROUTER_RUN_DIR="$WORK/run"
+export VNET_RUN_DIR="$WORK/run"
 BIN="$ROOT/zig-out/bin"
-CFG="$WORK/vrouter-route.json"
-LOG="$WORK/vrouterd.log"
+CFG="$WORK/vnet-route.json"
+LOG="$WORK/vnetd.log"
 HTTP_LOG="$WORK/http.log"
 
 vpid=""
@@ -111,23 +111,23 @@ for i in $(seq 1 250); do
 done
 [ -f "$WORK/a.ready" ] || die "host A did not configure"
 [ -f "$WORK/b.ready" ] || die "host B did not configure"
-ok "hosts 10.0.1.2/24 and 10.0.2.2/24 via vrouterd"
+ok "hosts 10.0.1.2/24 and 10.0.2.2/24 via vnetd"
 
-log "vrouterd"
-"$BIN/vrouterd" -c "$CFG" >"$LOG" 2>&1 &
+log "vnetd"
+"$BIN/vnetd" -c "$CFG" >"$LOG" 2>&1 &
 vpid=$!
 
 for i in $(seq 1 100); do
     grep -q "started instance" "$LOG" && break
     if ! kill -0 "$vpid" 2>/dev/null; then
         cat "$LOG"
-        die "vrouterd exited"
+        die "vnetd exited"
     fi
     sleep 0.02
 done
 grep -q "started instance" "$LOG" || {
     cat "$LOG"
-    die "vrouterd did not start"
+    die "vnetd did not start"
 }
 
 log "icmp"
@@ -180,7 +180,7 @@ done
 }
 ok "tcp 10.0.1.2 -> 10.0.2.2:8080 (http 200)"
 
-kill -0 "$vpid" 2>/dev/null || die "vrouterd exited during test"
+kill -0 "$vpid" 2>/dev/null || die "vnetd exited during test"
 kill -TERM "$vpid"
 for i in $(seq 1 100); do
     kill -0 "$vpid" 2>/dev/null || break
@@ -195,6 +195,6 @@ grep -q "forwarded=" "$LOG" || {
     die "missing forwarding counters"
 }
 
-echo "--- vrouterd ---"
+echo "--- vnetd ---"
 cat "$LOG"
 ok "test_route"

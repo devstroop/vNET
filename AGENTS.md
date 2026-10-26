@@ -1,4 +1,4 @@
-# vRouter — Agent Guide
+# vNET — Agent Guide
 
 Portable virtual router in Zig 0.16+: L2/L3 forwarding, bridging, NAT, DHCP,
 DNS and firewall for Linux and Android. No GUI in v1; an optional post-v1 web
@@ -10,14 +10,15 @@ the contract for any agent working in this repo.
 | Layer | Location | Technology |
 |---|---|---|
 | Core library | `src/` | Zig, `std.Io`, `std.crypto` |
+| Shard graph | `src/shard_*.zig` | named Zig modules; ADR-018 |
 | Ports / datapath | `src/port/`, `src/l2/`, `src/l3/` | AF_PACKET, TUN/TAP, fd, netlink |
-| NAT / firewall | `src/nat/`, `src/firewall/` | conntrack, SNAT/DNAT, rules |
+| NAT / firewall | `src/nat/`, `src/l3/forward.zig` | conntrack, SNAT/DNAT; `vnet-fw` reserved until the engine split |
 | Services | `src/services/` | DHCPv4, DNS forwarder |
-| CLI / daemon | `src/cli/`, `src/app/` | Zig |
-| Executables | `exec/` | `vrouter`, `vrouterd`; `vrouter-web` post-v1 |
-| C ABI | `src/ffi.zig`, `include/vrouter.h` | for Android/iOS/desktop hosts |
+| CLI / daemon | `src/app/`, `exec/` | Zig |
+| Executables | `exec/` | `vnet`, `vnetd`; `vnetweb` post-v1 |
+| C ABI | `src/ffi.zig`, `include/vnet.h` | for Android/iOS/desktop hosts |
 | Control plane | `src/control/` | config diff, journal, unix socket API |
-| Web admin (post-v1) | `src/web/`, `exec/vrouterweb/` | Zig HTTP, server-rendered HTMX, Unix-socket client |
+| Web admin (post-v1) | `src/web/`, `exec/vnetweb/` | Zig HTTP server + server-rendered HTMX 4, embedded assets, Unix-socket client |
 | Tests | `test/` | unit, netns, fuzz, Android smoke |
 
 ## Commands
@@ -25,16 +26,18 @@ the contract for any agent working in this repo.
 ```bash
 zig build                      # debug build
 zig build --release=fast       # release
-zig build test                 # unit tests + fuzz corpus smoke
+zig build test                 # shard + umbrella tests + fuzz smoke
 zig build test -Dtest-filter=ipv4
 zig build fuzz --fuzz=10K      # parser fuzz campaign (iterations per target)
 zig build shared-lib           # .so
 zig build static-lib -Dtarget=aarch64-linux-android
+zig build web                  # web admin preview (HTMX; no Node build)
+zig build web-test             # web admin unit tests
 bash scripts/test_netns.sh     # Linux L2/hotplug topology tests
 bash scripts/test_route.sh     # IPv4 forwarding (ping + TCP)
 bash scripts/test_tun.sh       # TUN ingress/egress (ICMP + TCP)
 bash scripts/test_ipv6.sh      # IPv6 forwarding/NDP (ping + TCP)
-bash scripts/test_journal.sh   # iface/route journal + vrouter down
+bash scripts/test_journal.sh   # iface/route journal + vnet down
 bash scripts/test_crash.sh     # kill -9, journal replay, doctor --repair
 bash scripts/nat_matrix.sh     # NAT/port-forward matrix (R3+)
 bash scripts/test_firewall.sh  # ordered rules/default drop (R6)
@@ -58,15 +61,19 @@ Always run `zig build test`. For port/forwarding changes, also run
 5. **Hostile input.** No `unreachable` on frames, packets or config. Use
    bounds-checked readers returning typed errors. Every parser is fuzzed.
 6. **Journal before mutation.** Every host change (route, address, link,
-   bridge membership, NAT rule) is recorded with its inverse. `vrouter down` must
+   bridge membership, NAT rule) is recorded with its inverse. `vnet down` must
    restore the pre-start state.
 7. **No silent fallback.** If a configured backend or capability is missing,
    fail with an actionable typed error.
-8. **ABI stability.** `include/vrouter.h` mirrors `src/ffi.zig`; changing an export
+8. **ABI stability.** `include/vnet.h` mirrors `src/ffi.zig`; changing an export
    updates the header, version and changelog.
 9. **No secrets in logs.** Never log packet payloads, keys or tokens above
    debug level.
 10. **One concern per PR.** Protocol/behavior changes need an ADR and tests.
+11. **Respect shard boundaries.** Import another subsystem only through its
+    declared `vnet-*` module. Shards may not import the composition layer
+    (`src/lib.zig`, `src/app/`, `src/ffi.zig`), and `vnet-l3` may not import
+    NAT, firewall or services. See ADR-018.
 
 ## Code style
 
@@ -97,7 +104,7 @@ Always run `zig build test`. For port/forwarding changes, also run
 
 | Pitfall | Symptom | Fix |
 |---|---|---|
-| Stale routes/rules after crash | Blackholed or leaked traffic | Journal + `vrouter doctor --repair` |
+| Stale routes/rules after crash | Blackholed or leaked traffic | Journal + `vnet doctor --repair` |
 | AF_PACKET sees kernel-handled packets too | Double processing | Understand tap vs packet socket semantics; use AF_PACKET carefully |
 | TUN/AF_PACKET checksum offload mismatch | Corrupt TCP checksums | Software repair on forward (ADR-007); offload only when negotiated |
 | Android `addAddress` without `addRoute` | No traffic reaches TUN | Add the virtual-subnet route explicitly |
@@ -152,5 +159,5 @@ Installed in `.opencode/skills/`:
 - `doc-coauthoring` — write ADRs, specs, proposals.
 - `webapp-testing` — Playwright testing for the post-v1 web admin.
 
-Use `skill-creator` to add a `vrouter-networking` skill once the port/packet
+Use `skill-creator` to add a `vnet-networking` skill once the port/packet
 interfaces stabilize.

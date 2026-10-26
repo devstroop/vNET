@@ -2,7 +2,7 @@
 //! table; R3 replaces the lookup with a compressed trie once route counts grow.
 
 const std = @import("std");
-const types = @import("../types.zig");
+const types = @import("vnet-core").types;
 
 pub const Kind = enum {
     connected,

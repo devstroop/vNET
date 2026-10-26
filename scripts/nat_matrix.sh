@@ -7,16 +7,16 @@ set -u
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-if [ "${VROUTER_NAT_NETNS:-0}" != "1" ]; then
+if [ "${VNET_NAT_NETNS:-0}" != "1" ]; then
     ZIG="${ZIG:-zig}"
     command -v "$ZIG" >/dev/null 2>&1 || {
         echo "FAIL: zig not found (set ZIG=/path/to/zig)" >&2
         exit 1
     }
     if [ "${EUID}" -eq 0 ]; then
-        exec unshare -n env VROUTER_NAT_NETNS=1 "ZIG=$(command -v "$ZIG")" bash "$0" "$@"
+        exec unshare -n env VNET_NAT_NETNS=1 "ZIG=$(command -v "$ZIG")" bash "$0" "$@"
     fi
-    exec unshare -rn env VROUTER_NAT_NETNS=1 "ZIG=$(command -v "$ZIG")" bash "$0" "$@"
+    exec unshare -rn env VNET_NAT_NETNS=1 "ZIG=$(command -v "$ZIG")" bash "$0" "$@"
 fi
 
 ZIG="${ZIG:-zig}"
@@ -26,12 +26,12 @@ command -v "$ZIG" >/dev/null 2>&1 || {
 }
 
 WORK="$(mktemp -d)"
-export VROUTER_RUN_DIR="$WORK/run"
+export VNET_RUN_DIR="$WORK/run"
 BIN="$ROOT/zig-out/bin"
-CLI="$BIN/vrouter"
-CFG="$WORK/vrouter-nat.json"
-LOG="$WORK/vrouterd.log"
-LOG2="$WORK/vrouterd-restart.log"
+CLI="$BIN/vnet"
+CFG="$WORK/vnet-nat.json"
+LOG="$WORK/vnetd.log"
+LOG2="$WORK/vnetd-restart.log"
 UDP_LOG="$WORK/udp.log"
 HTTP_LOG="$WORK/http.log"
 HTTP2_LOG="$WORK/http2.log"
@@ -149,21 +149,21 @@ done
 nsenter -t "$pidA" -n ip addr add 10.0.1.3/24 dev eth0 || die "add second client address"
 ok "client 10.0.1.2/.3, target 10.0.1.10 and server 10.0.2.2"
 
-log "vrouterd"
-"$BIN/vrouterd" -c "$CFG" >"$LOG" 2>&1 &
+log "vnetd"
+"$BIN/vnetd" -c "$CFG" >"$LOG" 2>&1 &
 vpid=$!
 
 for i in $(seq 1 100); do
     grep -q "started instance" "$LOG" && break
     if ! kill -0 "$vpid" 2>/dev/null; then
         cat "$LOG"
-        die "vrouterd exited"
+        die "vnetd exited"
     fi
     sleep 0.02
 done
 grep -q "started instance" "$LOG" || {
     cat "$LOG"
-    die "vrouterd did not start"
+    die "vnetd did not start"
 }
 
 log "udp echo server"
@@ -441,7 +441,7 @@ translated="$(udp_probe 10.0.1.2 40003 10.0.2.2 9999)" || {
 [ "$translated" = "peer=10.0.2.1:40003" ] || die "masquerade did not resume: $translated"
 ok "masquerade delete/add applies live"
 
-kill -0 "$vpid" 2>/dev/null || die "vrouterd exited during test"
+kill -0 "$vpid" 2>/dev/null || die "vnetd exited during test"
 kill -TERM "$vpid"
 for i in $(seq 1 100); do
     kill -0 "$vpid" 2>/dev/null || break
@@ -470,19 +470,19 @@ grep -q "icmp=[1-9]" "$LOG" || {
 ok "conntrack, snat, dnat and icmp counters: $(grep 'stopping instance' "$LOG" | tail -1)"
 
 log "restart persistence"
-"$BIN/vrouterd" -c "$CFG" >"$LOG2" 2>&1 &
+"$BIN/vnetd" -c "$CFG" >"$LOG2" 2>&1 &
 vpid=$!
 for i in $(seq 1 100); do
     grep -q "started instance" "$LOG2" && break
     if ! kill -0 "$vpid" 2>/dev/null; then
         cat "$LOG2"
-        die "vrouterd restart exited"
+        die "vnetd restart exited"
     fi
     sleep 0.02
 done
 grep -q "started instance" "$LOG2" || {
     cat "$LOG2"
-    die "vrouterd did not restart"
+    die "vnetd did not restart"
 }
 "$CLI" nat list -c "$CFG" | grep -q '8083' || die "8083 missing after restart"
 ! "$CLI" nat list -c "$CFG" | grep -q '8081' || die "deleted 8081 returned after restart"

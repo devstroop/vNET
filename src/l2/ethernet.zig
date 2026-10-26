@@ -3,7 +3,7 @@
 //! so the forwarding decision can reject or account for it explicitly.
 
 const std = @import("std");
-const types = @import("../types.zig");
+const types = @import("vnet-core").types;
 
 pub const EtherType = struct {
     pub const ipv4: u16 = 0x0800;

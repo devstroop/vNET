@@ -8,3 +8,4 @@ zig-out/
 *.dll
 *.exe
 .env
+.playwright-mcp/

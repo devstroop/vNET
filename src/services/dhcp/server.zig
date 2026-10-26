@@ -2,7 +2,7 @@
 //! release. The datapath owns packet I/O; this module only produces replies.
 
 const std = @import("std");
-const types = @import("../../types.zig");
+const types = @import("vnet-core").types;
 const message = @import("message.zig");
 
 pub const offer_timeout_ms: i64 = 60_000;
@@ -278,6 +278,19 @@ pub const Server = struct {
 
     pub fn leaseCapacity(self: *const Server) usize {
         return self.leases.len;
+    }
+
+    /// Forgets a lease regardless of its owner. The client is not notified;
+    /// the address simply returns to the pool and persistence is updated by
+    /// the caller. Returns false when no non-free lease owns `ip`.
+    pub fn revokeLease(self: *Server, ip: types.Ipv4) bool {
+        const lease = self.leaseForIp(ip) orelse return false;
+        if (lease.state == .free) return false;
+        lease.state = .free;
+        lease.mac = .{};
+        lease.client_id_len = 0;
+        lease.expires_ms = 0;
+        return true;
     }
 
     /// Copies non-free leases into `out`; returns the number written. The
@@ -669,6 +682,24 @@ test "pool exhaustion and conflicting requests are rejected" {
     );
     const nak = (try server.handle(try message.Message.parse(conflict), &out, 1_000)).?;
     try testing.expectEqual(message.MessageType.nak, (try message.Message.parse(nak.payload)).messageType().?);
+}
+
+test "revoke frees a bound lease" {
+    var server = try Server.init(testing.allocator, testConfig());
+    defer server.deinit();
+
+    var req_buf: [512]u8 = undefined;
+    var out: [512]u8 = undefined;
+    const discover = try buildRequest(&req_buf, .discover, 1, client_mac, null, null);
+    const offer = (try server.handle(try message.Message.parse(discover), &out, 1_000)).?;
+    const ip = (try message.Message.parse(offer.payload)).yiaddr;
+    const req = try buildRequest(&req_buf, .request, 1, client_mac, ip, null);
+    _ = (try server.handle(try message.Message.parse(req), &out, 1_000)).?;
+    try testing.expectEqual(@as(usize, 1), server.leaseCount(.bound));
+
+    try testing.expect(server.revokeLease(ip));
+    try testing.expectEqual(@as(usize, 0), server.leaseCount(.bound));
+    try testing.expect(!server.revokeLease(ip));
 }
 
 test "decline quarantines an address and release frees it" {

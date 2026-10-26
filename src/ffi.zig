@@ -2,15 +2,15 @@
 
 const std = @import("std");
 const linux = std.os.linux;
-const build_options = @import("build_options");
-const config_parse = @import("config/parse.zig");
-const config_validate = @import("config/validate.zig");
-const manager = @import("port/manager.zig");
-const sys = @import("port/linux/sys.zig");
+const core = @import("vnet-core");
+const config_parse = core.config_parse;
+const config_validate = @import("vnet-core").config_validate;
+const manager = @import("vnet-port").manager;
+const sys = @import("vnet-port").linux.sys;
 const service = @import("app/service.zig");
-const thread_mod = @import("thread.zig");
+const thread_mod = @import("vnet-thread");
 
-pub const ABI_VERSION: u32 = 2;
+pub const ABI_VERSION: u32 = 3;
 
 pub const OK: c_int = 0;
 pub const ERR_INVALID_ARGUMENT: c_int = -1;
@@ -55,7 +55,7 @@ pub const EventCb = *const fn (
     message: ?[*:0]const u8,
 ) callconv(.c) void;
 
-const version_z = build_options.version ++ "\x00";
+const version_z = core.version ++ "\x00";
 const allocator = std.heap.smp_allocator;
 
 const Handle = struct {
@@ -94,17 +94,17 @@ const Startup = struct {
     }
 };
 
-pub export fn vrouter_version() callconv(.c) [*:0]const u8 {
-    return @ptrCast(&version_z);
+pub export fn vnet_version() callconv(.c) [*:0]const u8 {
+    return @ptrCast(version_z.ptr);
 }
 
-pub export fn vrouter_create(config_json: ?[*:0]const u8) callconv(.c) ?*anyopaque {
+pub export fn vnet_create(config_json: ?[*:0]const u8) callconv(.c) ?*anyopaque {
     const json = config_json orelse return null;
     const self = createHandle(std.mem.span(json)) catch return null;
     return @ptrCast(self);
 }
 
-pub export fn vrouter_start(raw: ?*anyopaque) callconv(.c) c_int {
+pub export fn vnet_start(raw: ?*anyopaque) callconv(.c) c_int {
     const self = castHandle(raw) orelse return ERR_INVALID_ARGUMENT;
     const io = self.threaded.io();
     self.lock.lockUncancelable(io);
@@ -140,7 +140,7 @@ pub export fn vrouter_start(raw: ?*anyopaque) callconv(.c) c_int {
     return OK;
 }
 
-pub export fn vrouter_stop(raw: ?*anyopaque) callconv(.c) c_int {
+pub export fn vnet_stop(raw: ?*anyopaque) callconv(.c) c_int {
     const self = castHandle(raw) orelse return ERR_INVALID_ARGUMENT;
     const io = self.threaded.io();
     self.lock.lockUncancelable(io);
@@ -168,9 +168,9 @@ pub export fn vrouter_stop(raw: ?*anyopaque) callconv(.c) c_int {
     return OK;
 }
 
-pub export fn vrouter_destroy(raw: ?*anyopaque) callconv(.c) void {
+pub export fn vnet_destroy(raw: ?*anyopaque) callconv(.c) void {
     const self = castHandle(raw) orelse return;
-    _ = vrouter_stop(raw);
+    _ = vnet_stop(raw);
 
     const io = self.threaded.io();
     self.lock.lockUncancelable(io);
@@ -183,7 +183,7 @@ pub export fn vrouter_destroy(raw: ?*anyopaque) callconv(.c) void {
     gpa.destroy(self);
 }
 
-pub export fn vrouter_set_port_fd(
+pub export fn vnet_set_port_fd(
     raw: ?*anyopaque,
     name_z: ?[*:0]const u8,
     fd: c_int,
@@ -222,7 +222,7 @@ pub export fn vrouter_set_port_fd(
     return OK;
 }
 
-pub export fn vrouter_set_event_cb(
+pub export fn vnet_set_event_cb(
     raw: ?*anyopaque,
     cb: ?EventCb,
     ctx: ?*anyopaque,
@@ -239,7 +239,7 @@ pub export fn vrouter_set_event_cb(
     return OK;
 }
 
-pub export fn vrouter_get_status(
+pub export fn vnet_get_status(
     raw: ?*anyopaque,
     out: ?*Status,
 ) callconv(.c) c_int {
@@ -320,7 +320,7 @@ fn ready(ctx: ?*anyopaque) void {
 fn emitError(self: *Handle, err: anyerror) void {
     var buf: [160]u8 = undefined;
     const text = std.fmt.bufPrint(buf[0 .. buf.len - 1], "{s}", .{@errorName(err)}) catch {
-        const fallback = "vrouter error";
+        const fallback = "vnet error";
         @memcpy(buf[0..fallback.len], fallback);
         buf[fallback.len] = 0;
         emit(self, EVENT_ERROR, buf[0..fallback.len :0].ptr);
@@ -372,13 +372,13 @@ fn countEvent(ctx: ?*anyopaque, event: c_int, _: ?[*:0]const u8) callconv(.c) vo
     switch (event) {
         EVENT_STARTED => {
             _ = counter.started.fetchAdd(1, .monotonic);
-            if (vrouter_get_status(counter.handle, &status) == OK) {
+            if (vnet_get_status(counter.handle, &status) == OK) {
                 counter.running_at_start.store(status.running == 1, .release);
             }
         },
         EVENT_STOPPED => {
             _ = counter.stopped.fetchAdd(1, .monotonic);
-            if (vrouter_get_status(counter.handle, &status) == OK) {
+            if (vnet_get_status(counter.handle, &status) == OK) {
                 counter.running_at_stop.store(status.running == 1, .release);
             }
         },
@@ -387,9 +387,9 @@ fn countEvent(ctx: ?*anyopaque, event: c_int, _: ?[*:0]const u8) callconv(.c) vo
 }
 
 test "C ABI version and invalid config" {
-    try std.testing.expect(vrouter_version()[0] != 0);
-    try std.testing.expect(vrouter_create(null) == null);
-    try std.testing.expect(vrouter_create("not json") == null);
+    try std.testing.expect(vnet_version()[0] != 0);
+    try std.testing.expect(vnet_create(null) == null);
+    try std.testing.expect(vnet_create("not json") == null);
 }
 
 test "C ABI starts and stops an injected L3 fd" {
@@ -397,31 +397,31 @@ test "C ABI starts and stops an injected L3 fd" {
         \\{"version":1,"instance":"ffi-test","log":{"level":"err"},
         \\ "ports":{"vpn":{"kind":"l3","device":"vpn0"}}}
     ;
-    const handle = vrouter_create(config.ptr) orelse return error.TestUnexpectedResult;
-    defer vrouter_destroy(handle);
+    const handle = vnet_create(config.ptr) orelse return error.TestUnexpectedResult;
+    defer vnet_destroy(handle);
 
     var status: Status = undefined;
-    try std.testing.expectEqual(OK, vrouter_get_status(handle, &status));
+    try std.testing.expectEqual(OK, vnet_get_status(handle, &status));
     try std.testing.expectEqual(@as(u32, 0), status.running);
     try std.testing.expectEqual(ABI_VERSION, status.abi_version);
 
     var fds: [2]i32 = undefined;
     try sys.check(linux.socketpair(linux.AF.UNIX, linux.SOCK.STREAM, 0, &fds));
     defer sys.close(fds[1]);
-    try std.testing.expectEqual(OK, vrouter_set_port_fd(handle, "vpn", fds[0]));
-    try std.testing.expectEqual(ERR_NOT_FOUND, vrouter_set_port_fd(handle, "missing", fds[0]));
+    try std.testing.expectEqual(OK, vnet_set_port_fd(handle, "vpn", fds[0]));
+    try std.testing.expectEqual(ERR_NOT_FOUND, vnet_set_port_fd(handle, "missing", fds[0]));
 
     var events = EventCounter{ .handle = castHandle(handle).? };
-    try std.testing.expectEqual(OK, vrouter_set_event_cb(handle, countEvent, &events));
+    try std.testing.expectEqual(OK, vnet_set_event_cb(handle, countEvent, &events));
 
-    try std.testing.expectEqual(OK, vrouter_start(handle));
+    try std.testing.expectEqual(OK, vnet_start(handle));
     sys.close(fds[0]);
-    try std.testing.expectEqual(OK, vrouter_get_status(handle, &status));
+    try std.testing.expectEqual(OK, vnet_get_status(handle, &status));
     try std.testing.expectEqual(@as(u32, 1), status.running);
     try std.testing.expectEqual(@as(u32, 1), status.port_count);
 
-    try std.testing.expectEqual(OK, vrouter_stop(handle));
-    try std.testing.expectEqual(OK, vrouter_get_status(handle, &status));
+    try std.testing.expectEqual(OK, vnet_stop(handle));
+    try std.testing.expectEqual(OK, vnet_get_status(handle, &status));
     try std.testing.expectEqual(@as(u32, 0), status.running);
     try std.testing.expectEqual(@as(u32, 1), events.started.load(.monotonic));
     try std.testing.expectEqual(@as(u32, 1), events.stopped.load(.monotonic));

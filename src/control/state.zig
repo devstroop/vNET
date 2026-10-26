@@ -2,11 +2,12 @@
 //! loop owns the live tables; the control thread only sees this copy.
 
 const std = @import("std");
-const types = @import("../types.zig");
+const types = @import("vnet-core").types;
 
 pub const max_snat = 64;
 pub const max_port_forward = 128;
 pub const max_conntrack = 256;
+pub const max_dhcp_leases = 512;
 
 pub const Counters = struct {
     forwarded: u64 = 0,
@@ -47,7 +48,11 @@ pub const Counters = struct {
 pub const Snat = struct {
     out: []const u8 = "",
     addr: types.Ipv4 = .{},
+    src: ?types.Prefix4 = null,
+    explicit: bool = false,
 };
+
+pub const max_forward_description = 128;
 
 pub const PortForward = struct {
     proto: u8 = 0,
@@ -55,6 +60,9 @@ pub const PortForward = struct {
     to_addr: types.Ipv4 = .{},
     to_port: u16 = 0,
     ingress: []const u8 = "",
+    description: [max_forward_description]u8 = @splat(0),
+    description_len: usize = 0,
+    enabled: bool = true,
 };
 
 pub const Conntrack = struct {
@@ -77,6 +85,14 @@ pub const Conntrack = struct {
     timeout_ms: i64 = 0,
 };
 
+pub const DhcpLease = struct {
+    iface: []const u8 = "",
+    state: []const u8 = "",
+    ip: types.Ipv4 = .{},
+    mac: types.Mac = .{},
+    expires_ms: i64 = 0,
+};
+
 pub const Snapshot = struct {
     instance: []const u8 = "",
     state_dir: []const u8 = "",
@@ -92,6 +108,8 @@ pub const Snapshot = struct {
     conntrack: [max_conntrack]Conntrack = @splat(.{}),
     conntrack_len: usize = 0,
     conntrack_total: u32 = 0,
+    dhcp_leases: [max_dhcp_leases]DhcpLease = @splat(.{}),
+    dhcp_lease_len: usize = 0,
 
     pub fn snatSlice(self: *const Snapshot) []const Snat {
         return self.snat[0..self.snat_len];
@@ -103,6 +121,10 @@ pub const Snapshot = struct {
 
     pub fn conntrackSlice(self: *const Snapshot) []const Conntrack {
         return self.conntrack[0..self.conntrack_len];
+    }
+
+    pub fn dhcpLeaseSlice(self: *const Snapshot) []const DhcpLease {
+        return self.dhcp_leases[0..self.dhcp_lease_len];
     }
 };
 

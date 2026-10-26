@@ -6,7 +6,7 @@
 //! changing callers.
 
 const std = @import("std");
-const types = @import("../types.zig");
+const types = @import("vnet-core").types;
 
 pub const tcp_syn_ms: i64 = 10_000;
 pub const tcp_established_ms: i64 = 300_000;

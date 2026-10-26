@@ -6,27 +6,28 @@
 //! in from the control plane.
 
 const std = @import("std");
-const types = @import("../types.zig");
-const port_mod = @import("../port/port.zig");
-const schema = @import("../config/schema.zig");
-const ethernet = @import("../l2/ethernet.zig");
-const stp = @import("../l2/stp.zig");
-const ipv4 = @import("ipv4.zig");
-const ipv6 = @import("ipv6.zig");
-const icmpv6 = @import("icmpv6.zig");
-const ndp = @import("ndp.zig");
-const arp = @import("arp.zig");
-const icmp = @import("icmp.zig");
-const fib = @import("fib.zig");
-const fib6 = @import("fib6.zig");
-const conntrack_mod = @import("../nat/conntrack.zig");
-const nat_mod = @import("../nat/nat.zig");
-const dhcp_message = @import("../services/dhcp/message.zig");
-const dhcp_server = @import("../services/dhcp/server.zig");
-const memory_port = @import("../port/memory.zig");
-const rate = @import("rate.zig");
+const types = @import("vnet-core").types;
+const port_mod = @import("vnet-port").port;
+const schema = @import("vnet-core").config_schema;
+const ethernet = @import("vnet-l2").ethernet;
+const stp = @import("vnet-l2").stp;
+const ipv4 = @import("vnet-l3").ipv4;
+const ipv6 = @import("vnet-l3").ipv6;
+const icmpv6 = @import("vnet-l3").icmpv6;
+const ndp = @import("vnet-l3").ndp;
+const arp = @import("vnet-l3").arp;
+const icmp = @import("vnet-l3").icmp;
+const fib = @import("vnet-l3").fib;
+const fib6 = @import("vnet-l3").fib6;
+const conntrack_mod = @import("vnet-conntrack").conntrack;
+const nat_mod = @import("vnet-nat").nat;
+const dhcp_message = @import("vnet-dhcp").message;
+const dhcp_server = @import("vnet-dhcp").server;
+const memory_port = @import("vnet-port").memory;
+const config_parse = @import("vnet-core").config_parse;
+const rate = @import("vnet-l3").rate;
 
-const PortError = @import("../errors.zig").PortError;
+const PortError = @import("vnet-core").PortError;
 
 pub const conntrack_default_entries: u32 = 65_536;
 pub const conntrack_small_entries: u32 = 4_096;
@@ -446,6 +447,9 @@ pub const Forwarder = struct {
         self.arp_misses.deinit(self.gpa);
         self.ndp_misses.deinit(self.gpa);
         self.snat_rules.deinit(self.gpa);
+        for (self.forward_rules.items) |rule| {
+            if (rule.description.len != 0) self.gpa.free(rule.description);
+        }
         self.forward_rules.deinit(self.gpa);
         self.firewall_rules.deinit(self.gpa);
         for (self.dhcp_servers.items) |*server| server.deinit();
@@ -512,13 +516,17 @@ pub const Forwarder = struct {
     }
 
     pub fn addSnatRule(self: *Forwarder, port: types.PortId, addr: types.Ipv4) PortError!void {
-        for (self.snat_rules.items) |*rule| {
-            if (rule.port.eql(port)) {
-                rule.addr = addr;
+        return self.addSnatRuleFull(.{ .port = port, .addr = addr });
+    }
+
+    fn addSnatRuleFull(self: *Forwarder, rule: nat_mod.Rule) PortError!void {
+        for (self.snat_rules.items) |*existing| {
+            if (existing.port.eql(rule.port)) {
+                existing.* = rule;
                 return;
             }
         }
-        try self.snat_rules.append(self.gpa, .{ .port = port, .addr = addr });
+        try self.snat_rules.append(self.gpa, rule);
     }
 
     fn removeSnatRule(self: *Forwarder, port: types.PortId) void {
@@ -565,11 +573,16 @@ pub const Forwarder = struct {
         var new_snat: std.ArrayListUnmanaged(nat_mod.Rule) = .empty;
         errdefer new_snat.deinit(self.gpa);
         var new_forward: std.ArrayListUnmanaged(nat_mod.ForwardRule) = .empty;
-        errdefer new_forward.deinit(self.gpa);
+        errdefer {
+            for (new_forward.items) |rule| {
+                if (rule.description.len != 0) self.gpa.free(rule.description);
+            }
+            new_forward.deinit(self.gpa);
+        }
 
         for (nat.masquerade) |masquerade| {
             if (masquerade.out.len == 0) return error.InvalidArgument;
-            const rule = resolveMasquerade(cfg, self.local.items, self.ports, masquerade.out) orelse {
+            const rule = resolveMasquerade(cfg, self.local.items, self.ports, masquerade) orelse {
                 if (masqueradeDeferred(self, cfg, masquerade.out)) continue;
                 return error.InvalidArgument;
             };
@@ -586,6 +599,12 @@ pub const Forwarder = struct {
                 .icmp, .icmpv6 => return error.InvalidArgument,
             };
             if (forward.ext_port == 0) return error.InvalidArgument;
+            if (forward.description) |text| {
+                if (text.len > schema.max_port_forward_description) return error.InvalidArgument;
+                for (text) |c| {
+                    if (c < 0x20 or c == 0x7f) return error.InvalidArgument;
+                }
+            }
             const to = types.parseIpPort(forward.to) catch return error.InvalidArgument;
             if (to.ip.isUnspecified() or to.ip.isMulticast() or
                 to.ip.eql(types.Ipv4.limited_broadcast))
@@ -598,18 +617,26 @@ pub const Forwarder = struct {
                 break :blk entry.id;
             } else null;
             for (new_forward.items) |existing| {
-                if (existing.proto == proto and existing.ext_port == forward.ext_port and
+                if (existing.enabled and forward.enabled and
+                    existing.proto == proto and existing.ext_port == forward.ext_port and
                     optionalPortEqual(existing.ingress, ingress))
                 {
                     return error.InvalidArgument;
                 }
             }
+            const description = if (forward.description) |text|
+                if (text.len != 0) try self.gpa.dupe(u8, text) else ""
+            else
+                "";
+            errdefer if (description.len != 0) self.gpa.free(description);
             try new_forward.append(self.gpa, .{
                 .proto = proto,
                 .ext_port = forward.ext_port,
                 .to_addr = to.ip,
                 .to_port = to.port,
                 .ingress = ingress,
+                .description = description,
+                .enabled = forward.enabled,
             });
         }
 
@@ -618,6 +645,9 @@ pub const Forwarder = struct {
         self.snat_rules = new_snat;
         self.forward_rules = new_forward;
         old_snat.deinit(self.gpa);
+        for (old_forward.items) |rule| {
+            if (rule.description.len != 0) self.gpa.free(rule.description);
+        }
         old_forward.deinit(self.gpa);
 
         for (self.dhcp_clients.items) |*client| {
@@ -947,7 +977,7 @@ pub const Forwarder = struct {
         }
 
         for (cfg.nat.masquerade) |masquerade| {
-            const rule = resolveMasquerade(cfg, self.local.items, ports, masquerade.out) orelse {
+            const rule = resolveMasquerade(cfg, self.local.items, ports, masquerade) orelse {
                 // Defer SNAT rule installation until a DHCP client on this port
                 // obtains a lease.
                 const out_name = masquerade.out;
@@ -962,7 +992,7 @@ pub const Forwarder = struct {
                 }
                 return error.InvalidArgument;
             };
-            try self.addSnatRule(rule.port, rule.addr);
+            try self.addSnatRuleFull(rule);
         }
 
         for (cfg.nat.port_forward) |forward| {
@@ -972,11 +1002,30 @@ pub const Forwarder = struct {
                 .udp => 17,
                 .icmp, .icmpv6 => return error.InvalidArgument,
             };
+            if (forward.description) |text| {
+                if (text.len > schema.max_port_forward_description) return error.InvalidArgument;
+                for (text) |c| {
+                    if (c < 0x20 or c == 0x7f) return error.InvalidArgument;
+                }
+            }
             const ingress = if (forward.in_iface) |name| blk: {
                 const port_entry = findRoutePort(cfg, ports, name) orelse return error.NotFound;
                 break :blk port_entry.id;
             } else null;
-            try self.addForwardRuleOn(proto, forward.ext_port, to.ip, to.port, ingress);
+            const description = if (forward.description) |text|
+                if (text.len != 0) try self.gpa.dupe(u8, text) else ""
+            else
+                "";
+            errdefer if (description.len != 0) self.gpa.free(description);
+            try self.forward_rules.append(self.gpa, .{
+                .proto = proto,
+                .ext_port = forward.ext_port,
+                .to_addr = to.ip,
+                .to_port = to.port,
+                .ingress = ingress,
+                .description = description,
+                .enabled = forward.enabled,
+            });
         }
 
         for (cfg.dhcp) |dhcp| {
@@ -1059,7 +1108,7 @@ pub const Forwarder = struct {
     };
 
     /// Evaluates a synthetic packet against the compiled rule set. Intended for
-    /// `vrouter firewall test`; it never touches a real port.
+    /// `vnet firewall test`; it never touches a real port.
     pub fn probeFirewallConfig(
         gpa: std.mem.Allocator,
         io: std.Io,
@@ -2312,7 +2361,7 @@ pub const Forwarder = struct {
                     };
                     self.counters.snat_packets += 1;
                 }
-            } else if (self.snatAddrFor(route.port)) |nat_addr| {
+            } else if (self.snatAddrFor(route.port, ipm.src)) |nat_addr| {
                 if (ipm.src.eql(nat_addr)) {
                     const reply_key = makeReplyKey(
                         key,
@@ -2402,7 +2451,7 @@ pub const Forwarder = struct {
                 };
                 updateFlow(created, ipm, now, false);
             }
-        } else if (self.snatAddrFor(route.port) != null) {
+        } else if (self.snatAddrFor(route.port, ipm.src) != null) {
             self.counters.dropped += 1;
             self.counters.nat_unsupported += 1;
             return;
@@ -4095,9 +4144,13 @@ pub const Forwarder = struct {
         return self.localForPort(port, vlan);
     }
 
-    fn snatAddrFor(self: *const Forwarder, port: types.PortId) ?types.Ipv4 {
+    fn snatAddrFor(self: *const Forwarder, port: types.PortId, src: types.Ipv4) ?types.Ipv4 {
         for (self.snat_rules.items) |rule| {
-            if (rule.port.eql(port)) return rule.addr;
+            if (!rule.port.eql(port)) continue;
+            if (rule.src) |prefix| {
+                if (!prefix.contains(src)) continue;
+            }
+            return rule.addr;
         }
         return null;
     }
@@ -4108,6 +4161,7 @@ pub const Forwarder = struct {
         ingress: types.PortId,
     ) ?nat_mod.ForwardRule {
         for (self.forward_rules.items) |rule| {
+            if (!rule.enabled) continue;
             if (rule.proto != key.proto or rule.ext_port != key.dport) continue;
             if (rule.ingress) |required| {
                 if (!required.eql(ingress)) continue;
@@ -4734,18 +4788,26 @@ fn resolveMasquerade(
     cfg: *const schema.Config,
     locals: []const LocalAddr,
     ports: []const PortEntry,
-    out: []const u8,
+    masquerade: schema.MasqueradeConfig,
 ) ?nat_mod.Rule {
-    const port_id = masqueradeOutPort(cfg, ports, out) orelse return null;
-    if (cfg.interfaces.get(out)) |itf| {
+    const port_id = masqueradeOutPort(cfg, ports, masquerade.out) orelse return null;
+    const src = if (masquerade.src) |text|
+        types.Prefix4.parse(text) catch return null
+    else
+        null;
+    if (masquerade.addr) |text| {
+        const addr = types.Ipv4.parse(text) catch return null;
+        return .{ .port = port_id, .addr = addr, .src = src, .explicit = true };
+    }
+    if (cfg.interfaces.get(masquerade.out)) |itf| {
         const address = itf.address orelse return null;
         if (std.mem.eql(u8, address, "dhcp")) return null;
         const prefix = types.Prefix4.parse(address) catch return null;
-        return .{ .port = port_id, .addr = prefix.addr };
+        return .{ .port = port_id, .addr = prefix.addr, .src = src };
     }
 
     for (locals) |local| {
-        if (local.port.eql(port_id)) return .{ .port = port_id, .addr = local.prefix.addr };
+        if (local.port.eql(port_id)) return .{ .port = port_id, .addr = local.prefix.addr, .src = src };
     }
     return null;
 }
@@ -4807,7 +4869,6 @@ fn findRoutePort(cfg: *const schema.Config, ports: []const PortEntry, dev: []con
 }
 
 const testing = std.testing;
-const config_parse = @import("../config/parse.zig");
 
 const port_a: types.PortId = .{ .value = 1 };
 const port_b: types.PortId = .{ .value = 2 };
@@ -4869,12 +4930,12 @@ fn testNet(comptime s: []const u8) types.Prefix4 {
 }
 
 fn setup(
-    a: *@import("../port/memory.zig").MemoryPort,
-    b: *@import("../port/memory.zig").MemoryPort,
+    a: *memory_port.MemoryPort,
+    b: *memory_port.MemoryPort,
     entries: *[2]PortEntry,
     fwd: *Forwarder,
 ) !void {
-    const MemoryPort = @import("../port/memory.zig").MemoryPort;
+    const MemoryPort = memory_port.MemoryPort;
     a.* = MemoryPort.init(testing.allocator, port_a, "a", 1500);
     a.mac = port_a_mac;
     b.* = MemoryPort.init(testing.allocator, port_b, "b", 1500);
@@ -4947,12 +5008,12 @@ fn buildIpEcho(
 }
 
 fn setupTun(
-    t: *@import("../port/memory.zig").MemoryPort,
-    a: *@import("../port/memory.zig").MemoryPort,
+    t: *memory_port.MemoryPort,
+    a: *memory_port.MemoryPort,
     entries: *[2]PortEntry,
     fwd: *Forwarder,
 ) !void {
-    const MemoryPort = @import("../port/memory.zig").MemoryPort;
+    const MemoryPort = memory_port.MemoryPort;
     a.* = MemoryPort.init(testing.allocator, port_a, "a", 1500);
     a.mac = port_a_mac;
     t.* = MemoryPort.init(testing.allocator, port_tun, "tun0", 1500);
@@ -5029,7 +5090,7 @@ fn buildArpRequest(
 }
 
 test "firewall default policies drop and reject new flows" {
-    const MemoryPort = @import("../port/memory.zig").MemoryPort;
+    const MemoryPort = memory_port.MemoryPort;
     var a: MemoryPort = undefined;
     var b: MemoryPort = undefined;
     var entries: [2]PortEntry = undefined;
@@ -5067,7 +5128,7 @@ test "firewall default policies drop and reject new flows" {
 }
 
 test "forwarder routes ipv4 between connected ports" {
-    const MemoryPort = @import("../port/memory.zig").MemoryPort;
+    const MemoryPort = memory_port.MemoryPort;
     var a: MemoryPort = undefined;
     var b: MemoryPort = undefined;
     var entries: [2]PortEntry = undefined;
@@ -5112,7 +5173,7 @@ test "forwarder routes ipv4 between connected ports" {
 }
 
 test "forwarder answers arp for a local address" {
-    const MemoryPort = @import("../port/memory.zig").MemoryPort;
+    const MemoryPort = memory_port.MemoryPort;
     var a: MemoryPort = undefined;
     var b: MemoryPort = undefined;
     var entries: [2]PortEntry = undefined;
@@ -5142,7 +5203,7 @@ test "forwarder answers arp for a local address" {
 }
 
 test "forwarder replies to local echo requests" {
-    const MemoryPort = @import("../port/memory.zig").MemoryPort;
+    const MemoryPort = memory_port.MemoryPort;
     var a: MemoryPort = undefined;
     var b: MemoryPort = undefined;
     var entries: [2]PortEntry = undefined;
@@ -5176,7 +5237,7 @@ test "forwarder replies to local echo requests" {
 }
 
 test "forwarder emits ttl exceeded" {
-    const MemoryPort = @import("../port/memory.zig").MemoryPort;
+    const MemoryPort = memory_port.MemoryPort;
     var a: MemoryPort = undefined;
     var b: MemoryPort = undefined;
     var entries: [2]PortEntry = undefined;
@@ -5217,7 +5278,7 @@ test "forwarder emits ttl exceeded" {
 }
 
 test "forwarder emits unreachable and arp request on miss" {
-    const MemoryPort = @import("../port/memory.zig").MemoryPort;
+    const MemoryPort = memory_port.MemoryPort;
     var a: MemoryPort = undefined;
     var b: MemoryPort = undefined;
     var entries: [2]PortEntry = undefined;
@@ -5271,7 +5332,7 @@ test "forwarder emits unreachable and arp request on miss" {
 }
 
 test "forwarder emits frag-needed above egress mtu" {
-    const MemoryPort = @import("../port/memory.zig").MemoryPort;
+    const MemoryPort = memory_port.MemoryPort;
     var a: MemoryPort = undefined;
     var b: MemoryPort = undefined;
     var entries: [2]PortEntry = undefined;
@@ -5306,7 +5367,7 @@ test "forwarder emits frag-needed above egress mtu" {
 }
 
 test "forwarder drops vlan tagged frames" {
-    const MemoryPort = @import("../port/memory.zig").MemoryPort;
+    const MemoryPort = memory_port.MemoryPort;
     var a: MemoryPort = undefined;
     var b: MemoryPort = undefined;
     var entries: [2]PortEntry = undefined;
@@ -5345,7 +5406,7 @@ test "forwarder drops vlan tagged frames" {
 }
 
 test "vlan-aware bridge tags and filters by port membership" {
-    const MemoryPort = @import("../port/memory.zig").MemoryPort;
+    const MemoryPort = memory_port.MemoryPort;
     var a = MemoryPort.init(testing.allocator, port_a, "a", 1500);
     defer a.deinit();
     a.mac = port_a_mac;
@@ -5406,7 +5467,7 @@ test "vlan-aware bridge tags and filters by port membership" {
 }
 
 test "vlan-aware SVI replies and ARP cache are per vlan" {
-    const MemoryPort = @import("../port/memory.zig").MemoryPort;
+    const MemoryPort = memory_port.MemoryPort;
     var a = MemoryPort.init(testing.allocator, port_a, "a", 1500);
     defer a.deinit();
     a.mac = port_a_mac;
@@ -5483,7 +5544,7 @@ test "vlan-aware SVI replies and ARP cache are per vlan" {
 }
 
 test "forwarder builds state from config" {
-    const MemoryPort = @import("../port/memory.zig").MemoryPort;
+    const MemoryPort = memory_port.MemoryPort;
     var a = MemoryPort.init(testing.allocator, port_a, "a", 1500);
     defer a.deinit();
     a.mac = port_a_mac;
@@ -5512,8 +5573,8 @@ test "forwarder builds state from config" {
         \\    { "dst": "0.0.0.0/0", "via": "10.0.1.254", "dev": "a", "metric": 100 }
         \\  ],
         \\  "nat": {
-        \\    "masquerade": [ { "out": "lan-b" } ],
-        \\    "port_forward": [ { "proto": "tcp", "ext_port": 8080, "to": "10.0.1.10:80" } ]
+        \\    "masquerade": [ { "out": "lan-b", "src": "10.0.2.0/24", "addr": "203.0.113.9" } ],
+        \\    "port_forward": [ { "proto": "tcp", "ext_port": 8080, "to": "10.0.1.10:80", "description": "web ui", "enabled": false } ]
         \\  }
         \\}
     ;
@@ -5533,16 +5594,20 @@ test "forwarder builds state from config" {
     try testing.expect(fwd.localForPeer(port_b, testIp("10.0.2.9"), 0) != null);
     try testing.expectEqual(@as(usize, 1), fwd.snat_rules.items.len);
     try testing.expect(fwd.snat_rules.items[0].port.eql(port_b));
-    try testing.expect(fwd.snat_rules.items[0].addr.eql(testIp("10.0.2.1")));
+    try testing.expect(fwd.snat_rules.items[0].addr.eql(testIp("203.0.113.9")));
+    try testing.expect(fwd.snat_rules.items[0].src.?.contains(testIp("10.0.2.9")));
+    try testing.expect(fwd.snat_rules.items[0].explicit);
     try testing.expectEqual(@as(usize, 1), fwd.forward_rules.items.len);
     try testing.expectEqual(@as(u8, 6), fwd.forward_rules.items[0].proto);
     try testing.expectEqual(@as(u16, 8080), fwd.forward_rules.items[0].ext_port);
     try testing.expect(fwd.forward_rules.items[0].to_addr.eql(testIp("10.0.1.10")));
     try testing.expectEqual(@as(u16, 80), fwd.forward_rules.items[0].to_port);
+    try testing.expectEqualStrings("web ui", fwd.forward_rules.items[0].description);
+    try testing.expect(!fwd.forward_rules.items[0].enabled);
 }
 
 test "applyNatConfig replaces NAT tables atomically" {
-    const MemoryPort = @import("../port/memory.zig").MemoryPort;
+    const MemoryPort = memory_port.MemoryPort;
     var a = MemoryPort.init(testing.allocator, port_a, "a", 1500);
     defer a.deinit();
     a.mac = port_a_mac;
@@ -5598,6 +5663,29 @@ test "applyNatConfig replaces NAT tables atomically" {
     try testing.expectEqual(@as(u8, 17), fwd.forward_rules.items[0].proto);
     try testing.expect(fwd.forward_rules.items[0].ingress.?.eql(port_a));
 
+    try fwd.applyNatConfig(&parsed.config, .{
+        .masquerade = &.{.{ .out = "lan-a" }},
+        .port_forward = &.{.{
+            .proto = .tcp,
+            .ext_port = 8443,
+            .to = "10.0.1.20:443",
+            .description = "web ui",
+            .enabled = false,
+        }},
+    });
+    try testing.expectEqualStrings("web ui", fwd.forward_rules.items[0].description);
+    try testing.expect(!fwd.forward_rules.items[0].enabled);
+
+    try testing.expectError(error.InvalidArgument, fwd.applyNatConfig(&parsed.config, .{
+        .port_forward = &.{.{
+            .proto = .tcp,
+            .ext_port = 8443,
+            .to = "10.0.1.20:443",
+            .description = "bad\x01name",
+        }},
+    }));
+    try testing.expectEqualStrings("web ui", fwd.forward_rules.items[0].description);
+
     try testing.expectError(error.InvalidArgument, fwd.applyNatConfig(&parsed.config, .{
         .masquerade = &.{ .{ .out = "lan-a" }, .{ .out = "lan-a" } },
     }));
@@ -5607,7 +5695,7 @@ test "applyNatConfig replaces NAT tables atomically" {
 }
 
 test "live NAT apply keeps DHCP client masquerade state in sync" {
-    const MemoryPort = @import("../port/memory.zig").MemoryPort;
+    const MemoryPort = memory_port.MemoryPort;
     var a = MemoryPort.init(testing.allocator, port_a, "a", 1500);
     defer a.deinit();
     a.mac = port_a_mac;
@@ -5664,8 +5752,8 @@ test "live NAT apply keeps DHCP client masquerade state in sync" {
 }
 
 test "kernel offload bridge maps its veth trunk as one synthetic member" {
-    const MemoryPort = @import("../port/memory.zig").MemoryPort;
-    var trunk = MemoryPort.init(testing.allocator, port_a, "vrouterp0", 1500);
+    const MemoryPort = memory_port.MemoryPort;
+    var trunk = MemoryPort.init(testing.allocator, port_a, "vnetp0", 1500);
     defer trunk.deinit();
     trunk.mac = port_a_mac;
 
@@ -5711,7 +5799,7 @@ test "kernel offload bridge maps its veth trunk as one synthetic member" {
 }
 
 test "firewall rules are ordered and match interfaces and addresses" {
-    const MemoryPort = @import("../port/memory.zig").MemoryPort;
+    const MemoryPort = memory_port.MemoryPort;
     var a = MemoryPort.init(testing.allocator, port_a, "a", 1500);
     defer a.deinit();
     a.mac = port_a_mac;
@@ -5937,7 +6025,7 @@ test "firewall probe matches IPv6 families and protocols" {
 }
 
 test "icmp error rate limit drops excess replies" {
-    const MemoryPort = @import("../port/memory.zig").MemoryPort;
+    const MemoryPort = memory_port.MemoryPort;
     var a: MemoryPort = undefined;
     var b: MemoryPort = undefined;
     var entries: [2]PortEntry = undefined;
@@ -5972,7 +6060,7 @@ test "icmp error rate limit drops excess replies" {
 }
 
 test "arp rate limit drops excess requests" {
-    const MemoryPort = @import("../port/memory.zig").MemoryPort;
+    const MemoryPort = memory_port.MemoryPort;
     var a: MemoryPort = undefined;
     var b: MemoryPort = undefined;
     var entries: [2]PortEntry = undefined;
@@ -5998,7 +6086,7 @@ test "arp rate limit drops excess requests" {
 }
 
 test "rp_filter drops sources not reachable from the ingress port" {
-    const MemoryPort = @import("../port/memory.zig").MemoryPort;
+    const MemoryPort = memory_port.MemoryPort;
     var a = MemoryPort.init(testing.allocator, port_a, "a", 1500);
     defer a.deinit();
     a.mac = port_a_mac;
@@ -6063,7 +6151,7 @@ test "rp_filter drops sources not reachable from the ingress port" {
 }
 
 test "bridge storm control drops excess flooded frames" {
-    const MemoryPort = @import("../port/memory.zig").MemoryPort;
+    const MemoryPort = memory_port.MemoryPort;
     var a = MemoryPort.init(testing.allocator, port_a, "a", 1500);
     defer a.deinit();
     a.mac = port_a_mac;
@@ -6107,7 +6195,7 @@ test "bridge storm control drops excess flooded frames" {
 }
 
 test "STP blocks an alternate port and forwards converged root ports" {
-    const MemoryPort = @import("../port/memory.zig").MemoryPort;
+    const MemoryPort = memory_port.MemoryPort;
     const port_c: types.PortId = .{ .value = 4 };
     var a = MemoryPort.init(testing.allocator, port_a, "a", 1500);
     defer a.deinit();
@@ -6196,7 +6284,7 @@ test "STP blocks an alternate port and forwards converged root ports" {
 }
 
 test "bridge forwards frames and serves dhcp on any member" {
-    const MemoryPort = @import("../port/memory.zig").MemoryPort;
+    const MemoryPort = memory_port.MemoryPort;
     var a = MemoryPort.init(testing.allocator, port_a, "a", 1500);
     defer a.deinit();
     a.mac = port_a_mac;
@@ -6359,7 +6447,7 @@ test "forwarder repairs ipv6 transport checksums" {
 }
 
 test "forwarder announces local addresses with gratuitous arp" {
-    const MemoryPort = @import("../port/memory.zig").MemoryPort;
+    const MemoryPort = memory_port.MemoryPort;
     var a: MemoryPort = undefined;
     var b: MemoryPort = undefined;
     var entries: [2]PortEntry = undefined;
@@ -6388,7 +6476,7 @@ test "forwarder announces local addresses with gratuitous arp" {
 }
 
 test "tun ingress forwards to l2" {
-    const MemoryPort = @import("../port/memory.zig").MemoryPort;
+    const MemoryPort = memory_port.MemoryPort;
     var t: MemoryPort = undefined;
     var a: MemoryPort = undefined;
     var entries: [2]PortEntry = undefined;
@@ -6424,7 +6512,7 @@ test "tun ingress forwards to l2" {
 }
 
 test "tun ingress replies to local echo without ethernet" {
-    const MemoryPort = @import("../port/memory.zig").MemoryPort;
+    const MemoryPort = memory_port.MemoryPort;
     var t: MemoryPort = undefined;
     var a: MemoryPort = undefined;
     var entries: [2]PortEntry = undefined;
@@ -6449,7 +6537,7 @@ test "tun ingress replies to local echo without ethernet" {
 }
 
 test "tun ingress emits icmp error without ethernet" {
-    const MemoryPort = @import("../port/memory.zig").MemoryPort;
+    const MemoryPort = memory_port.MemoryPort;
     var t: MemoryPort = undefined;
     var a: MemoryPort = undefined;
     var entries: [2]PortEntry = undefined;
@@ -6473,7 +6561,7 @@ test "tun ingress emits icmp error without ethernet" {
 }
 
 test "l2 ingress forwards to tun without ethernet" {
-    const MemoryPort = @import("../port/memory.zig").MemoryPort;
+    const MemoryPort = memory_port.MemoryPort;
     var t: MemoryPort = undefined;
     var a: MemoryPort = undefined;
     var entries: [2]PortEntry = undefined;
@@ -6506,7 +6594,7 @@ test "l2 ingress forwards to tun without ethernet" {
 }
 
 test "forwarder queues packet until arp resolves" {
-    const MemoryPort = @import("../port/memory.zig").MemoryPort;
+    const MemoryPort = memory_port.MemoryPort;
     var a: MemoryPort = undefined;
     var b: MemoryPort = undefined;
     var entries: [2]PortEntry = undefined;
@@ -6568,8 +6656,8 @@ fn wrapIpFrame(buf: []u8, eth_dst: types.Mac, eth_src: types.Mac, ip_packet: []c
 }
 
 fn setup6(
-    a: *@import("../port/memory.zig").MemoryPort,
-    b: *@import("../port/memory.zig").MemoryPort,
+    a: *memory_port.MemoryPort,
+    b: *memory_port.MemoryPort,
     entries: *[2]PortEntry,
     fwd: *Forwarder,
 ) !void {
@@ -6637,7 +6725,7 @@ fn buildNdFrame(
 }
 
 test "ipv6 forwards through ndp and repairs the hop limit" {
-    const MemoryPort = @import("../port/memory.zig").MemoryPort;
+    const MemoryPort = memory_port.MemoryPort;
     var a: MemoryPort = undefined;
     var b: MemoryPort = undefined;
     var entries: [2]PortEntry = undefined;
@@ -6679,7 +6767,7 @@ test "ipv6 forwards through ndp and repairs the hop limit" {
 }
 
 test "ipv6 queues while ndp resolves and flushes on advertisement" {
-    const MemoryPort = @import("../port/memory.zig").MemoryPort;
+    const MemoryPort = memory_port.MemoryPort;
     var a: MemoryPort = undefined;
     var b: MemoryPort = undefined;
     var entries: [2]PortEntry = undefined;
@@ -6734,7 +6822,7 @@ test "ipv6 queues while ndp resolves and flushes on advertisement" {
 }
 
 test "ipv6 drops ndp below hop limit 255" {
-    const MemoryPort = @import("../port/memory.zig").MemoryPort;
+    const MemoryPort = memory_port.MemoryPort;
     var a: MemoryPort = undefined;
     var b: MemoryPort = undefined;
     var entries: [2]PortEntry = undefined;
@@ -6766,7 +6854,7 @@ test "ipv6 drops ndp below hop limit 255" {
 }
 
 test "ipv6 replies to a local echo request" {
-    const MemoryPort = @import("../port/memory.zig").MemoryPort;
+    const MemoryPort = memory_port.MemoryPort;
     var a: MemoryPort = undefined;
     var b: MemoryPort = undefined;
     var entries: [2]PortEntry = undefined;
@@ -6800,7 +6888,7 @@ test "ipv6 replies to a local echo request" {
 }
 
 test "ipv6 replies to a local echo on another interface" {
-    const MemoryPort = @import("../port/memory.zig").MemoryPort;
+    const MemoryPort = memory_port.MemoryPort;
     var a: MemoryPort = undefined;
     var b: MemoryPort = undefined;
     var entries: [2]PortEntry = undefined;
@@ -6834,7 +6922,7 @@ test "ipv6 replies to a local echo on another interface" {
 }
 
 test "ipv6 answers duplicate address detection" {
-    const MemoryPort = @import("../port/memory.zig").MemoryPort;
+    const MemoryPort = memory_port.MemoryPort;
     var a: MemoryPort = undefined;
     var b: MemoryPort = undefined;
     var entries: [2]PortEntry = undefined;
@@ -6877,7 +6965,7 @@ test "ipv6 answers duplicate address detection" {
 }
 
 test "ipv6 does not forward link-local traffic across links" {
-    const MemoryPort = @import("../port/memory.zig").MemoryPort;
+    const MemoryPort = memory_port.MemoryPort;
     var a: MemoryPort = undefined;
     var b: MemoryPort = undefined;
     var entries: [2]PortEntry = undefined;
@@ -6921,7 +7009,7 @@ test "ipv6 does not forward link-local traffic across links" {
 }
 
 test "ipv6 answers echo on a link-local address" {
-    const MemoryPort = @import("../port/memory.zig").MemoryPort;
+    const MemoryPort = memory_port.MemoryPort;
     var a: MemoryPort = undefined;
     var b: MemoryPort = undefined;
     var entries: [2]PortEntry = undefined;
@@ -6955,7 +7043,7 @@ test "ipv6 answers echo on a link-local address" {
 }
 
 test "ipv6 emits time exceeded when the hop limit expires" {
-    const MemoryPort = @import("../port/memory.zig").MemoryPort;
+    const MemoryPort = memory_port.MemoryPort;
     var a: MemoryPort = undefined;
     var b: MemoryPort = undefined;
     var entries: [2]PortEntry = undefined;
@@ -6996,7 +7084,7 @@ test "ipv6 emits time exceeded when the hop limit expires" {
 }
 
 test "ipv6 emits packet too big for an oversized egress" {
-    const MemoryPort = @import("../port/memory.zig").MemoryPort;
+    const MemoryPort = memory_port.MemoryPort;
     var a: MemoryPort = undefined;
     var b: MemoryPort = undefined;
     var entries: [2]PortEntry = undefined;
@@ -7043,7 +7131,7 @@ test "ipv6 emits packet too big for an oversized egress" {
 }
 
 test "ipv6 drops local non-icmpv6 traffic" {
-    const MemoryPort = @import("../port/memory.zig").MemoryPort;
+    const MemoryPort = memory_port.MemoryPort;
     var a: MemoryPort = undefined;
     var b: MemoryPort = undefined;
     var entries: [2]PortEntry = undefined;
@@ -7075,7 +7163,7 @@ test "ipv6 drops local non-icmpv6 traffic" {
 }
 
 test "ipv6 forwards from a tun port to an l2 port" {
-    const MemoryPort = @import("../port/memory.zig").MemoryPort;
+    const MemoryPort = memory_port.MemoryPort;
     var a: MemoryPort = undefined;
     var b: MemoryPort = undefined;
     var entries: [2]PortEntry = undefined;
@@ -7115,7 +7203,7 @@ test "ipv6 forwards from a tun port to an l2 port" {
 }
 
 test "ipv6 forwards from an l2 port to a tun port" {
-    const MemoryPort = @import("../port/memory.zig").MemoryPort;
+    const MemoryPort = memory_port.MemoryPort;
     var a: MemoryPort = undefined;
     var b: MemoryPort = undefined;
     var entries: [2]PortEntry = undefined;
@@ -7150,7 +7238,7 @@ test "ipv6 forwards from an l2 port to a tun port" {
 }
 
 test "ipv6 drops multicast and forwarded unspecified sources" {
-    const MemoryPort = @import("../port/memory.zig").MemoryPort;
+    const MemoryPort = memory_port.MemoryPort;
     var a: MemoryPort = undefined;
     var b: MemoryPort = undefined;
     var entries: [2]PortEntry = undefined;
@@ -7191,7 +7279,7 @@ test "ipv6 drops multicast and forwarded unspecified sources" {
 }
 
 test "ipv6 default forward drop is enforced" {
-    const MemoryPort = @import("../port/memory.zig").MemoryPort;
+    const MemoryPort = memory_port.MemoryPort;
     var a: MemoryPort = undefined;
     var b: MemoryPort = undefined;
     var entries: [2]PortEntry = undefined;
@@ -7397,7 +7485,7 @@ fn buildTcpFrame(
 }
 
 test "snat translates udp and restores the reply" {
-    const MemoryPort = @import("../port/memory.zig").MemoryPort;
+    const MemoryPort = memory_port.MemoryPort;
     var a: MemoryPort = undefined;
     var b: MemoryPort = undefined;
     var entries: [2]PortEntry = undefined;
@@ -7475,7 +7563,7 @@ test "snat translates udp and restores the reply" {
 }
 
 test "snat allocates distinct ports for colliding sources" {
-    const MemoryPort = @import("../port/memory.zig").MemoryPort;
+    const MemoryPort = memory_port.MemoryPort;
     var a: MemoryPort = undefined;
     var b: MemoryPort = undefined;
     var entries: [2]PortEntry = undefined;
@@ -7522,7 +7610,7 @@ test "snat allocates distinct ports for colliding sources" {
 }
 
 test "snat translates icmp echo identifiers and reverses replies" {
-    const MemoryPort = @import("../port/memory.zig").MemoryPort;
+    const MemoryPort = memory_port.MemoryPort;
     var a: MemoryPort = undefined;
     var b: MemoryPort = undefined;
     var entries: [2]PortEntry = undefined;
@@ -7597,7 +7685,7 @@ test "snat translates icmp echo identifiers and reverses replies" {
 }
 
 test "snat tracks tcp state and rewrites ports" {
-    const MemoryPort = @import("../port/memory.zig").MemoryPort;
+    const MemoryPort = memory_port.MemoryPort;
     var a: MemoryPort = undefined;
     var b: MemoryPort = undefined;
     var entries: [2]PortEntry = undefined;
@@ -7677,7 +7765,7 @@ test "snat tracks tcp state and rewrites ports" {
 }
 
 test "dnat forwards to an internal target and restores the reply" {
-    const MemoryPort = @import("../port/memory.zig").MemoryPort;
+    const MemoryPort = memory_port.MemoryPort;
     var a: MemoryPort = undefined;
     var b: MemoryPort = undefined;
     var entries: [2]PortEntry = undefined;
@@ -7763,7 +7851,7 @@ test "dnat forwards to an internal target and restores the reply" {
 }
 
 test "hairpin dnat snats back out the ingress port" {
-    const MemoryPort = @import("../port/memory.zig").MemoryPort;
+    const MemoryPort = memory_port.MemoryPort;
     var a: MemoryPort = undefined;
     var b: MemoryPort = undefined;
     var entries: [2]PortEntry = undefined;
@@ -7839,7 +7927,7 @@ test "hairpin dnat snats back out the ingress port" {
 }
 
 test "dnat translates udp port forwards" {
-    const MemoryPort = @import("../port/memory.zig").MemoryPort;
+    const MemoryPort = memory_port.MemoryPort;
     var a: MemoryPort = undefined;
     var b: MemoryPort = undefined;
     var entries: [2]PortEntry = undefined;
@@ -7910,7 +7998,7 @@ test "dnat translates udp port forwards" {
 }
 
 test "snat translates icmp errors quoting the translated flow" {
-    const MemoryPort = @import("../port/memory.zig").MemoryPort;
+    const MemoryPort = memory_port.MemoryPort;
     var a: MemoryPort = undefined;
     var b: MemoryPort = undefined;
     var entries: [2]PortEntry = undefined;
@@ -7998,7 +8086,7 @@ test "snat translates icmp errors quoting the translated flow" {
 }
 
 test "dnat translates icmp errors quoting the translated flow" {
-    const MemoryPort = @import("../port/memory.zig").MemoryPort;
+    const MemoryPort = memory_port.MemoryPort;
     var a: MemoryPort = undefined;
     var b: MemoryPort = undefined;
     var entries: [2]PortEntry = undefined;
@@ -8076,7 +8164,7 @@ test "dnat translates icmp errors quoting the translated flow" {
 }
 
 test "dhcp server offers and acks a lease" {
-    const MemoryPort = @import("../port/memory.zig").MemoryPort;
+    const MemoryPort = memory_port.MemoryPort;
     var a: MemoryPort = undefined;
     var b: MemoryPort = undefined;
     var entries: [2]PortEntry = undefined;
@@ -8153,7 +8241,7 @@ test "dhcp server offers and acks a lease" {
 }
 
 test "dhcp probes a candidate before offering and declines conflicts" {
-    const MemoryPort = @import("../port/memory.zig").MemoryPort;
+    const MemoryPort = memory_port.MemoryPort;
     var a: MemoryPort = undefined;
     var b: MemoryPort = undefined;
     var entries: [2]PortEntry = undefined;
@@ -8207,7 +8295,7 @@ test "dhcp probes a candidate before offering and declines conflicts" {
 }
 
 test "dhcp client validates xid and server id and schedules renewal" {
-    const MemoryPort = @import("../port/memory.zig").MemoryPort;
+    const MemoryPort = memory_port.MemoryPort;
     var a: MemoryPort = undefined;
     var b: MemoryPort = undefined;
     var entries: [2]PortEntry = undefined;
@@ -8316,7 +8404,7 @@ test "dhcp client validates xid and server id and schedules renewal" {
 }
 
 test "forwarder tracks non-nat flows without rewriting" {
-    const MemoryPort = @import("../port/memory.zig").MemoryPort;
+    const MemoryPort = memory_port.MemoryPort;
     var a: MemoryPort = undefined;
     var b: MemoryPort = undefined;
     var entries: [2]PortEntry = undefined;
@@ -8380,7 +8468,7 @@ test "forwarder tracks non-nat flows without rewriting" {
 }
 
 test "snat drops fragments instead of leaking private sources" {
-    const MemoryPort = @import("../port/memory.zig").MemoryPort;
+    const MemoryPort = memory_port.MemoryPort;
     var a: MemoryPort = undefined;
     var b: MemoryPort = undefined;
     var entries: [2]PortEntry = undefined;

@@ -1,21 +1,21 @@
 #!/usr/bin/env bash
-# IPv6 forwarding test: two isolated hosts talk through vrouterd across two L2
+# IPv6 forwarding test: two isolated hosts talk through vnetd across two L2
 # ports. Exercises NDP, hop-limit decrement, ICMPv6 echo and TCP checksum repair.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-if [ "${VROUTER_IPV6_NETNS:-0}" != "1" ]; then
+if [ "${VNET_IPV6_NETNS:-0}" != "1" ]; then
     ZIG="${ZIG:-zig}"
     command -v "$ZIG" >/dev/null 2>&1 || {
         echo "FAIL: zig not found (set ZIG=/path/to/zig)" >&2
         exit 1
     }
     if [ "${EUID}" -eq 0 ]; then
-        exec unshare -n env VROUTER_IPV6_NETNS=1 "ZIG=$(command -v "$ZIG")" bash "$0" "$@"
+        exec unshare -n env VNET_IPV6_NETNS=1 "ZIG=$(command -v "$ZIG")" bash "$0" "$@"
     fi
-    exec unshare -rn env VROUTER_IPV6_NETNS=1 "ZIG=$(command -v "$ZIG")" bash "$0" "$@"
+    exec unshare -rn env VNET_IPV6_NETNS=1 "ZIG=$(command -v "$ZIG")" bash "$0" "$@"
 fi
 
 ZIG="${ZIG:-zig}"
@@ -25,10 +25,10 @@ command -v "$ZIG" >/dev/null 2>&1 || {
 }
 
 WORK="$(mktemp -d)"
-export VROUTER_RUN_DIR="$WORK/run"
+export VNET_RUN_DIR="$WORK/run"
 BIN="$ROOT/zig-out/bin"
-CFG="$WORK/vrouter-ipv6.json"
-LOG="$WORK/vrouterd.log"
+CFG="$WORK/vnet-ipv6.json"
+LOG="$WORK/vnetd.log"
 HTTP_LOG="$WORK/http.log"
 
 vpid=""
@@ -82,8 +82,8 @@ cat > "$CFG" <<'EOF'
 }
 EOF
 
-"$BIN/vrouter" validate "$CFG" >/dev/null || die "config validation failed"
-probe="$("$BIN/vrouter" firewall test --proto icmpv6 \
+"$BIN/vnet" validate "$CFG" >/dev/null || die "config validation failed"
+probe="$("$BIN/vnet" firewall test --proto icmpv6 \
     --src 2001:db8:1::2 --dst 2001:db8:2::2 -c "$CFG")" || die "firewall probe failed"
 printf '%s\n' "$probe" | grep -q "rule 1: accept" || die "unexpected firewall probe: $probe"
 ok "IPv6 config validates and firewall probe matches icmpv6"
@@ -124,23 +124,23 @@ for i in $(seq 1 250); do
 done
 [ -f "$WORK/a.ready" ] || die "host A did not configure"
 [ -f "$WORK/b.ready" ] || die "host B did not configure"
-ok "hosts 2001:db8:1::2/64 and 2001:db8:2::2/64 via vrouterd"
+ok "hosts 2001:db8:1::2/64 and 2001:db8:2::2/64 via vnetd"
 
-log "vrouterd"
-"$BIN/vrouterd" -c "$CFG" >"$LOG" 2>&1 &
+log "vnetd"
+"$BIN/vnetd" -c "$CFG" >"$LOG" 2>&1 &
 vpid=$!
 
 for i in $(seq 1 100); do
     grep -q "started instance" "$LOG" && break
     if ! kill -0 "$vpid" 2>/dev/null; then
         cat "$LOG"
-        die "vrouterd exited"
+        die "vnetd exited"
     fi
     sleep 0.02
 done
 grep -q "started instance" "$LOG" || {
     cat "$LOG"
-    die "vrouterd did not start"
+    die "vnetd did not start"
 }
 
 log "icmpv6"
@@ -208,7 +208,7 @@ done
 }
 ok "tcp6 2001:db8:1::2 -> [2001:db8:2::2]:8080 (http 200)"
 
-kill -0 "$vpid" 2>/dev/null || die "vrouterd exited during test"
+kill -0 "$vpid" 2>/dev/null || die "vnetd exited during test"
 kill -TERM "$vpid"
 for i in $(seq 1 100); do
     kill -0 "$vpid" 2>/dev/null || break
@@ -231,6 +231,6 @@ grep -Eq "icmpv6=[0-9]+/[1-9][0-9]*" "$LOG" || {
     die "missing ICMPv6 echo counters"
 }
 
-echo "--- vrouterd ---"
+echo "--- vnetd ---"
 cat "$LOG"
 ok "test_ipv6"

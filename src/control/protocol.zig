@@ -4,10 +4,13 @@
 const std = @import("std");
 const state = @import("state.zig");
 
-pub const version = 2;
+pub const version: u32 = 3;
+pub const v2_version: u32 = 2;
 
 pub const NatMasquerade = struct {
     out: []const u8 = "",
+    src: ?[]const u8 = null,
+    addr: ?[]const u8 = null,
 };
 
 pub const NatForward = struct {
@@ -15,6 +18,8 @@ pub const NatForward = struct {
     ext_port: u16 = 0,
     to: []const u8 = "",
     ingress: ?[]const u8 = null,
+    description: ?[]const u8 = null,
+    enabled: bool = true,
 };
 
 pub const NatApply = struct {
@@ -23,12 +28,56 @@ pub const NatApply = struct {
     port_forward: []const NatForward = &.{},
 };
 
+pub const DnsQuery = struct {
+    name: []const u8 = "",
+    qtype: []const u8 = "A",
+};
+
+pub const DnsAnswer = struct {
+    owner: []const u8 = "",
+    qtype: []const u8 = "",
+    value: []const u8 = "",
+    ttl: u32 = 0,
+};
+
+pub const DnsQueryResult = struct {
+    server: []const u8 = "",
+    name: []const u8 = "",
+    qtype: []const u8 = "",
+    rcode: u8 = 0,
+    rcode_text: []const u8 = "NOERROR",
+    truncated: bool = false,
+    answers: []const DnsAnswer = &.{},
+};
+
+pub const LinkSet = struct {
+    dev: []const u8 = "",
+    up: bool = false,
+};
+
+pub const LinkState = struct {
+    dev: []const u8 = "",
+    up: bool = false,
+    change: []const u8 = "noop",
+};
+
 pub const Request = struct {
+    version: ?u32 = null,
     id: ?u64 = null,
     op: []const u8,
+    instance: ?[]const u8 = null,
+    revision: ?[]const u8 = null,
+    confirm: ?[]const u8 = null,
+    restart_token: ?[]const u8 = null,
+    idempotency_key: ?[]const u8 = null,
     state: ?[]const u8 = null,
     limit: ?u32 = null,
     nat: ?NatApply = null,
+    config: ?std.json.Value = null,
+    target_revision: ?[]const u8 = null,
+    dns_query: ?DnsQuery = null,
+    link: ?LinkSet = null,
+    dhcp_lease: ?DhcpLeaseAction = null,
 };
 
 pub const Status = struct {
@@ -42,11 +91,18 @@ pub const Status = struct {
     control_path: []const u8 = "",
     ports: u32 = 0,
     counters: state.Counters = .{},
+    protocol_version: ?u32 = null,
+    config_revision: ?[]const u8 = null,
+    restart_pending: ?bool = null,
+    config_writable: ?bool = null,
+    restart_supported: ?bool = null,
 };
 
 pub const Snat = struct {
     out: []const u8 = "",
     addr: []const u8 = "",
+    src: ?[]const u8 = null,
+    explicit: bool = false,
 };
 
 pub const PortForward = struct {
@@ -55,6 +111,8 @@ pub const PortForward = struct {
     to_addr: []const u8 = "",
     to_port: u16 = 0,
     ingress: ?[]const u8 = null,
+    description: ?[]const u8 = null,
+    enabled: bool = true,
 };
 
 pub const Nat = struct {
@@ -90,18 +148,225 @@ pub const Conntrack = struct {
     entries: []const ConntrackEntry = &.{},
 };
 
+pub const NetworkLink = struct {
+    name: []const u8 = "",
+    index: u32 = 0,
+    mtu: u16 = 0,
+    mac: []const u8 = "",
+    up: bool = false,
+    running: bool = false,
+    operstate: u8 = 0,
+    master: u32 = 0,
+};
+
+pub const NetworkAddr = struct {
+    dev: []const u8 = "",
+    family: []const u8 = "",
+    address: []const u8 = "",
+    prefix_len: u8 = 0,
+    scope: u8 = 0,
+};
+
+pub const NetworkNeighbor = struct {
+    dev: []const u8 = "",
+    family: []const u8 = "",
+    address: []const u8 = "",
+    mac: []const u8 = "",
+    state: []const u8 = "",
+};
+
+pub const Network = struct {
+    captured_ms: i64 = 0,
+    links: []const NetworkLink = &.{},
+    addresses: []const NetworkAddr = &.{},
+    neighbors: []const NetworkNeighbor = &.{},
+};
+
+pub const DhcpLease = struct {
+    iface: []const u8 = "",
+    state: []const u8 = "",
+    ip: []const u8 = "",
+    mac: []const u8 = "",
+    expires_ms: i64 = 0,
+};
+
+pub const DhcpLeases = struct {
+    instance: []const u8 = "",
+    total: u32 = 0,
+    returned: u32 = 0,
+    leases: []const DhcpLease = &.{},
+};
+
+pub const DhcpLeaseAction = struct {
+    iface: []const u8 = "",
+    ip: []const u8 = "",
+};
+
+pub const DhcpLeaseChange = struct {
+    iface: []const u8 = "",
+    ip: []const u8 = "",
+    state: []const u8 = "free",
+    revoked: bool = true,
+};
+
+pub const FirewallCounters = struct {
+    instance: []const u8 = "",
+    updated_ms: i64 = 0,
+    rules: []const u64 = &.{},
+    firewall_dropped: u64 = 0,
+    firewall_spoofed: u64 = 0,
+    icmp_rate_limited: u64 = 0,
+    arp_rate_limited: u64 = 0,
+    dhcp_rate_limited: u64 = 0,
+    ndp_rate_limited: u64 = 0,
+};
+
+pub const LogTail = struct {
+    path: []const u8 = "",
+    text: []const u8 = "",
+    lines: u32 = 0,
+    truncated: bool = false,
+};
+
+pub const AuditEntry = struct {
+    ts_ms: i64 = 0,
+    transaction: []const u8 = "",
+    audit_id: []const u8 = "",
+    kind: ?[]const u8 = null,
+    op: []const u8 = "",
+    instance: []const u8 = "",
+    revision_before: ?[]const u8 = null,
+    revision_after: ?[]const u8 = null,
+    actor_uid: ?u32 = null,
+    actor_pid: ?i32 = null,
+    affected: ?[]const []const u8 = null,
+    restart_required: ?bool = null,
+    result: []const u8 = "",
+    recovered: ?bool = null,
+};
+
+pub const Audit = struct {
+    instance: []const u8 = "",
+    path: []const u8 = "",
+    total: u32 = 0,
+    returned: u32 = 0,
+    malformed: u32 = 0,
+    truncated: bool = false,
+    entries: []const AuditEntry = &.{},
+};
+
+pub const JournalEntry = struct {
+    line: u64 = 0,
+    valid: bool = true,
+    raw: []const u8 = "",
+    op: []const u8 = "",
+    dev: ?[]const u8 = null,
+    cidr: ?[]const u8 = null,
+    up: ?bool = null,
+    dst: ?[]const u8 = null,
+    via: ?[]const u8 = null,
+    metric: ?u32 = null,
+    table: ?u32 = null,
+    kind: ?[]const u8 = null,
+    peer: ?[]const u8 = null,
+    stp: ?bool = null,
+    vlan_filtering: ?bool = null,
+    master: ?[]const u8 = null,
+    vid: ?u16 = null,
+    pvid: ?bool = null,
+    untagged: ?bool = null,
+};
+
+pub const Journal = struct {
+    instance: []const u8 = "",
+    path: []const u8 = "",
+    entries: u32 = 0,
+    valid: u32 = 0,
+    malformed: u32 = 0,
+    malformed_tail: bool = false,
+    returned: u32 = 0,
+    truncated: bool = false,
+    lines: []const JournalEntry = &.{},
+};
+
 pub const Response = struct {
     ok: bool = false,
     id: ?u64 = null,
     op: ?[]const u8 = null,
     error_code: ?[]const u8 = null,
     message: ?[]const u8 = null,
+    version: ?u32 = null,
+    protocol_version: ?u32 = null,
     status: ?Status = null,
     nat: ?Nat = null,
     conntrack: ?Conntrack = null,
+    audit: ?Audit = null,
+    journal: ?Journal = null,
+    network: ?Network = null,
+    leases: ?DhcpLeases = null,
+    firewall_counters: ?FirewallCounters = null,
+    logs: ?LogTail = null,
+    revision: ?[]const u8 = null,
+    source_path: ?[]const u8 = null,
+    writable: ?bool = null,
+    config: ?std.json.Value = null,
+    ports: ?std.json.Value = null,
+    bridges: ?std.json.Value = null,
+    interfaces: ?std.json.Value = null,
+    routes: ?std.json.Value = null,
+    dhcp: ?std.json.Value = null,
+    dns: ?std.json.Value = null,
+    firewall: ?std.json.Value = null,
+    transaction: ?[]const u8 = null,
+    result: ?[]const u8 = null,
+    affected: ?[]const []const u8 = null,
+    diff: ?[]const u8 = null,
+    warnings: ?[]const []const u8 = null,
+    confirm: ?[]const u8 = null,
+    restart_required: ?bool = null,
+    restart_supported: ?bool = null,
+    restart_token: ?[]const u8 = null,
+    dns_query: ?DnsQueryResult = null,
+    link: ?LinkState = null,
+    dhcp_lease: ?DhcpLeaseChange = null,
 };
 
 pub const ParseError = error{InvalidRequest};
+
+pub fn isV3Only(op: []const u8) bool {
+    return std.mem.eql(u8, op, "config.get") or
+        std.mem.eql(u8, op, "config.validate") or
+        std.mem.eql(u8, op, "config.diff") or
+        std.mem.eql(u8, op, "config.apply") or
+        std.mem.eql(u8, op, "config.rollback") or
+        std.mem.eql(u8, op, "ports.list") or
+        std.mem.eql(u8, op, "bridges.list") or
+        std.mem.eql(u8, op, "interfaces.list") or
+        std.mem.eql(u8, op, "routes.list") or
+        std.mem.eql(u8, op, "dhcp.list") or
+        std.mem.eql(u8, op, "dhcp.leases") or
+        std.mem.eql(u8, op, "dns.list") or
+        std.mem.eql(u8, op, "firewall.list") or
+        std.mem.eql(u8, op, "firewall.counters") or
+        std.mem.eql(u8, op, "journal.list") or
+        std.mem.eql(u8, op, "audit.list") or
+        std.mem.eql(u8, op, "network.status") or
+        std.mem.eql(u8, op, "logs.tail") or
+        std.mem.eql(u8, op, "doctor.status") or
+        std.mem.eql(u8, op, "daemon.stop") or
+        std.mem.eql(u8, op, "daemon.restart") or
+        std.mem.eql(u8, op, "dns.query") or
+        std.mem.eql(u8, op, "link.set") or
+        std.mem.eql(u8, op, "dhcp.lease.revoke");
+}
+
+pub fn isConfigSized(op: []const u8) bool {
+    return std.mem.eql(u8, op, "config.get") or
+        std.mem.eql(u8, op, "config.validate") or
+        std.mem.eql(u8, op, "config.diff") or
+        std.mem.eql(u8, op, "config.apply") or
+        std.mem.eql(u8, op, "config.rollback");
+}
 
 pub fn parseRequest(gpa: std.mem.Allocator, line: []const u8) !std.json.Parsed(Request) {
     return std.json.parseFromSlice(Request, gpa, line, .{}) catch |err| switch (err) {
@@ -117,6 +382,50 @@ test "request parses and rejects malformed input" {
     try std.testing.expectEqualStrings("conntrack.list", parsed.value.op);
     try std.testing.expectEqual(@as(?u32, 10), parsed.value.limit);
     try std.testing.expectError(error.InvalidRequest, parseRequest(std.testing.allocator, "{"));
+}
+
+test "v3 request parses version and config fields" {
+    var parsed = try parseRequest(
+        std.testing.allocator,
+        "{\"version\":3,\"id\":8,\"op\":\"config.get\",\"instance\":\"test\",\"revision\":\"sha256:abc\",\"confirm\":\"yes\",\"idempotency_key\":\"k1\"}",
+    );
+    defer parsed.deinit();
+    try std.testing.expectEqual(@as(?u32, 3), parsed.value.version);
+    try std.testing.expectEqualStrings("config.get", parsed.value.op);
+    try std.testing.expectEqualStrings("test", parsed.value.instance.?);
+    try std.testing.expectEqualStrings("sha256:abc", parsed.value.revision.?);
+    try std.testing.expectEqualStrings("yes", parsed.value.confirm.?);
+    try std.testing.expectEqualStrings("k1", parsed.value.idempotency_key.?);
+}
+
+test "restart request parses the one-time token" {
+    var parsed = try parseRequest(
+        std.testing.allocator,
+        "{\"version\":3,\"id\":9,\"op\":\"daemon.restart\",\"restart_token\":\"abc\"}",
+    );
+    defer parsed.deinit();
+    try std.testing.expectEqualStrings("daemon.restart", parsed.value.op);
+    try std.testing.expectEqualStrings("abc", parsed.value.restart_token.?);
+}
+
+test "dhcp lease action parses target and confirmation" {
+    var parsed = try parseRequest(
+        std.testing.allocator,
+        "{\"version\":3,\"id\":12,\"op\":\"dhcp.lease.revoke\",\"confirm\":\"10.0.1.100\",\"dhcp_lease\":{\"iface\":\"lan0\",\"ip\":\"10.0.1.100\"}}",
+    );
+    defer parsed.deinit();
+    try std.testing.expectEqualStrings("dhcp.lease.revoke", parsed.value.op);
+    try std.testing.expectEqualStrings("lan0", parsed.value.dhcp_lease.?.iface);
+    try std.testing.expectEqualStrings("10.0.1.100", parsed.value.dhcp_lease.?.ip);
+    try std.testing.expectEqualStrings("10.0.1.100", parsed.value.confirm.?);
+}
+
+test "v2 request serialization omits null optional fields" {
+    const request: Request = .{ .id = 1, .op = "status" };
+    var buf: [512]u8 = undefined;
+    var out: std.Io.Writer = .fixed(&buf);
+    try std.json.Stringify.value(request, .{ .emit_null_optional_fields = false }, &out);
+    try std.testing.expectEqualStrings("{\"id\":1,\"op\":\"status\"}", out.buffered());
 }
 
 test "response round-trips status counters" {
@@ -140,4 +449,30 @@ test "response round-trips status counters" {
     try std.testing.expect(parsed.value.ok);
     try std.testing.expectEqual(@as(u32, 42), parsed.value.status.?.pid);
     try std.testing.expectEqual(@as(u64, 9), parsed.value.status.?.counters.forwarded);
+}
+
+test "v3 response round-trips config fields" {
+    var config = try std.json.ObjectMap.init(std.testing.allocator, &.{}, &.{});
+    defer config.deinit(std.testing.allocator);
+    try config.put(std.testing.allocator, "instance", .{ .string = "test" });
+    const response: Response = .{
+        .ok = true,
+        .id = 4,
+        .op = "config.get",
+        .protocol_version = version,
+        .revision = "sha256:abc",
+        .source_path = "/etc/vnet/vnet.json",
+        .writable = true,
+        .config = .{ .object = config },
+    };
+
+    var buf: [2048]u8 = undefined;
+    var out: std.Io.Writer = .fixed(&buf);
+    try std.json.Stringify.value(response, .{ .emit_null_optional_fields = false }, &out);
+    var parsed = try std.json.parseFromSlice(Response, std.testing.allocator, out.buffered(), .{});
+    defer parsed.deinit();
+    try std.testing.expect(parsed.value.ok);
+    try std.testing.expectEqual(@as(?u32, version), parsed.value.protocol_version);
+    try std.testing.expectEqualStrings("sha256:abc", parsed.value.revision.?);
+    try std.testing.expectEqualStrings("test", parsed.value.config.?.object.get("instance").?.string);
 }

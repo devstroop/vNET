@@ -2,7 +2,7 @@
 //! IPv4 FIB so the mature v4 datapath is not disturbed by dual-stack changes.
 
 const std = @import("std");
-const types = @import("../types.zig");
+const types = @import("vnet-core").types;
 
 pub const Kind = enum {
     connected,

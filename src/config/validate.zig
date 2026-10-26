@@ -10,7 +10,7 @@ const ConfigError = @import("../errors.zig").ConfigError;
 
 pub const Options = struct {
     /// Hosts that inject L3 descriptors (Android VpnService) may configure an
-    /// existing L3 port without asking vRouter to create a TUN device.
+    /// existing L3 port without asking vNET to create a TUN device.
     allow_existing_l3: bool = false,
 };
 
@@ -128,7 +128,7 @@ fn validatePorts(cfg: *const schema.Config, options: Options) ConfigError!void {
         const port = entry.value_ptr.*;
         if (port.device.len == 0 or port.device.len >= 16) return error.InvalidValue;
         if (port.kind == .l3 and port.create == null and !options.allow_existing_l3) {
-            // Existing L3 devices have no fd vRouter can adopt; only TUN can be
+            // Existing L3 devices have no fd vNET can adopt; only TUN can be
             // created and owned by the daemon.
             return error.InvalidValue;
         }
@@ -174,7 +174,7 @@ fn validateBridges(cfg: *const schema.Config) ConfigError!void {
 
             if (bridge.offload != .none) {
                 // A kernel bridge member must already exist and is not opened
-                // by the port manager, so vRouter cannot apply these settings.
+                // by the port manager, so vNET cannot apply these settings.
                 if (port.create != null) return error.InvalidValue;
                 if (port.mtu != null) return error.InvalidValue;
                 if (bridge.vlan_aware) {
@@ -294,15 +294,33 @@ fn validateNat(cfg: *const schema.Config) ConfigError!void {
         if (cfg.ports.contains(m.out) and portInAnyBridge(cfg, m.out)) {
             return error.InvalidValue;
         }
-        if (cfg.interfaces.getPtr(m.out)) |itf| {
+        if (m.src) |src| {
+            const prefix = types.Prefix4.parse(src) catch return error.InvalidValue;
+            if (prefix.addr.isUnspecified() or prefix.addr.isMulticast()) return error.InvalidValue;
+        }
+        if (m.addr) |addr| {
+            const parsed = types.Ipv4.parse(addr) catch return error.InvalidValue;
+            if (parsed.isUnspecified() or parsed.isMulticast() or
+                parsed.eql(types.Ipv4.limited_broadcast))
+            {
+                return error.InvalidValue;
+            }
+        } else if (cfg.interfaces.getPtr(m.out)) |itf| {
             if (itf.address == null) return error.InvalidValue;
         }
     }
 
     for (cfg.nat.port_forward, 0..) |f, i| {
         if (f.proto != .tcp and f.proto != .udp) return error.InvalidValue;
+        if (f.description) |description| {
+            if (description.len > schema.max_port_forward_description) return error.InvalidValue;
+            for (description) |c| {
+                if (c < 0x20 or c == 0x7f) return error.InvalidValue;
+            }
+        }
         for (cfg.nat.port_forward[0..i]) |previous| {
-            if (previous.proto == f.proto and previous.ext_port == f.ext_port and
+            if (previous.enabled and f.enabled and previous.proto == f.proto and
+                previous.ext_port == f.ext_port and
                 optionalNameEqual(previous.in_iface, f.in_iface))
             {
                 return error.DuplicateName;
@@ -468,8 +486,8 @@ const example =
     \\    { "dst": "0.0.0.0/0", "via": "192.168.1.1", "dev": "wan0" }
     \\  ],
     \\  "nat": {
-    \\    "masquerade": [ { "out": "wan0" } ],
-    \\    "port_forward": [ { "proto": "tcp", "ext_port": 8080, "to": "10.10.0.10:80" } ]
+    \\    "masquerade": [ { "out": "wan0", "src": "10.10.0.0/24", "addr": "203.0.113.7" } ],
+    \\    "port_forward": [ { "proto": "tcp", "ext_port": 8080, "to": "10.10.0.10:80", "description": "web ui", "enabled": true } ]
     \\  },
     \\  "dhcp": [
     \\    { "iface": "lan0", "pool": "10.10.0.100-10.10.0.200" }
@@ -696,7 +714,7 @@ test "rejects dhcp reservation outside subnet" {
 
 test "accepts a lease database path" {
     const input =
-        \\{ "version": 1, "instance": "x", "lease_db": "/var/lib/vrouter/leases.json" }
+        \\{ "version": 1, "instance": "x", "lease_db": "/var/lib/vnet/leases.json" }
     ;
     var parsed = try @import("parse.zig").parse(std.testing.allocator, input);
     defer parsed.deinit();
@@ -962,4 +980,53 @@ test "rejects duplicate port forwards on the same ingress" {
     var parsed = try @import("parse.zig").parse(std.testing.allocator, input);
     defer parsed.deinit();
     try std.testing.expectError(error.DuplicateName, validate(&parsed.config));
+}
+
+test "rejects invalid NAT source and translated addresses" {
+    const bad_src =
+        \\{ "version": 1, "instance": "x",
+        \\  "ports": { "wan": { "kind": "l2", "device": "eth0" } },
+        \\  "interfaces": { "wan0": { "port": "wan", "address": "dhcp" } },
+        \\  "nat": { "masquerade": [ { "out": "wan0", "src": "10.0.0.0/33" } ] } }
+    ;
+    var parsed_src = try @import("parse.zig").parse(std.testing.allocator, bad_src);
+    defer parsed_src.deinit();
+    try std.testing.expectError(error.InvalidValue, validate(&parsed_src.config));
+
+    const bad_addr =
+        \\{ "version": 1, "instance": "x",
+        \\  "ports": { "wan": { "kind": "l2", "device": "eth0" } },
+        \\  "interfaces": { "wan0": { "port": "wan", "address": "dhcp" } },
+        \\  "nat": { "masquerade": [ { "out": "wan0", "addr": "224.0.0.1" } ] } }
+    ;
+    var parsed_addr = try @import("parse.zig").parse(std.testing.allocator, bad_addr);
+    defer parsed_addr.deinit();
+    try std.testing.expectError(error.InvalidValue, validate(&parsed_addr.config));
+}
+
+test "rejects invalid port-forward descriptions" {
+    const input =
+        \\{ "version": 1, "instance": "x",
+        \\  "nat": { "port_forward": [
+        \\    { "proto": "tcp", "ext_port": 8080, "to": "10.0.0.2:80", "description": "bad\u0001name" }
+        \\  ] } }
+    ;
+    var parsed = try @import("parse.zig").parse(std.testing.allocator, input);
+    defer parsed.deinit();
+    try std.testing.expectError(error.InvalidValue, validate(&parsed.config));
+}
+
+test "allows a disabled duplicate port forward" {
+    const input =
+        \\{ "version": 1, "instance": "x",
+        \\  "ports": { "lan": { "kind": "l2", "device": "eth1" } },
+        \\  "interfaces": { "lan0": { "port": "lan", "address": "10.0.0.1/24" } },
+        \\  "nat": { "port_forward": [
+        \\    { "proto": "tcp", "ext_port": 8080, "to": "10.0.0.2:80", "in": "lan0" },
+        \\    { "proto": "tcp", "ext_port": 8080, "to": "10.0.0.3:80", "in": "lan0", "enabled": false }
+        \\  ] } }
+    ;
+    var parsed = try @import("parse.zig").parse(std.testing.allocator, input);
+    defer parsed.deinit();
+    try validate(&parsed.config);
 }

@@ -1,10 +1,15 @@
-# vRouter
+# vNET
 
-A programmable virtual router implemented in Zig 0.16.x.
+A programmable virtual network implemented in Zig 0.16.x.
 
-vRouter attaches network interfaces, forwards Ethernet, IPv4 and IPv6 traffic,
+vNET attaches network interfaces, forwards Ethernet, IPv4 and IPv6 traffic,
 and provides NAT, DHCP, DNS, and journal-backed host configuration. It runs as a
 daemon with a command-line interface and exposes a C ABI for embedded hosts.
+
+> **Renamed:** vNET was previously vRouter, and before that vNAT. The
+> pre-1.0 rename changes binary, ABI and default path names; see
+> [ADR-017](docs/adr/017-project-rename-vnet.md) and
+> [ADR-012](docs/adr/012-project-rename.md).
 
 ## Capabilities
 
@@ -13,11 +18,13 @@ daemon with a command-line interface and exposes a C ABI for embedded hosts.
   TTL/hop-limit processing
 - Userspace IPv4 connection tracking and garbage collection
 - Source NAT, destination NAT, port forwarding, and hairpin handling
-- Live `vrouter nat add|del` updates with atomic config save and rollback
+- Live `vnet nat add|del` updates with atomic config save and rollback
 - DHCPv4 server and client with lease persistence (DHCPv6 in v1.1)
 - DNS forwarding with cache, TCP fallback, and split zones
 - Atomic, journaled route/address/link changes with rollback
 - Cross-compilation for Linux and Android targets
+- Compiler-checked `vnet-*` shard modules with per-shard tests
+  ([ADR-018](docs/adr/018-shard-build-graph.md))
 
 ## Requirements
 
@@ -60,29 +67,29 @@ zig build -Dtarget=arm-linux-androideabi
 Validate a configuration:
 
 ```sh
-./zig-out/bin/vrouter validate examples/minimal.json
+./zig-out/bin/vnet validate examples/minimal.json
 ```
 
 Start the daemon:
 
 ```sh
-./zig-out/bin/vrouterd -c examples/minimal.json
+./zig-out/bin/vnetd -c examples/minimal.json
 ```
 
 Common commands:
 
 ```sh
-vrouter status [-c <config>]
-vrouter port list
-vrouter iface set <dev> <cidr> [-c <config>]
-vrouter route add <dst> [via <ip>] dev <dev> [-c <config>]
-vrouter nat add|del masquerade --out <iface|port> [-c <config>]
-vrouter nat add|del port-forward --proto tcp|udp --ext-port <n> [--to <ip:port>] [--in <name>] [-c <config>]
-vrouter down [-c <config>]
-vrouter doctor [--repair] [-c <config>]
-vrouter journal [-c <config>]
-vrouter dhcp status [-c <config>]
-vrouter dns query <name> [-c <config>]
+vnet status [-c <config>]
+vnet port list
+vnet iface set <dev> <cidr> [-c <config>]
+vnet route add <dst> [via <ip>] dev <dev> [-c <config>]
+vnet nat add|del masquerade --out <iface|port> [-c <config>]
+vnet nat add|del port-forward --proto tcp|udp --ext-port <n> [--to <ip:port>] [--in <name>] [-c <config>]
+vnet down [-c <config>]
+vnet doctor [--repair] [-c <config>]
+vnet journal [-c <config>]
+vnet dhcp status [-c <config>]
+vnet dns query <name> [-c <config>]
 ```
 
 ## Configuration

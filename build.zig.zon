@@ -1,7 +1,7 @@
 .{
-    .name = .vrouter,
+    .name = .vnet,
     .version = "0.1.0",
-    .fingerprint = 0xe6c469e9c3cbfd27,
+    .fingerprint = 0x62bbecb1dc665715,
     .minimum_zig_version = "0.16.0",
     .dependencies = .{},
     .paths = .{

@@ -6,7 +6,7 @@
 
 const std = @import("std");
 const linux = std.os.linux;
-const PortError = @import("../../errors.zig").PortError;
+const PortError = @import("vnet-core").PortError;
 
 pub const fd_t = linux.fd_t;
 pub const IFNAMESIZE = 16;
@@ -87,7 +87,7 @@ pub fn ioctl(fd: fd_t, request: u32, arg: *anyopaque) PortError!void {
 
 test "name validation" {
     try validateName("eth0");
-    try validateName("vrouter-tun0");
+    try validateName("vnet-tun0");
     try std.testing.expectError(error.InvalidArgument, validateName(""));
     try std.testing.expectError(error.InvalidArgument, validateName("eth0/x"));
     try std.testing.expectError(error.InvalidArgument, validateName("eth 0"));

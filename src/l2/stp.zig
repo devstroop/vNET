@@ -2,7 +2,7 @@
 //! for basic root election and forwarding-state convergence are exposed.
 
 const std = @import("std");
-const types = @import("../types.zig");
+const types = @import("vnet-core").types;
 
 pub const multicast = types.Mac{ .bytes = .{ 0x01, 0x80, 0xc2, 0, 0, 0 } };
 pub const default_priority: u16 = 0x8000;

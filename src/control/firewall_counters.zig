@@ -1,4 +1,4 @@
-//! Runtime firewall counters exported by `vrouterd` for `vrouter firewall counters`.
+//! Runtime firewall counters exported by `vnetd` for `vnet firewall counters`.
 //! The daemon rewrites the file atomically every few seconds; a missing file
 //! simply means the daemon has not saved yet.
 

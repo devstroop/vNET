@@ -8,9 +8,9 @@ const std = @import("std");
 const linux = std.os.linux;
 const sys = @import("sys.zig");
 const iface = @import("iface.zig");
-const types = @import("../../types.zig");
+const types = @import("vnet-core").types;
 const port_mod = @import("../port.zig");
-const PortError = @import("../../errors.zig").PortError;
+const PortError = @import("vnet-core").PortError;
 
 const TUNSETIFF: u32 = 0x400454ca;
 const IFF_TUN: u16 = 0x0001;
