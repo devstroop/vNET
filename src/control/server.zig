@@ -1884,8 +1884,8 @@ pub const Server = struct {
             return;
         };
         self.restart_token.clear();
-        self.sendDaemonAccepted(stream, request, transaction_id[0..]);
         self.restart_requested.store(true, .release);
+        self.sendDaemonAccepted(stream, request, transaction_id[0..]);
     }
 
     fn handleDaemonStop(
@@ -1932,8 +1932,8 @@ pub const Server = struct {
             self.sendError(stream, request.id, request.op, "internal", @errorName(err));
             return;
         };
-        self.sendDaemonAccepted(stream, request, transaction_id[0..]);
         self.stop_requested.store(true, .release);
+        self.sendDaemonAccepted(stream, request, transaction_id[0..]);
     }
 
     fn sendDaemonAccepted(
