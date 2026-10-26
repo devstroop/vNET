@@ -1,6 +1,6 @@
 # vNET
 
-A programmable virtual router implemented in Zig 0.16.x.
+A programmable virtual network implemented in Zig 0.16.x.
 
 vNET attaches network interfaces, forwards Ethernet, IPv4 and IPv6 traffic,
 and provides NAT, DHCP, DNS, and journal-backed host configuration. It runs as a
