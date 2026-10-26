@@ -29,7 +29,11 @@
 vnet/
 ├── build.zig
 ├── build.zig.zon
+├── test.zig
+├── fuzz.zig
 ├── AGENTS.md
+├── CHANGELOG.md
+├── README.md
 ├── docs/
 │   ├── PRODUCT.md
 │   ├── CORE-SCOPE.md
@@ -38,6 +42,8 @@ vnet/
 │   ├── PLAN.md
 │   ├── RESEARCH.md
 │   ├── SOURCES.md
+│   ├── WEB.md
+│   ├── WEB-SCOPE.md
 │   └── adr/
 ├── src/
 │   ├── lib.zig                  public Zig API / shard composition
@@ -55,12 +61,15 @@ vnet/
 │   ├── io.zig                   std.Io wiring, timers, cancellation
 │   ├── log.zig                  leveled text/JSON logger
 │   ├── types.zig                PortId, Mac, IpAddr, Mtu, VlanId
+│   ├── errors.zig               typed error taxonomy
 │   ├── app/
-│   │   └── service.zig           shared daemon/FFI lifecycle
+│   │   └── service.zig          shared daemon/FFI lifecycle
 │   ├── config/
 │   │   ├── schema.zig           typed config model
 │   │   ├── parse.zig            strict JSON parser
-│   │   └── validate.zig         references, subnets, conflicts
+│   │   ├── validate.zig         references, subnets, conflicts
+│   │   ├── write.zig            canonical writer
+│   │   └── store.zig            revisioned on-disk config
 │   ├── port/
 │   │   ├── port.zig             Port vtable, PortInfo, Stats
 │   │   ├── manager.zig          config → ports, hotplug pump
@@ -73,65 +82,85 @@ vnet/
 │   │   │   ├── af_packet.zig    L2 port (TPACKET_V3 later)
 │   │   │   ├── tun.zig          TUN (IFF_NO_PI) and TAP
 │   │   │   └── netlink.zig      link dump + link/addr/neigh monitor
-│   │   └── android/             R7/R8: VpnService fd, raw, JNI
+│   │   └── android/             R7/R8 (planned)
 │   ├── l2/
 │   │   ├── ethernet.zig         Ethernet II + 802.1Q parse/build (R2)
-│   │   ├── bridge.zig           FDB, flooding, aging
-│   │   ├── vlan.zig             PVID/trunk/filtering
 │   │   └── stp.zig              optional 802.1D
 │   ├── l3/
 │   │   ├── ipv4.zig             header, checksum, TTL (R2)
 │   │   ├── ipv6.zig             header, extension parsing, checksums
 │   │   ├── fib.zig              IPv4 LPM (flat R2, trie R3)
 │   │   ├── fib6.zig             IPv6 LPM (parallel to fib.zig)
-│   │   ├── rib.zig              route sources + policy rules
 │   │   ├── arp.zig              cache + request/reply (R2)
 │   │   ├── ndp.zig              NS/NA + neighbor cache (RA v1.1)
 │   │   ├── icmp.zig             IPv4 errors + echo (R2)
 │   │   ├── icmpv6.zig           ICMPv6 errors + echo
-│   │   ├── forward.zig          IPv4/IPv6 forwarding, L2 + TUN ingress
-│   │   └── mtu.zig              MSS clamp, PMTU errors
+│   │   ├── rate.zig             ICMP/ARP error rate limiting
+│   │   └── forward.zig          composition engine: bridge, FW, services, L2/TUN
 │   ├── nat/
 │   │   ├── conntrack.zig        5-tuple table, timeouts, GC, port allocator (R3)
 │   │   └── nat.zig              SNAT/DNAT rewrite, RFC 1624 checksum adjust (R3)
 │   ├── services/
-│   │   ├── dhcp/message.zig     wire parser/builder
-│   │   ├── dhcp/server.zig      pool, reservations, options, DECLINE
-│   │   ├── dhcp/leases.zig      atomic JSON lease persistence
-│   │   └── dns/                 message, cache, UDP forwarder
-│   ├── firewall/
-│   │   ├── rules.zig            ordered rules, match/actions
-│   │   └── compile.zig          rule set → fast matcher
+│   │   ├── dhcp/
+│   │   │   ├── message.zig      wire parser/builder
+│   │   │   ├── server.zig       pool, reservations, options, DECLINE
+│   │   │   └── leases.zig       atomic JSON lease persistence
+│   │   └── dns/
+│   │       ├── message.zig      wire parser/builder
+│   │       ├── cache.zig        TTL cache
+│   │       ├── probe.zig        diagnostics client
+│   │       └── service.zig      UDP/TCP forwarder and split zones
 │   ├── control/
 │   │   ├── server.zig           unix socket, JSON lines (R7)
-│   │   ├── commands.zig         CLI verbs → core operations (R7)
+│   │   ├── client.zig           CLI/web client
+│   │   ├── protocol.zig         request/response schema
+│   │   ├── transport.zig        framing
+│   │   ├── unix.zig             socket helpers
 │   │   ├── journal.zig          JSONL forward ops, ownership, rollback (R2)
 │   │   ├── host.zig             iface/route mutations + journal (R2)
 │   │   ├── offload.zig          kernel bridge plan + veth trunk (R5, Linux)
-│   │   └── events.zig           event bus
-│   ├── web/                     POST-V1: HTTP, templates, auth (ADR-011)
-│   └── overlay/                 FUTURE: uplink overlay (ADR-004)
+│   │   ├── config_apply.zig     canonical diff and apply
+│   │   ├── transaction.zig      staged apply/rollback
+│   │   ├── state.zig            snapshot publication
+│   │   ├── read_model.zig       typed read views
+│   │   └── firewall_counters.zig
+│   └── web/
+│       ├── root.zig             module surface
+│       ├── server.zig           HTTP, auth, CSRF
+│       ├── pages.zig            server-rendered pages
+│       ├── operations.zig       control-socket operations
+│       ├── auth.zig             password/session handling
+│       ├── html.zig             template helpers
+│       └── assets/              embedded CSS, JS, HTMX 4
 ├── exec/
-│   ├── vnet/main.zig            CLI (`validate`, `port`, `status`, `iface`, `route`, `down`, `journal`, `selftest`)
-│   ├── vnetd/main.zig           daemon (config, netlink, IPv4 forwarding loop)
+│   ├── vnet/main.zig            CLI
+│   ├── vnetd/main.zig           daemon
 │   └── vnetweb/main.zig         POST-V1: unprivileged web admin (ADR-011)
 ├── include/vnet.h
 ├── test/
-│   ├── unit/
-│   ├── netns/                   Linux topologies
-│   ├── fuzz/
-│   └── interop/
+│   ├── examples.zig
+│   ├── fuzz.zig
+│   ├── golden.zig
+│   └── ffi_smoke.c
 └── scripts/
-    ├── build_android.sh
     ├── test_netns.sh
     ├── test_route.sh
+    ├── test_tun.sh
     ├── test_ipv6.sh
     ├── test_journal.sh
     ├── test_crash.sh
     ├── test_offload.sh
+    ├── test_dhcp.sh
+    ├── test_dns.sh
+    ├── test_firewall.sh
+    ├── test_vlan.sh
     ├── nat_matrix.sh
     └── perf.sh
 ```
+
+Planned phase-2 moves from ADR-018: `l2/bridge.zig`, `l2/vlan.zig`,
+`firewall/`, `l3/rib.zig`, `l3/mtu.zig`, `control/events.zig` and `overlay/`.
+The paths above describe the current tree; those files are not present yet.
 
 ### 2.1 Build graph
 
@@ -499,3 +528,4 @@ throughput or latency claim is made without that report and its host details.
 | [015](adr/015-control-protocol-v3.md) | Versioned control protocol and staged writes |
 | [016](adr/016-network-model-and-staged-config.md) | Network model and staged configuration |
 | [017](adr/017-project-rename-vnet.md) | Rename vRouter to vNET |
+| [018](adr/018-shard-build-graph.md) | Named shard build graph |

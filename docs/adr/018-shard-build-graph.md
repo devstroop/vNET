@@ -80,24 +80,13 @@ The following composition rules apply:
 ### Phase 1 graph
 
 ```
-                 ┌──────────────┐
-                 │  vnet-core   │
-                 └──────┬───────┘
-        ┌───────────────┼───────────────┬──────────────┐
-        ▼               ▼               ▼              ▼
-     vnet-port       vnet-l2         vnet-l3       vnet-dhcp
-                                        │
-                          ┌─────────────┴─────────────┐
-                          ▼                           ▼
-                    vnet-conntrack                vnet-nat
-                                                      │
-                                                      ▼
-                                                   vnet-fw
-
-     vnet-thread ──▶ vnet-dns ──▶ vnet-ctl
+vnet-core ──▶ vnet-port, vnet-l2, vnet-l3, vnet-conntrack, vnet-dhcp
+vnet-l3 + vnet-conntrack ──▶ vnet-nat
+vnet-l3 + vnet-conntrack ──▶ vnet-fw (reserved)
+vnet-thread ──▶ vnet-dns
+vnet-core + vnet-port + vnet-dns + vnet-thread ──▶ vnet-ctl
 ```
 
-`vnet-nat` also depends on conntrack. `vnet-ctl` additionally depends on port.
 The forwarding engine (`src/l3/forward.zig`), `src/app/service.zig` and
 `src/ffi.zig` remain in the composition layer until phase 2.
 
@@ -133,8 +122,8 @@ The forwarding engine (`src/l3/forward.zig`), `src/app/service.zig` and
 
 ## Alternatives
 
-- **Move every directory into `src/shards/` now.** Large path churn mixed with
-  API changes; review and bisection suffer.
+- **Move every implementation directory into per-shard trees now.** Large path
+  churn mixed with API changes; review and bisection suffer.
 - **Keep one module and rely on review.** Zero enforcement; cycles and service
   imports continue to creep in.
 - **Separate repositories now.** Versioning and atomic changes become harder

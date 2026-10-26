@@ -1,6 +1,6 @@
 # vNET
 
-A programmable virtual router implemented in Zig 0.16.x.
+A programmable virtual network implemented in Zig 0.16.x.
 
 vNET attaches network interfaces, forwards Ethernet, IPv4 and IPv6 traffic,
 and provides NAT, DHCP, DNS, and journal-backed host configuration. It runs as a
@@ -23,6 +23,8 @@ daemon with a command-line interface and exposes a C ABI for embedded hosts.
 - DNS forwarding with cache, TCP fallback, and split zones
 - Atomic, journaled route/address/link changes with rollback
 - Cross-compilation for Linux and Android targets
+- Compiler-checked `vnet-*` shard modules with per-shard tests
+  ([ADR-018](docs/adr/018-shard-build-graph.md))
 
 ## Requirements
 

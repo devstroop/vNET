@@ -246,7 +246,7 @@ Remaining R10 work is authorization scopes, Playwright coverage, generated
 deployment packaging and the remaining P2 follow-ups (live firewall
 apply/reorder and advanced settings).
 
-- [ ] `vnet-web`: unprivileged Unix-socket client, Zig HTTP server,
+- [ ] `vnetweb`: unprivileged Unix-socket client, Zig HTTP server,
       server-rendered HTMX 4.0.0 with embedded assets; no Node build step, no
       CDN, no runtime asset directory.
 - [ ] P0: `ConfigStore`, protocol v3 with request-versioned v2 responses,
@@ -366,3 +366,4 @@ v1 CLI/API behavior is unchanged.
 | 15 | Protocol v3 and crash-consistent config apply | Proposed — ADR-015 (R10) |
 | 16 | Network model and staged configuration | Accepted — ADR-016 (web preview) |
 | 17 | Rename vRouter to vNET | Accepted — ADR-017 |
+| 18 | Named shard build graph | Accepted — ADR-018 (phase 1) |

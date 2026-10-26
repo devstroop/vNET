@@ -25,7 +25,7 @@ A web admin must not weaken the existing contract:
 
 Add an **optional, post-v1 local web admin for Linux**:
 
-1. **Separate unprivileged adapter.** `vnet-web` is a standalone executable
+1. **Separate unprivileged adapter.** `vnetweb` is a standalone executable
    (planned `exec/vnetweb`, `src/web/`), not part of the core library or
    `vnetd`. It speaks the same line-delimited JSON Unix-socket API as the CLI.
    It never opens ports, writes journals, calls netlink or edits config files
