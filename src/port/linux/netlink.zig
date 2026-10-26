@@ -19,10 +19,12 @@ const RTM_GETLINK: u16 = 18;
 const RTM_SETLINK: u16 = 19;
 const RTM_NEWADDR: u16 = 20;
 const RTM_DELADDR: u16 = 21;
+const RTM_GETADDR: u16 = 22;
 const RTM_NEWROUTE: u16 = 24;
 const RTM_DELROUTE: u16 = 25;
 const RTM_NEWNEIGH: u16 = 28;
 const RTM_DELNEIGH: u16 = 29;
+const RTM_GETNEIGH: u16 = 30;
 const NLMSG_ERROR: u16 = 2;
 const NLMSG_DONE: u16 = 3;
 
@@ -131,6 +133,24 @@ pub const LinkInfo = struct {
     pub fn name(self: *const LinkInfo) []const u8 {
         return self.name_buf[0..self.name_len];
     }
+};
+
+pub const AddrInfo = struct {
+    index: u32,
+    family: u8,
+    prefix_len: u8,
+    scope: u8,
+    addr: [16]u8 = @splat(0),
+    addr_len: u8 = 0,
+};
+
+pub const NeighborInfo = struct {
+    index: u32,
+    family: u8,
+    state: u16,
+    addr: [16]u8 = @splat(0),
+    addr_len: u8 = 0,
+    mac: types.Mac = .{},
 };
 
 const LinkData = struct {
@@ -492,6 +512,200 @@ pub fn listLinks(io: std.Io, gpa: std.mem.Allocator) PortError![]LinkInfo {
     return links.toOwnedSlice(gpa);
 }
 
+fn parseAddrData(payload: []const u8) ?AddrInfo {
+    if (payload.len < 8) return null;
+    const family = payload[0];
+    if (family != AF_INET and family != AF_INET6) return null;
+    const index = readU32(payload, 4) orelse return null;
+    if (index == 0) return null;
+
+    var out = AddrInfo{
+        .index = index,
+        .family = family,
+        .prefix_len = payload[1],
+        .scope = payload[3],
+    };
+    var local: ?[16]u8 = null;
+    var off: usize = 8;
+    while (off + 4 <= payload.len) {
+        const attr = nextAttr(payload, &off) orelse break;
+        if (attr.typ != IFA_ADDRESS and attr.typ != IFA_LOCAL) continue;
+        const len: u8 = if (family == AF_INET) 4 else 16;
+        if (attr.data.len < len) continue;
+        var bytes: [16]u8 = @splat(0);
+        @memcpy(bytes[0..len], attr.data[0..len]);
+        out.addr = bytes;
+        out.addr_len = len;
+        if (attr.typ == IFA_LOCAL) {
+            local = bytes;
+            break;
+        }
+    }
+    if (local) |bytes| out.addr = bytes;
+    if (out.addr_len == 0) return null;
+    return out;
+}
+
+fn parseNeighData(payload: []const u8) ?NeighborInfo {
+    if (payload.len < 12) return null;
+    const family = payload[0];
+    if (family != AF_INET and family != AF_INET6) return null;
+    const index = readU32(payload, 4) orelse return null;
+    if (index == 0) return null;
+
+    var out = NeighborInfo{
+        .index = index,
+        .family = family,
+        .state = readU16(payload, 8) orelse 0,
+    };
+    var off: usize = 12;
+    while (off + 4 <= payload.len) {
+        const attr = nextAttr(payload, &off) orelse break;
+        switch (attr.typ) {
+            NDA_DST => {
+                const len: u8 = if (family == AF_INET) 4 else 16;
+                if (attr.data.len < len) continue;
+                var bytes: [16]u8 = @splat(0);
+                @memcpy(bytes[0..len], attr.data[0..len]);
+                out.addr = bytes;
+                out.addr_len = len;
+            },
+            NDA_LLADDR => {
+                if (attr.data.len >= 6) @memcpy(&out.mac.bytes, attr.data[0..6]);
+            },
+            else => {},
+        }
+    }
+    if (out.addr_len == 0) return null;
+    return out;
+}
+
+const GetAddrReq = extern struct {
+    hdr: NlMsgHdr,
+    ifa: IfAddrMsg,
+};
+
+const GetNeighReq = extern struct {
+    hdr: NlMsgHdr,
+    nd: NdMsg,
+};
+
+pub fn listAddrs(io: std.Io, gpa: std.mem.Allocator) PortError![]AddrInfo {
+    const fd = try sys.checkFd(linux.socket(
+        linux.AF.NETLINK,
+        @intCast(linux.SOCK.RAW | linux.SOCK.CLOEXEC),
+        NETLINK_ROUTE,
+    ));
+    defer sys.close(fd);
+
+    var addr: linux.sockaddr.nl = .{ .family = linux.AF.NETLINK, .pid = 0, .groups = 0 };
+    try sys.check(linux.bind(fd, @ptrCast(&addr), @sizeOf(@TypeOf(addr))));
+
+    const req = GetAddrReq{
+        .hdr = .{
+            .len = @sizeOf(GetAddrReq),
+            .type = RTM_GETADDR,
+            .flags = NLM_F_REQUEST | NLM_F_DUMP,
+            .seq = 2,
+            .pid = 0,
+        },
+        .ifa = .{ .family = linux.AF.UNSPEC, .prefix_len = 0, .flags = 0, .scope = 0, .index = 0 },
+    };
+    try sys.check(linux.sendto(fd, std.mem.asBytes(&req).ptr, @sizeOf(GetAddrReq), 0, null, 0));
+
+    var addrs: std.ArrayListUnmanaged(AddrInfo) = .empty;
+    errdefer addrs.deinit(gpa);
+    var buf: [8192]u8 = undefined;
+    var idle_ticks: u32 = 0;
+    dump: while (true) {
+        const n = (try sys.read(fd, &buf)) orelse {
+            if (idle_ticks >= 200) return error.Timeout;
+            idle_ticks += 1;
+            std.Io.sleep(io, std.Io.Duration.fromMilliseconds(5), .awake) catch return error.Interrupted;
+            continue;
+        };
+        idle_ticks = 0;
+        var off: usize = 0;
+        while (off + NLMSG_HDR_LEN <= n) {
+            const len = readU32(buf[0..n], off) orelse break;
+            const typ = readU16(buf[0..n], off + 4) orelse break;
+            if (len < NLMSG_HDR_LEN or off + len > n) break;
+            const msg = buf[off .. off + len];
+            off += std.mem.alignForward(usize, @as(usize, len), 4);
+            switch (typ) {
+                NLMSG_DONE => break :dump,
+                NLMSG_ERROR => {
+                    const error_code = readI32(msg, NLMSG_HDR_LEN) orelse return error.Io;
+                    if (error_code != 0) return error.Io;
+                },
+                RTM_NEWADDR => {
+                    if (parseAddrData(msg[NLMSG_HDR_LEN..len])) |info| try addrs.append(gpa, info);
+                },
+                else => {},
+            }
+        }
+    }
+    return addrs.toOwnedSlice(gpa);
+}
+
+pub fn listNeighbors(io: std.Io, gpa: std.mem.Allocator) PortError![]NeighborInfo {
+    const fd = try sys.checkFd(linux.socket(
+        linux.AF.NETLINK,
+        @intCast(linux.SOCK.RAW | linux.SOCK.CLOEXEC),
+        NETLINK_ROUTE,
+    ));
+    defer sys.close(fd);
+
+    var addr: linux.sockaddr.nl = .{ .family = linux.AF.NETLINK, .pid = 0, .groups = 0 };
+    try sys.check(linux.bind(fd, @ptrCast(&addr), @sizeOf(@TypeOf(addr))));
+
+    const req = GetNeighReq{
+        .hdr = .{
+            .len = @sizeOf(GetNeighReq),
+            .type = RTM_GETNEIGH,
+            .flags = NLM_F_REQUEST | NLM_F_DUMP,
+            .seq = 3,
+            .pid = 0,
+        },
+        .nd = .{ .family = linux.AF.UNSPEC, .pad1 = 0, .pad2 = 0, .ifindex = 0, .state = 0, .flags = 0, .type = 0 },
+    };
+    try sys.check(linux.sendto(fd, std.mem.asBytes(&req).ptr, @sizeOf(GetNeighReq), 0, null, 0));
+
+    var neighbors: std.ArrayListUnmanaged(NeighborInfo) = .empty;
+    errdefer neighbors.deinit(gpa);
+    var buf: [8192]u8 = undefined;
+    var idle_ticks: u32 = 0;
+    dump: while (true) {
+        const n = (try sys.read(fd, &buf)) orelse {
+            if (idle_ticks >= 200) return error.Timeout;
+            idle_ticks += 1;
+            std.Io.sleep(io, std.Io.Duration.fromMilliseconds(5), .awake) catch return error.Interrupted;
+            continue;
+        };
+        idle_ticks = 0;
+        var off: usize = 0;
+        while (off + NLMSG_HDR_LEN <= n) {
+            const len = readU32(buf[0..n], off) orelse break;
+            const typ = readU16(buf[0..n], off + 4) orelse break;
+            if (len < NLMSG_HDR_LEN or off + len > n) break;
+            const msg = buf[off .. off + len];
+            off += std.mem.alignForward(usize, @as(usize, len), 4);
+            switch (typ) {
+                NLMSG_DONE => break :dump,
+                NLMSG_ERROR => {
+                    const error_code = readI32(msg, NLMSG_HDR_LEN) orelse return error.Io;
+                    if (error_code != 0) return error.Io;
+                },
+                RTM_NEWNEIGH => {
+                    if (parseNeighData(msg[NLMSG_HDR_LEN..len])) |info| try neighbors.append(gpa, info);
+                },
+                else => {},
+            }
+        }
+    }
+    return neighbors.toOwnedSlice(gpa);
+}
+
 /// Returns the ifindex of the bridge master, or zero when the link is not
 /// enslaved. Used by the control plane to refuse stealing an existing port.
 pub fn linkMaster(io: std.Io, gpa: std.mem.Allocator, dev: []const u8) PortError!u32 {
@@ -511,6 +725,16 @@ const IfAddrMsg = extern struct {
     flags: u8,
     scope: u8,
     index: u32,
+};
+
+const NdMsg = extern struct {
+    family: u8,
+    pad1: u8,
+    pad2: u16,
+    ifindex: i32,
+    state: u16,
+    flags: u8,
+    type: u8,
 };
 
 const RtMsg = extern struct {
@@ -1398,6 +1622,45 @@ test "builds bridge vlan message" {
     const info = getAttr(afspec, IFLA_BRIDGE_VLAN_INFO).?;
     try std.testing.expectEqual(@as(u16, BRIDGE_VLAN_INFO_PVID | BRIDGE_VLAN_INFO_UNTAGGED), std.mem.readInt(u16, info[0..2], native_endian));
     try std.testing.expectEqual(@as(u16, 10), std.mem.readInt(u16, info[2..4], native_endian));
+}
+
+test "parses address dump payloads" {
+    var payload: [64]u8 = undefined;
+    var off: usize = 8;
+    payload[0] = AF_INET;
+    payload[1] = 24;
+    payload[2] = 0;
+    payload[3] = 0;
+    writeU32(&payload, 4, 7);
+    putAttr(&payload, &off, IFA_ADDRESS, &[_]u8{ 10, 0, 0, 5 });
+    putAttr(&payload, &off, IFA_LOCAL, &[_]u8{ 10, 0, 0, 6 });
+
+    const info = parseAddrData(payload[0..off]).?;
+    try std.testing.expectEqual(@as(u32, 7), info.index);
+    try std.testing.expectEqual(@as(u8, 24), info.prefix_len);
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 10, 0, 0, 6 }, info.addr[0..info.addr_len]);
+    try std.testing.expect(parseAddrData(payload[0..7]) == null);
+}
+
+test "parses neighbour dump payloads" {
+    var payload: [64]u8 = undefined;
+    var off: usize = 12;
+    payload[0] = AF_INET;
+    payload[1] = 0;
+    writeU16(&payload, 2, 0);
+    writeU32(&payload, 4, 9);
+    writeU16(&payload, 8, 0x02);
+    payload[10] = 0;
+    payload[11] = 0;
+    putAttr(&payload, &off, NDA_DST, &[_]u8{ 192, 168, 1, 10 });
+    putAttr(&payload, &off, NDA_LLADDR, &[_]u8{ 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff });
+
+    const info = parseNeighData(payload[0..off]).?;
+    try std.testing.expectEqual(@as(u32, 9), info.index);
+    try std.testing.expectEqual(@as(u16, 0x02), info.state);
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 192, 168, 1, 10 }, info.addr[0..info.addr_len]);
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff }, &info.mac.bytes);
+    try std.testing.expect(parseNeighData(payload[0..11]) == null);
 }
 
 test "netlink error mapping" {

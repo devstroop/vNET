@@ -185,6 +185,10 @@ fn fuzzDns(_: void, smith: *std.testing.Smith) anyerror!void {
 
     var out: [2048]u8 = undefined;
     _ = vrouter.dns_message.buildError(&out, bytes, 2) catch {};
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    _ = vrouter.dns_probe.parseResponse(arena.allocator(), bytes) catch return;
 }
 
 fn fuzzConfig(_: void, smith: *std.testing.Smith) anyerror!void {

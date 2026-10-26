@@ -7,10 +7,14 @@ const build_options = @import("build_options");
 const config_parse = @import("../config/parse.zig");
 const config_store = @import("../config/store.zig");
 const config_apply = @import("config_apply.zig");
+const control_host = @import("host.zig");
+const dns_probe = @import("../services/dns/probe.zig");
 const transaction = @import("transaction.zig");
 const journal = @import("journal.zig");
 const protocol = @import("protocol.zig");
 const read_model = @import("read_model.zig");
+const firewall_counters = @import("firewall_counters.zig");
+const netlink = @import("../port/linux/netlink.zig");
 const state = @import("state.zig");
 const types = @import("../types.zig");
 const transport = @import("transport.zig");
@@ -30,6 +34,9 @@ const audit_default_limit = 100;
 const journal_default_limit = 100;
 const audit_max_limit = 500;
 const journal_max_limit = 500;
+const dhcp_lease_default_limit = 256;
+const dhcp_lease_max_limit = 512;
+const log_tail_bytes = 48 * 1024;
 
 pub const Options = struct {
     mode: u32 = 0o660,
@@ -37,6 +44,8 @@ pub const Options = struct {
     kernel_backlog: u31 = 16,
     config_store: ?*config_store.Store = null,
     state_dir: []const u8 = "",
+    host: ?*control_host.Host = null,
+    allow_host_changes: bool = false,
     restart_pending: bool = false,
     restart_supported: bool = false,
 };
@@ -85,7 +94,20 @@ pub const Server = struct {
     apply_error_code_len: usize = 0,
     apply_error_message: [max_apply_error]u8 = undefined,
     apply_error_message_len: usize = 0,
+    dhcp_mutex: std.Io.Mutex = .init,
+    dhcp_pending: bool = false,
+    dhcp_claimed: bool = false,
+    dhcp_done: bool = false,
+    dhcp_ok: bool = false,
+    dhcp_line_len: usize = 0,
+    dhcp_line: [max_request_bytes]u8 = undefined,
+    dhcp_error_code: [max_apply_error]u8 = undefined,
+    dhcp_error_code_len: usize = 0,
+    dhcp_error_message: [max_apply_error]u8 = undefined,
+    dhcp_error_message_len: usize = 0,
     config_store: ?*config_store.Store = null,
+    host: ?*control_host.Host = null,
+    allow_host_changes: bool = false,
     state_dir: []u8,
     restart_pending: bool = false,
     restart_supported: bool = false,
@@ -165,6 +187,8 @@ pub const Server = struct {
             .config_jobs = config_jobs,
             .allowed_uid = options.allow_uid orelse linux.geteuid(),
             .config_store = options.config_store,
+            .host = options.host,
+            .allow_host_changes = options.allow_host_changes,
             .state_dir = state_dir,
             .restart_pending = options.restart_pending or persisted_restart,
             .restart_supported = options.restart_supported,
@@ -216,6 +240,35 @@ pub const Server = struct {
         self.apply_done = true;
     }
 
+    pub fn takeDhcpLeaseAction(self: *Server, out: []u8) ?[]const u8 {
+        self.dhcp_mutex.lockUncancelable(self.io);
+        defer self.dhcp_mutex.unlock(self.io);
+        if (!self.dhcp_pending or self.dhcp_claimed) return null;
+        if (out.len < self.dhcp_line_len) return null;
+        @memcpy(out[0..self.dhcp_line_len], self.dhcp_line[0..self.dhcp_line_len]);
+        self.dhcp_claimed = true;
+        return out[0..self.dhcp_line_len];
+    }
+
+    pub fn finishDhcpLeaseAction(
+        self: *Server,
+        ok: bool,
+        code: []const u8,
+        message: []const u8,
+    ) void {
+        self.dhcp_mutex.lockUncancelable(self.io);
+        defer self.dhcp_mutex.unlock(self.io);
+        self.dhcp_ok = ok;
+        self.dhcp_error_code_len = @min(code.len, self.dhcp_error_code.len);
+        @memcpy(self.dhcp_error_code[0..self.dhcp_error_code_len], code[0..self.dhcp_error_code_len]);
+        self.dhcp_error_message_len = @min(message.len, self.dhcp_error_message.len);
+        @memcpy(
+            self.dhcp_error_message[0..self.dhcp_error_message_len],
+            message[0..self.dhcp_error_message_len],
+        );
+        self.dhcp_done = true;
+    }
+
     pub fn deinit(self: *Server) void {
         self.stop.store(true, .release);
         self.config_mutex.lockUncancelable(self.io);
@@ -229,6 +282,14 @@ pub const Server = struct {
         @memcpy(self.apply_error_message[0..14], "server stopped");
         self.apply_done = true;
         self.apply_mutex.unlock(self.io);
+        self.dhcp_mutex.lockUncancelable(self.io);
+        self.dhcp_ok = false;
+        self.dhcp_error_code_len = 14;
+        @memcpy(self.dhcp_error_code[0..14], "server_stopped");
+        self.dhcp_error_message_len = 14;
+        @memcpy(self.dhcp_error_message[0..14], "server stopped");
+        self.dhcp_done = true;
+        self.dhcp_mutex.unlock(self.io);
         if (self.thread) |worker| {
             const stream: std.Io.net.Stream = .{ .socket = self.listener.socket };
             stream.shutdown(self.io, .both) catch {};
@@ -380,12 +441,40 @@ pub const Server = struct {
             self.handleDaemonStop(stream, parsed.value, credentials.uid, credentials.pid);
             return;
         }
+        if (std.mem.eql(u8, parsed.value.op, "dns.query")) {
+            self.handleDnsQuery(stream, parsed.value);
+            return;
+        }
+        if (std.mem.eql(u8, parsed.value.op, "dhcp.lease.revoke")) {
+            self.handleDhcpLeaseRevoke(stream, parsed.value, credentials.uid, credentials.pid);
+            return;
+        }
+        if (std.mem.eql(u8, parsed.value.op, "link.set")) {
+            self.handleLinkSet(stream, parsed.value, credentials.uid, credentials.pid);
+            return;
+        }
         if (std.mem.eql(u8, parsed.value.op, "audit.list")) {
             self.handleAuditList(stream, parsed.value);
             return;
         }
         if (std.mem.eql(u8, parsed.value.op, "journal.list")) {
             self.handleJournalList(stream, parsed.value);
+            return;
+        }
+        if (std.mem.eql(u8, parsed.value.op, "network.status")) {
+            self.handleNetworkStatus(stream, parsed.value);
+            return;
+        }
+        if (std.mem.eql(u8, parsed.value.op, "dhcp.leases")) {
+            self.handleDhcpLeases(stream, parsed.value);
+            return;
+        }
+        if (std.mem.eql(u8, parsed.value.op, "firewall.counters")) {
+            self.handleFirewallCounters(stream, parsed.value);
+            return;
+        }
+        if (std.mem.eql(u8, parsed.value.op, "logs.tail")) {
+            self.handleLogTail(stream, parsed.value);
             return;
         }
 
@@ -1056,6 +1145,395 @@ pub const Server = struct {
         return .{ .data = copy, .truncated = offset != 0 };
     }
 
+    fn handleNetworkStatus(self: *Server, stream: std.Io.net.Stream, request: protocol.Request) void {
+        var arena = std.heap.ArenaAllocator.init(self.gpa);
+        defer arena.deinit();
+        const allocator = arena.allocator();
+
+        const links = netlink.listLinks(self.io, self.gpa) catch |err| {
+            self.sendError(stream, request.id, request.op, "unsupported", @errorName(err));
+            return;
+        };
+        defer self.gpa.free(links);
+        const addresses = netlink.listAddrs(self.io, self.gpa) catch |err| {
+            self.sendError(stream, request.id, request.op, "unsupported", @errorName(err));
+            return;
+        };
+        defer self.gpa.free(addresses);
+        const neighbors = netlink.listNeighbors(self.io, self.gpa) catch |err| {
+            self.sendError(stream, request.id, request.op, "unsupported", @errorName(err));
+            return;
+        };
+        defer self.gpa.free(neighbors);
+
+        const link_rows = allocator.alloc(protocol.NetworkLink, links.len) catch return self.sendError(stream, request.id, request.op, "internal", "allocation failed");
+        for (links, 0..) |link, index| {
+            link_rows[index] = .{
+                .name = allocator.dupe(u8, link.name()) catch return self.sendError(stream, request.id, request.op, "internal", "allocation failed"),
+                .index = link.index,
+                .mtu = link.mtu,
+                .mac = std.fmt.allocPrint(allocator, "{f}", .{link.mac}) catch return self.sendError(stream, request.id, request.op, "internal", "allocation failed"),
+                .up = link.up,
+                .running = link.running,
+                .operstate = link.operstate,
+                .master = link.master,
+            };
+        }
+        const addr_rows = allocator.alloc(protocol.NetworkAddr, addresses.len) catch return self.sendError(stream, request.id, request.op, "internal", "allocation failed");
+        for (addresses, 0..) |addr, index| {
+            addr_rows[index] = .{
+                .dev = linkName(allocator, links, addr.index) catch return self.sendError(stream, request.id, request.op, "internal", "allocation failed"),
+                .family = if (addr.family == 2) "ipv4" else "ipv6",
+                .address = addrText(allocator, addr.family, addr.addr[0..addr.addr_len]) catch return self.sendError(stream, request.id, request.op, "internal", "allocation failed"),
+                .prefix_len = addr.prefix_len,
+                .scope = addr.scope,
+            };
+        }
+        const neigh_rows = allocator.alloc(protocol.NetworkNeighbor, neighbors.len) catch return self.sendError(stream, request.id, request.op, "internal", "allocation failed");
+        for (neighbors, 0..) |neigh, index| {
+            neigh_rows[index] = .{
+                .dev = linkName(allocator, links, neigh.index) catch return self.sendError(stream, request.id, request.op, "internal", "allocation failed"),
+                .family = if (neigh.family == 2) "ipv4" else "ipv6",
+                .address = addrText(allocator, neigh.family, neigh.addr[0..neigh.addr_len]) catch return self.sendError(stream, request.id, request.op, "internal", "allocation failed"),
+                .mac = std.fmt.allocPrint(allocator, "{f}", .{neigh.mac}) catch return self.sendError(stream, request.id, request.op, "internal", "allocation failed"),
+                .state = neighState(neigh.state),
+            };
+        }
+        const network = protocol.Network{
+            .captured_ms = std.Io.Clock.now(.real, self.io).toMilliseconds(),
+            .links = link_rows,
+            .addresses = addr_rows,
+            .neighbors = neigh_rows,
+        };
+        self.sendGeneric(stream, request, "network", network);
+    }
+
+    fn handleDhcpLeases(self: *Server, stream: std.Io.net.Stream, request: protocol.Request) void {
+        var arena = std.heap.ArenaAllocator.init(self.gpa);
+        defer arena.deinit();
+        const allocator = arena.allocator();
+        const limit = @min(request.limit orelse dhcp_lease_default_limit, dhcp_lease_max_limit);
+
+        const leases = allocator.alloc(protocol.DhcpLease, limit) catch return self.sendError(stream, request.id, request.op, "internal", "allocation failed");
+        var count: usize = 0;
+        var total: u32 = 0;
+        self.mutex.lockUncancelable(self.io);
+        total = @intCast(self.snapshot.dhcp_lease_len);
+        for (self.snapshot.dhcpLeaseSlice()) |lease| {
+            if (count >= limit) break;
+            leases[count] = .{
+                .iface = allocator.dupe(u8, lease.iface) catch "",
+                .state = allocator.dupe(u8, lease.state) catch "",
+                .ip = std.fmt.allocPrint(allocator, "{f}", .{lease.ip}) catch "",
+                .mac = std.fmt.allocPrint(allocator, "{f}", .{lease.mac}) catch "",
+                .expires_ms = lease.expires_ms,
+            };
+            count += 1;
+        }
+        const instance = allocator.dupe(u8, self.snapshot.instance) catch "";
+        self.mutex.unlock(self.io);
+
+        self.sendGeneric(stream, request, "leases", protocol.DhcpLeases{
+            .instance = instance,
+            .total = total,
+            .returned = @intCast(count),
+            .leases = leases[0..count],
+        });
+    }
+
+    fn handleFirewallCounters(self: *Server, stream: std.Io.net.Stream, request: protocol.Request) void {
+        var parsed = firewall_counters.load(self.io, self.gpa, self.state_dir, self.snapshot.instance) catch |err| {
+            self.sendError(stream, request.id, request.op, "internal", @errorName(err));
+            return;
+        };
+        defer if (parsed) |*value| value.deinit();
+        const wire = if (parsed) |*value| value.value else null;
+        self.sendGeneric(stream, request, "firewall_counters", protocol.FirewallCounters{
+            .instance = if (wire) |value| value.instance else self.snapshot.instance,
+            .updated_ms = if (wire) |value| value.updated_ms else 0,
+            .rules = if (wire) |value| value.rules else &.{},
+            .firewall_dropped = if (wire) |value| value.firewall_dropped else 0,
+            .firewall_spoofed = if (wire) |value| value.firewall_spoofed else 0,
+            .icmp_rate_limited = if (wire) |value| value.icmp_rate_limited else 0,
+            .arp_rate_limited = if (wire) |value| value.arp_rate_limited else 0,
+            .dhcp_rate_limited = if (wire) |value| value.dhcp_rate_limited else 0,
+            .ndp_rate_limited = if (wire) |value| value.ndp_rate_limited else 0,
+        });
+    }
+
+    fn handleLogTail(self: *Server, stream: std.Io.net.Stream, request: protocol.Request) void {
+        const path = std.fs.path.join(self.gpa, &.{ self.state_dir, "vrouterd.log" }) catch {
+            return self.sendError(stream, request.id, request.op, "internal", "allocation failed");
+        };
+        defer self.gpa.free(path);
+        const tail = self.readFileTail(path, log_tail_bytes) catch |err| {
+            self.sendError(stream, request.id, request.op, "internal", @errorName(err));
+            return;
+        };
+        defer if (tail) |value| self.gpa.free(value.data);
+        const data = if (tail) |value| value.data else "";
+        var lines: u32 = 0;
+        for (data) |byte| {
+            if (byte == '\n') lines += 1;
+        }
+        if (data.len != 0 and data[data.len - 1] != '\n') lines += 1;
+        self.sendGeneric(stream, request, "logs", protocol.LogTail{
+            .path = path,
+            .text = data,
+            .lines = lines,
+            .truncated = if (tail) |value| value.truncated else false,
+        });
+    }
+
+    fn handleDnsQuery(self: *Server, stream: std.Io.net.Stream, request: protocol.Request) void {
+        const store = self.config_store orelse {
+            self.sendError(stream, request.id, request.op, "unsupported", "config store is unavailable");
+            return;
+        };
+        const query = request.dns_query orelse {
+            self.sendError(stream, request.id, request.op, "invalid_request", "missing DNS query");
+            return;
+        };
+        if (query.name.len == 0 or query.name.len > 253) {
+            self.sendError(stream, request.id, request.op, "invalid_request", "DNS name must be 1-253 bytes");
+            return;
+        }
+
+        var config = store.snapshot() catch |err| {
+            self.sendError(stream, request.id, request.op, "internal", @errorName(err));
+            return;
+        };
+        defer config.deinit();
+        var parsed = config_parse.parse(self.gpa, config.bytes) catch |err| {
+            self.sendError(stream, request.id, request.op, "internal", @errorName(err));
+            return;
+        };
+        defer parsed.deinit();
+
+        const listen_text = parsed.config.dns.listen orelse "127.0.0.1";
+        const listen = types.Ipv4.parse(listen_text) catch {
+            self.sendError(stream, request.id, request.op, "invalid_request", "DNS listen address is not IPv4");
+            return;
+        };
+        var arena = std.heap.ArenaAllocator.init(self.gpa);
+        defer arena.deinit();
+        const result = dns_probe.query(
+            arena.allocator(),
+            self.io,
+            listen,
+            query.name,
+            query.qtype,
+            2_000,
+        ) catch |err| {
+            const code = switch (err) {
+                error.Timeout => "dns_timeout",
+                error.InvalidName, error.InvalidType, error.NameTooLong, error.QueryTooLarge => "invalid_request",
+                else => "dns_query_failed",
+            };
+            self.sendError(stream, request.id, request.op, code, @errorName(err));
+            return;
+        };
+        self.sendGeneric(stream, request, "dns_query", result);
+    }
+
+    fn handleDhcpLeaseRevoke(
+        self: *Server,
+        stream: std.Io.net.Stream,
+        request: protocol.Request,
+        uid: u32,
+        pid: i32,
+    ) void {
+        const action = request.dhcp_lease orelse {
+            self.sendError(stream, request.id, request.op, "invalid_request", "missing lease target");
+            return;
+        };
+        if (action.iface.len == 0 or action.iface.len > 15) {
+            self.sendError(stream, request.id, request.op, "invalid_request", "invalid lease interface");
+            return;
+        }
+        _ = types.Ipv4.parse(action.ip) catch {
+            self.sendError(stream, request.id, request.op, "invalid_request", "invalid lease address");
+            return;
+        };
+        if (request.confirm == null or !std.mem.eql(u8, request.confirm.?, action.ip)) {
+            self.sendError(stream, request.id, request.op, "confirm_required", "type the lease address to confirm");
+            return;
+        }
+
+        self.dhcp_mutex.lockUncancelable(self.io);
+        if (self.dhcp_pending and self.dhcp_done) {
+            self.dhcp_pending = false;
+            self.dhcp_claimed = false;
+        }
+        if (self.dhcp_pending) {
+            self.dhcp_mutex.unlock(self.io);
+            self.sendError(stream, request.id, request.op, "busy", "another lease update is pending");
+            return;
+        }
+        // The service loop owns the DHCP server and re-parses the original
+        // request so it can validate the instance-independent target again.
+        var out: std.Io.Writer.Allocating = .init(self.gpa);
+        defer out.deinit();
+        var json: std.json.Stringify = .{ .writer = &out.writer };
+        json.write(request) catch {
+            self.dhcp_mutex.unlock(self.io);
+            self.sendError(stream, request.id, request.op, "internal", "request serialization failed");
+            return;
+        };
+        if (out.written().len > self.dhcp_line.len) {
+            self.dhcp_mutex.unlock(self.io);
+            self.sendError(stream, request.id, request.op, "invalid_request", "request too large");
+            return;
+        }
+        @memcpy(self.dhcp_line[0..out.written().len], out.written());
+        self.dhcp_line_len = out.written().len;
+        self.dhcp_pending = true;
+        self.dhcp_claimed = false;
+        self.dhcp_done = false;
+        self.dhcp_ok = false;
+        self.dhcp_error_code_len = 0;
+        self.dhcp_error_message_len = 0;
+        self.dhcp_mutex.unlock(self.io);
+
+        var elapsed_ms: u64 = 0;
+        while (true) : (elapsed_ms += 1) {
+            self.dhcp_mutex.lockUncancelable(self.io);
+            if (self.dhcp_done) {
+                const ok = self.dhcp_ok;
+                var code_buf: [max_apply_error]u8 = undefined;
+                var message_buf: [max_apply_error]u8 = undefined;
+                const code_len = self.dhcp_error_code_len;
+                const message_len = self.dhcp_error_message_len;
+                @memcpy(code_buf[0..code_len], self.dhcp_error_code[0..code_len]);
+                @memcpy(message_buf[0..message_len], self.dhcp_error_message[0..message_len]);
+                self.dhcp_pending = false;
+                self.dhcp_claimed = false;
+                self.dhcp_mutex.unlock(self.io);
+                if (!ok) {
+                    self.sendError(
+                        stream,
+                        request.id,
+                        request.op,
+                        code_buf[0..code_len],
+                        message_buf[0..message_len],
+                    );
+                    return;
+                }
+                self.auditOperation(request, uid, pid) catch |err| {
+                    self.sendError(stream, request.id, request.op, "internal", @errorName(err));
+                    return;
+                };
+                self.sendGeneric(stream, request, "dhcp_lease", protocol.DhcpLeaseChange{
+                    .iface = action.iface,
+                    .ip = action.ip,
+                });
+                return;
+            }
+            if (elapsed_ms >= client_timeout_ms and !self.dhcp_claimed) {
+                self.dhcp_pending = false;
+                self.dhcp_claimed = false;
+                self.dhcp_mutex.unlock(self.io);
+                self.sendError(stream, request.id, request.op, "timeout", "lease update timed out");
+                return;
+            }
+            self.dhcp_mutex.unlock(self.io);
+            std.Io.sleep(self.io, std.Io.Duration.fromMilliseconds(1), .awake) catch {};
+        }
+    }
+
+    fn handleLinkSet(
+        self: *Server,
+        stream: std.Io.net.Stream,
+        request: protocol.Request,
+        uid: u32,
+        pid: i32,
+    ) void {
+        if (!self.allow_host_changes) {
+            self.sendError(
+                stream,
+                request.id,
+                request.op,
+                "permission_denied",
+                "daemon was started without host change permission",
+            );
+            return;
+        }
+        const link = request.link orelse {
+            self.sendError(stream, request.id, request.op, "invalid_request", "missing link target");
+            return;
+        };
+        if (link.dev.len == 0 or link.dev.len > 15) {
+            self.sendError(stream, request.id, request.op, "invalid_request", "invalid link name");
+            return;
+        }
+        if (request.confirm == null or !std.mem.eql(u8, request.confirm.?, link.dev)) {
+            self.sendError(stream, request.id, request.op, "confirm_required", "type the link name to confirm");
+            return;
+        }
+        const host = self.host orelse {
+            self.sendError(stream, request.id, request.op, "unsupported", "host mutations are unavailable");
+            return;
+        };
+        const change = host.ifaceSetUp(link.dev, link.up) catch |err| {
+            const code = switch (err) {
+                error.NotFound => "not_found",
+                error.InvalidArgument => "invalid_request",
+                else => "link_set_failed",
+            };
+            self.sendError(stream, request.id, request.op, code, @errorName(err));
+            return;
+        };
+        self.auditOperation(request, uid, pid) catch |err| {
+            self.sendError(stream, request.id, request.op, "internal", @errorName(err));
+            return;
+        };
+        self.sendGeneric(stream, request, "link", protocol.LinkState{
+            .dev = link.dev,
+            .up = link.up,
+            .change = @tagName(change),
+        });
+    }
+
+    fn auditOperation(self: *Server, request: protocol.Request, uid: u32, pid: i32) !void {
+        const transaction_id = try transaction.generateId(self.io);
+        const audit_id = try transaction.generateId(self.io);
+        var instance_buf: [64]u8 = undefined;
+        const instance = blk: {
+            self.mutex.lockUncancelable(self.io);
+            defer self.mutex.unlock(self.io);
+            const length = @min(self.snapshot.instance.len, instance_buf.len);
+            @memcpy(instance_buf[0..length], self.snapshot.instance[0..length]);
+            break :blk instance_buf[0..length];
+        };
+        try transaction.appendOperationAudit(
+            self.io,
+            self.gpa,
+            self.state_dir,
+            request.op,
+            instance,
+            transaction_id[0..],
+            audit_id[0..],
+            .{ .uid = uid, .pid = pid },
+            transport.nowMs(self.io),
+        );
+    }
+
+    fn sendGeneric(self: *Server, stream: std.Io.net.Stream, request: protocol.Request, field: []const u8, value: anytype) void {
+        var out: std.Io.Writer.Allocating = .init(self.gpa);
+        defer out.deinit();
+        var json: std.json.Stringify = .{ .writer = &out.writer };
+        json.beginObject() catch return self.sendError(stream, request.id, request.op, "internal", "response failed");
+        writeField(&json, "ok", true) catch return self.sendError(stream, request.id, request.op, "internal", "response failed");
+        writeOptionalId(&json, request.id) catch return self.sendError(stream, request.id, request.op, "internal", "response failed");
+        writeField(&json, "op", request.op) catch return self.sendError(stream, request.id, request.op, "internal", "response failed");
+        writeField(&json, "protocol_version", protocol.version) catch return self.sendError(stream, request.id, request.op, "internal", "response failed");
+        json.objectField(field) catch return self.sendError(stream, request.id, request.op, "internal", "response failed");
+        json.write(value) catch return self.sendError(stream, request.id, request.op, "internal", "response failed");
+        json.endObject() catch return self.sendError(stream, request.id, request.op, "internal", "response failed");
+        out.writer.writeByte('\n') catch return self.sendError(stream, request.id, request.op, "internal", "response failed");
+        self.sendBuffer(stream, out.written());
+    }
+
     fn handleAuditList(self: *Server, stream: std.Io.net.Stream, request: protocol.Request) void {
         var out: std.Io.Writer.Allocating = .init(self.gpa);
         defer out.deinit();
@@ -1629,9 +2107,47 @@ fn isSupported(op: []const u8) bool {
         std.mem.eql(u8, op, "config.apply") or
         std.mem.eql(u8, op, "daemon.stop") or
         std.mem.eql(u8, op, "daemon.restart") or
+        std.mem.eql(u8, op, "dns.query") or
+        std.mem.eql(u8, op, "dhcp.lease.revoke") or
+        std.mem.eql(u8, op, "link.set") or
         std.mem.eql(u8, op, "audit.list") or
         std.mem.eql(u8, op, "journal.list") or
+        std.mem.eql(u8, op, "network.status") or
+        std.mem.eql(u8, op, "dhcp.leases") or
+        std.mem.eql(u8, op, "firewall.counters") or
+        std.mem.eql(u8, op, "logs.tail") or
         read_model.isListOp(op);
+}
+
+fn linkName(allocator: std.mem.Allocator, links: []const netlink.LinkInfo, index: u32) ![]const u8 {
+    for (links) |link| {
+        if (link.index == index) return allocator.dupe(u8, link.name());
+    }
+    return std.fmt.allocPrint(allocator, "if{d}", .{index});
+}
+
+fn addrText(allocator: std.mem.Allocator, family: u8, bytes: []const u8) ![]const u8 {
+    if (family == 2) {
+        if (bytes.len < 4) return error.InvalidArgument;
+        var raw: [4]u8 = undefined;
+        @memcpy(&raw, bytes[0..4]);
+        return std.fmt.allocPrint(allocator, "{f}", .{types.Ipv4.fromBytes(raw)});
+    }
+    if (bytes.len < 16) return error.InvalidArgument;
+    const value = std.mem.readInt(u128, bytes[0..16], .big);
+    return std.fmt.allocPrint(allocator, "{f}", .{types.Ipv6{ .value = value }});
+}
+
+fn neighState(bits: u16) []const u8 {
+    if (bits & 0x80 != 0) return "permanent";
+    if (bits & 0x40 != 0) return "noarp";
+    if (bits & 0x02 != 0) return "reachable";
+    if (bits & 0x10 != 0) return "probe";
+    if (bits & 0x08 != 0) return "delay";
+    if (bits & 0x04 != 0) return "stale";
+    if (bits & 0x20 != 0) return "failed";
+    if (bits & 0x01 != 0) return "incomplete";
+    return "unknown";
 }
 
 fn configStoreErrorCode(err: anyerror) []const u8 {
@@ -2024,6 +2540,39 @@ test "server starts, answers status, and removes its socket" {
     try testing.expect(v3_status.value.status.?.restart_pending == false);
     try testing.expect(v3_status.value.status.?.config_writable == true);
     try testing.expect(v3_status.value.status.?.restart_supported == false);
+
+    const dns_line = try sendRequest(
+        testing.io,
+        path,
+        "{\"version\":3,\"id\":12,\"op\":\"dns.query\",\"dns_query\":{\"name\":\"\",\"qtype\":\"A\"}}\n",
+        &input,
+    );
+    var dns_response = try std.json.parseFromSlice(protocol.Response, testing.allocator, dns_line, .{});
+    defer dns_response.deinit();
+    try testing.expect(!dns_response.value.ok);
+    try testing.expectEqualStrings("invalid_request", dns_response.value.error_code.?);
+
+    const lease_line = try sendRequest(
+        testing.io,
+        path,
+        "{\"version\":3,\"id\":13,\"op\":\"dhcp.lease.revoke\",\"confirm\":\"10.0.1.100\",\"dhcp_lease\":{\"iface\":\"lan0\",\"ip\":\"not-an-address\"}}\n",
+        &input,
+    );
+    var lease_response = try std.json.parseFromSlice(protocol.Response, testing.allocator, lease_line, .{});
+    defer lease_response.deinit();
+    try testing.expect(!lease_response.value.ok);
+    try testing.expectEqualStrings("invalid_request", lease_response.value.error_code.?);
+
+    const lease_confirm_line = try sendRequest(
+        testing.io,
+        path,
+        "{\"version\":3,\"id\":14,\"op\":\"dhcp.lease.revoke\",\"dhcp_lease\":{\"iface\":\"lan0\",\"ip\":\"10.0.1.100\"}}\n",
+        &input,
+    );
+    var lease_confirm = try std.json.parseFromSlice(protocol.Response, testing.allocator, lease_confirm_line, .{});
+    defer lease_confirm.deinit();
+    try testing.expect(!lease_confirm.value.ok);
+    try testing.expectEqualStrings("confirm_required", lease_confirm.value.error_code.?);
 
     var status_client = try client_mod.Client.connect(testing.io, testing.allocator, path);
     defer status_client.deinit();
@@ -2539,6 +3088,47 @@ test "server replaces a stale socket" {
         std.Io.File.Kind.unix_domain_socket,
         (try tmp.dir.statFile(testing.io, "control.sock", .{})).kind,
     );
+}
+
+test "server gates link changes on host permission and typed confirmation" {
+    const testing = std.testing;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir = try tmp.dir.realPath(testing.io, &path_buf);
+    const path = try std.fmt.allocPrint(testing.allocator, "{s}/control.sock", .{path_buf[0..dir]});
+    defer testing.allocator.free(path);
+
+    var server = try Server.init(testing.io, testing.allocator, path, .{});
+    defer server.deinit();
+    var snapshot: state.Snapshot = .{
+        .instance = "test",
+        .state_dir = path_buf[0..dir],
+        .control_path = path,
+    };
+    server.publish(&snapshot);
+    try server.start();
+
+    var input: [4096]u8 = undefined;
+    const denied_line = try sendRequest(testing.io, path, "{\"version\":3,\"id\":70,\"op\":\"link.set\",\"confirm\":\"eth0\",\"link\":{\"dev\":\"eth0\",\"up\":false}}\n", &input);
+    var denied = try std.json.parseFromSlice(protocol.Response, testing.allocator, denied_line, .{});
+    defer denied.deinit();
+    try testing.expect(!denied.value.ok);
+    try testing.expectEqualStrings("permission_denied", denied.value.error_code.?);
+
+    server.allow_host_changes = true;
+    const confirm_line = try sendRequest(testing.io, path, "{\"version\":3,\"id\":71,\"op\":\"link.set\",\"confirm\":\"eth1\",\"link\":{\"dev\":\"eth0\",\"up\":false}}\n", &input);
+    var confirm = try std.json.parseFromSlice(protocol.Response, testing.allocator, confirm_line, .{});
+    defer confirm.deinit();
+    try testing.expect(!confirm.value.ok);
+    try testing.expectEqualStrings("confirm_required", confirm.value.error_code.?);
+
+    const unavailable_line = try sendRequest(testing.io, path, "{\"version\":3,\"id\":72,\"op\":\"link.set\",\"confirm\":\"eth0\",\"link\":{\"dev\":\"eth0\",\"up\":false}}\n", &input);
+    var unavailable = try std.json.parseFromSlice(protocol.Response, testing.allocator, unavailable_line, .{});
+    defer unavailable.deinit();
+    try testing.expect(!unavailable.value.ok);
+    try testing.expectEqualStrings("unsupported", unavailable.value.error_code.?);
 }
 
 test "server lists bounded audit and journal tails" {

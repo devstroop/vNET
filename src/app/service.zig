@@ -9,6 +9,7 @@ const log = @import("../log.zig");
 const manager_mod = @import("../port/manager.zig");
 const forward = @import("../l3/forward.zig");
 const dhcp_leases = @import("../services/dhcp/leases.zig");
+const dhcp_server = @import("../services/dhcp/server.zig");
 const dns_service = @import("../services/dns/service.zig");
 const control_host = @import("../control/host.zig");
 const control_offload = @import("../control/offload.zig");
@@ -57,8 +58,19 @@ pub fn run(
 ) !void {
     var logger = log.Logger.init(io, cfg.log);
 
-    // Reserve the control socket before any host mutation so a second daemon
-    // fails fast instead of racing the first one's routes and journal.
+    var host: ?control_host.Host = null;
+    defer if (host) |*h| h.deinit();
+    var offload_checkpoint: usize = 0;
+    if (options.allow_host_changes) {
+        if (options.state_dir) |state_dir| {
+            host = try control_host.Host.init(io, gpa, state_dir, cfg.instance);
+            offload_checkpoint = try host.?.checkpoint();
+        }
+    }
+    errdefer if (host) |*h| {
+        _ = h.downTo(offload_checkpoint) catch {};
+    };
+
     var control_path: ?[]u8 = null;
     defer if (control_path) |path| gpa.free(path);
     var control: ?control_server.Server = null;
@@ -69,47 +81,44 @@ pub fn run(
         control = try control_server.Server.init(io, gpa, path, .{
             .config_store = options.config_store,
             .state_dir = state_dir,
+            .host = if (host) |*h| h else null,
+            .allow_host_changes = options.allow_host_changes,
             .restart_supported = options.restart_supported,
         });
     }
 
-    var host: ?control_host.Host = null;
-    defer if (host) |*h| h.deinit();
-    var offload_checkpoint: usize = 0;
     if (control_offload.isEnabled(cfg)) {
         if (!options.allow_host_changes) return error.Unsupported;
-        const state_dir = options.state_dir orelse return error.InvalidArgument;
-        host = try control_host.Host.init(io, gpa, state_dir, cfg.instance);
-        offload_checkpoint = try host.?.checkpoint();
+        _ = options.state_dir orelse return error.InvalidArgument;
+        if (host == null) return error.InvalidArgument;
     }
-    errdefer if (host) |*h| {
-        _ = h.downTo(offload_checkpoint) catch {};
-    };
 
     var offload_plan = control_offload.Plan.init(gpa);
     defer offload_plan.deinit();
-    if (host) |*h| {
-        offload_plan = control_offload.apply(io, gpa, h, cfg) catch |err| {
-            logger.err("kernel offload: {s}; run `vrouter down -c <config>` to repair", .{
-                @errorName(err),
-            });
-            return err;
-        };
-        for (offload_plan.devices) |device| {
-            logger.info("offload bridge={s} kernel={s} trunk={s}", .{
-                device.bridge_name,
-                device.kernel_bridge,
-                device.veth_vrouter,
-            });
-        }
-        for (offload_plan.skipped) |port_name| {
-            const port = cfg.ports.get(port_name) orelse continue;
-            if (port.storm_control != 0) {
-                logger.warn(
-                    "kernel offload: storm_control is not enforced on offloaded members; set it to 0 to silence this warning",
-                    .{},
-                );
-                break;
+    if (control_offload.isEnabled(cfg)) {
+        if (host) |*h| {
+            offload_plan = control_offload.apply(io, gpa, h, cfg) catch |err| {
+                logger.err("kernel offload: {s}; run `vrouter down -c <config>` to repair", .{
+                    @errorName(err),
+                });
+                return err;
+            };
+            for (offload_plan.devices) |device| {
+                logger.info("offload bridge={s} kernel={s} trunk={s}", .{
+                    .bridge_name = device.bridge_name,
+                    .kernel_bridge = device.kernel_bridge,
+                    .veth_vrouter = device.veth_vrouter,
+                });
+            }
+            for (offload_plan.skipped) |port_name| {
+                const port = cfg.ports.get(port_name) orelse continue;
+                if (port.storm_control != 0) {
+                    logger.warn(
+                        "kernel offload: storm_control is not enforced on offloaded members; set it to 0 to silence this warning",
+                        .{},
+                    );
+                    break;
+                }
             }
         }
     }
@@ -300,6 +309,32 @@ pub fn run(
                     control_tick_ms = now;
                 }
             }
+            if (server.takeDhcpLeaseAction(apply_buf)) |line| {
+                const result = revokeDhcpLeaseRequest(
+                    gpa,
+                    cfg,
+                    &forwarder,
+                    if (lease_store) |*store| store else null,
+                    line,
+                );
+                if (result.ok) {
+                    var snapshot: control_state.Snapshot = .{};
+                    buildSnapshot(
+                        &snapshot,
+                        cfg,
+                        &forwarder,
+                        manager.count(),
+                        options.state_dir.?,
+                        control_path.?,
+                        started_ms,
+                        now,
+                    );
+                    server.publish(&snapshot);
+                    control_tick_ms = now;
+                    lease_save_ms = now;
+                }
+                server.finishDhcpLeaseAction(result.ok, result.code, result.message);
+            }
         }
         forwarder.tick(io);
         now = nowMs(io);
@@ -479,6 +514,57 @@ const ApplyResult = struct {
     message: []const u8,
 };
 
+fn revokeDhcpLeaseRequest(
+    gpa: std.mem.Allocator,
+    cfg: *const schema.Config,
+    forwarder: *forward.Forwarder,
+    lease_store: ?*dhcp_leases.Store,
+    line: []const u8,
+) ApplyResult {
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var parsed = control_protocol.parseRequest(a, line) catch {
+        return .{ .ok = false, .code = "invalid_request", .message = "malformed lease request" };
+    };
+    defer parsed.deinit();
+    if (!std.mem.eql(u8, parsed.value.op, "dhcp.lease.revoke")) {
+        return .{ .ok = false, .code = "invalid_request", .message = "wrong operation" };
+    }
+    const action = parsed.value.dhcp_lease orelse {
+        return .{ .ok = false, .code = "invalid_request", .message = "missing lease target" };
+    };
+    const ip = types.Ipv4.parse(action.ip) catch {
+        return .{ .ok = false, .code = "invalid_request", .message = "invalid lease address" };
+    };
+    const confirm = parsed.value.confirm orelse
+        return .{ .ok = false, .code = "confirm_required", .message = "type the lease address to confirm" };
+    if (!std.mem.eql(u8, confirm, action.ip)) {
+        return .{ .ok = false, .code = "confirm_required", .message = "type the lease address to confirm" };
+    }
+
+    var target: ?*dhcp_server.Server = null;
+    for (forwarder.dhcpServers(), 0..) |*server, index| {
+        const iface = if (index < cfg.dhcp.len) cfg.dhcp[index].iface else "";
+        if (!std.mem.eql(u8, iface, action.iface)) continue;
+        target = server;
+        break;
+    }
+    const server = target orelse {
+        return .{ .ok = false, .code = "not_found", .message = "DHCP server not found" };
+    };
+    if (!server.revokeLease(ip)) {
+        return .{ .ok = false, .code = "not_found", .message = "lease not found" };
+    }
+    if (lease_store) |store| {
+        store.save(forwarder.dhcpServers()) catch |err| {
+            return .{ .ok = false, .code = "lease_save_failed", .message = @errorName(err) };
+        };
+    }
+    return .{ .ok = true, .code = "", .message = "" };
+}
+
 fn applyNatRequest(
     gpa: std.mem.Allocator,
     cfg: *const schema.Config,
@@ -546,7 +632,7 @@ fn nowMs(io: std.Io) i64 {
 fn buildSnapshot(
     out: *control_state.Snapshot,
     cfg: *const schema.Config,
-    forwarder: *const forward.Forwarder,
+    forwarder: *forward.Forwarder,
     port_count: usize,
     state_dir: []const u8,
     control_path: []const u8,
@@ -652,6 +738,24 @@ fn buildSnapshot(
         }
         out.conntrack[out.conntrack_len] = sampled;
         out.conntrack_len += 1;
+    }
+
+    var lease_buf: [control_state.max_dhcp_leases]dhcp_server.LeaseSnapshot = undefined;
+    for (forwarder.dhcpServers(), 0..) |*server, server_index| {
+        if (out.dhcp_lease_len >= control_state.max_dhcp_leases) break;
+        const remaining = control_state.max_dhcp_leases - out.dhcp_lease_len;
+        const written = server.snapshot(lease_buf[0..remaining]);
+        const iface = if (server_index < cfg.dhcp.len) cfg.dhcp[server_index].iface else "";
+        for (lease_buf[0..written]) |lease| {
+            out.dhcp_leases[out.dhcp_lease_len] = .{
+                .iface = iface,
+                .state = @tagName(lease.state),
+                .ip = lease.ip,
+                .mac = lease.mac,
+                .expires_ms = lease.expires_ms,
+            };
+            out.dhcp_lease_len += 1;
+        }
     }
 }
 

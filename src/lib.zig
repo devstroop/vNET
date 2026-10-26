@@ -66,6 +66,7 @@ pub const dhcp_message = @import("services/dhcp/message.zig");
 pub const dhcp_server = @import("services/dhcp/server.zig");
 pub const dhcp_leases = @import("services/dhcp/leases.zig");
 pub const dns_message = @import("services/dns/message.zig");
+pub const dns_probe = @import("services/dns/probe.zig");
 pub const dns_cache = @import("services/dns/cache.zig");
 pub const dns_service = @import("services/dns/service.zig");
 

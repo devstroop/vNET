@@ -28,6 +28,39 @@ pub const NatApply = struct {
     port_forward: []const NatForward = &.{},
 };
 
+pub const DnsQuery = struct {
+    name: []const u8 = "",
+    qtype: []const u8 = "A",
+};
+
+pub const DnsAnswer = struct {
+    owner: []const u8 = "",
+    qtype: []const u8 = "",
+    value: []const u8 = "",
+    ttl: u32 = 0,
+};
+
+pub const DnsQueryResult = struct {
+    server: []const u8 = "",
+    name: []const u8 = "",
+    qtype: []const u8 = "",
+    rcode: u8 = 0,
+    rcode_text: []const u8 = "NOERROR",
+    truncated: bool = false,
+    answers: []const DnsAnswer = &.{},
+};
+
+pub const LinkSet = struct {
+    dev: []const u8 = "",
+    up: bool = false,
+};
+
+pub const LinkState = struct {
+    dev: []const u8 = "",
+    up: bool = false,
+    change: []const u8 = "noop",
+};
+
 pub const Request = struct {
     version: ?u32 = null,
     id: ?u64 = null,
@@ -42,6 +75,9 @@ pub const Request = struct {
     nat: ?NatApply = null,
     config: ?std.json.Value = null,
     target_revision: ?[]const u8 = null,
+    dns_query: ?DnsQuery = null,
+    link: ?LinkSet = null,
+    dhcp_lease: ?DhcpLeaseAction = null,
 };
 
 pub const Status = struct {
@@ -110,6 +146,86 @@ pub const Conntrack = struct {
     total: u32 = 0,
     returned: u32 = 0,
     entries: []const ConntrackEntry = &.{},
+};
+
+pub const NetworkLink = struct {
+    name: []const u8 = "",
+    index: u32 = 0,
+    mtu: u16 = 0,
+    mac: []const u8 = "",
+    up: bool = false,
+    running: bool = false,
+    operstate: u8 = 0,
+    master: u32 = 0,
+};
+
+pub const NetworkAddr = struct {
+    dev: []const u8 = "",
+    family: []const u8 = "",
+    address: []const u8 = "",
+    prefix_len: u8 = 0,
+    scope: u8 = 0,
+};
+
+pub const NetworkNeighbor = struct {
+    dev: []const u8 = "",
+    family: []const u8 = "",
+    address: []const u8 = "",
+    mac: []const u8 = "",
+    state: []const u8 = "",
+};
+
+pub const Network = struct {
+    captured_ms: i64 = 0,
+    links: []const NetworkLink = &.{},
+    addresses: []const NetworkAddr = &.{},
+    neighbors: []const NetworkNeighbor = &.{},
+};
+
+pub const DhcpLease = struct {
+    iface: []const u8 = "",
+    state: []const u8 = "",
+    ip: []const u8 = "",
+    mac: []const u8 = "",
+    expires_ms: i64 = 0,
+};
+
+pub const DhcpLeases = struct {
+    instance: []const u8 = "",
+    total: u32 = 0,
+    returned: u32 = 0,
+    leases: []const DhcpLease = &.{},
+};
+
+pub const DhcpLeaseAction = struct {
+    iface: []const u8 = "",
+    ip: []const u8 = "",
+};
+
+pub const DhcpLeaseChange = struct {
+    iface: []const u8 = "",
+    ip: []const u8 = "",
+    state: []const u8 = "free",
+    revoked: bool = true,
+};
+
+pub const FirewallCounters = struct {
+    instance: []const u8 = "",
+    updated_ms: i64 = 0,
+    rules: []const u64 = &.{},
+    firewall_dropped: u64 = 0,
+    firewall_spoofed: u64 = 0,
+    icmp_rate_limited: u64 = 0,
+    arp_rate_limited: u64 = 0,
+    dhcp_rate_limited: u64 = 0,
+    ndp_rate_limited: u64 = 0,
+};
+
+pub const LogTail = struct {
+    path: []const u8 = "",
+    text: []const u8 = "",
+    lines: u32 = 0,
+    truncated: bool = false,
 };
 
 pub const AuditEntry = struct {
@@ -186,6 +302,10 @@ pub const Response = struct {
     conntrack: ?Conntrack = null,
     audit: ?Audit = null,
     journal: ?Journal = null,
+    network: ?Network = null,
+    leases: ?DhcpLeases = null,
+    firewall_counters: ?FirewallCounters = null,
+    logs: ?LogTail = null,
     revision: ?[]const u8 = null,
     source_path: ?[]const u8 = null,
     writable: ?bool = null,
@@ -206,6 +326,9 @@ pub const Response = struct {
     restart_required: ?bool = null,
     restart_supported: ?bool = null,
     restart_token: ?[]const u8 = null,
+    dns_query: ?DnsQueryResult = null,
+    link: ?LinkState = null,
+    dhcp_lease: ?DhcpLeaseChange = null,
 };
 
 pub const ParseError = error{InvalidRequest};
@@ -227,9 +350,14 @@ pub fn isV3Only(op: []const u8) bool {
         std.mem.eql(u8, op, "firewall.counters") or
         std.mem.eql(u8, op, "journal.list") or
         std.mem.eql(u8, op, "audit.list") or
+        std.mem.eql(u8, op, "network.status") or
+        std.mem.eql(u8, op, "logs.tail") or
         std.mem.eql(u8, op, "doctor.status") or
         std.mem.eql(u8, op, "daemon.stop") or
-        std.mem.eql(u8, op, "daemon.restart");
+        std.mem.eql(u8, op, "daemon.restart") or
+        std.mem.eql(u8, op, "dns.query") or
+        std.mem.eql(u8, op, "link.set") or
+        std.mem.eql(u8, op, "dhcp.lease.revoke");
 }
 
 pub fn isConfigSized(op: []const u8) bool {
@@ -278,6 +406,18 @@ test "restart request parses the one-time token" {
     defer parsed.deinit();
     try std.testing.expectEqualStrings("daemon.restart", parsed.value.op);
     try std.testing.expectEqualStrings("abc", parsed.value.restart_token.?);
+}
+
+test "dhcp lease action parses target and confirmation" {
+    var parsed = try parseRequest(
+        std.testing.allocator,
+        "{\"version\":3,\"id\":12,\"op\":\"dhcp.lease.revoke\",\"confirm\":\"10.0.1.100\",\"dhcp_lease\":{\"iface\":\"lan0\",\"ip\":\"10.0.1.100\"}}",
+    );
+    defer parsed.deinit();
+    try std.testing.expectEqualStrings("dhcp.lease.revoke", parsed.value.op);
+    try std.testing.expectEqualStrings("lan0", parsed.value.dhcp_lease.?.iface);
+    try std.testing.expectEqualStrings("10.0.1.100", parsed.value.dhcp_lease.?.ip);
+    try std.testing.expectEqualStrings("10.0.1.100", parsed.value.confirm.?);
 }
 
 test "v2 request serialization omits null optional fields" {
