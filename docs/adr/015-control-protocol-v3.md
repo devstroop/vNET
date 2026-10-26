@@ -44,8 +44,8 @@ Protocol v3 is additive, but **response shape is request-versioned**:
 - `config.get`, `config.validate`, `config.diff`, `config.apply`,
   `config.rollback`, `ports.list`, `bridges.list`, `interfaces.list`,
   `routes.list`, `dhcp.list`, `dhcp.leases`, `dns.list`, `firewall.list`,
-  `firewall.counters`, `journal.list`, `audit.list` and `doctor.status` are
-  v3-only operations. Sending them without `version: 3` returns
+  `firewall.counters`, `journal.list`, `audit.list`, `doctor.status`,
+  `dns.query`, `link.set` and `dhcp.lease.revoke` are v3-only operations. Sending them without `version: 3` returns
   `version_unsupported` from a v3 server; a v2 server returns
   `invalid_request`.
 - A v2 server rejects a v3 envelope as `invalid_request`; the client must not
@@ -241,10 +241,22 @@ apply path:
 | `iface.addr.add/del` | yes | yes | yes | yes | yes | yes | yes |
 | `route.add/del` | yes | yes | yes | yes | yes | yes | yes |
 | `link.set` | no config | no | typed target name | n/a | yes | yes | yes |
+| `dhcp.lease.revoke` | n/a | no | typed lease address | n/a | yes | yes | n/a |
 | `daemon.stop` | n/a | no | typed `stop` | n/a | yes | yes | n/a |
 | `daemon.restart` | n/a | no | restart token | n/a | yes | yes | n/a |
 | `firewall.test`, `dns.query` | n/a | no | no | n/a | n/a | no | n/a |
 | `journal.repair` | not exposed | — | — | — | — | — | — |
+
+`link.set` requires an exact typed target name and host-change permission; it
+returns `up`, `down` or `noop` and is audited after the journal append.
+`dns.query` is a read-only A/AAAA diagnostic sent by the daemon to the
+configured `dns.listen` address on UDP port 53 with a 2 s timeout, returning
+`server`, `name`, `qtype`, `rcode`, `truncated` and address answers.
+`dhcp.lease.revoke` targets one `iface`/`ip` pair, requires the exact address
+as confirmation, frees the in-memory lease in the service loop without
+notifying the client, persists the lease database when configured, and is
+audited. A persistence failure is reported as `lease_save_failed`; the client
+may keep using the address until it renews.
 
 - `config.diff` accepts either a complete proposed config or a rollback target
   (`target_revision` or `target_transaction`). The confirm token is bound to

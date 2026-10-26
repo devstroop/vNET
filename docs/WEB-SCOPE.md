@@ -8,11 +8,12 @@
 
 ## 1. Summary
 
-The `vrouterweb` preview started read-only. It now exposes status, NAT, DHCP,
-DNS and conntrack, and NAT, DHCP and DNS have staged
-draft/review/apply paths (ADR-016). The gap to a useful admin is still mostly
-backend: most resources have no general web read model or write path, and
-structural changes still require a restart.
+The `vrouterweb` preview started read-only. It now exposes status, interfaces,
+clients/leases, routes, NAT, DHCP, DNS, firewall, diagnostics, logs, conntrack
+and config, and interfaces, routes, firewall, NAT, DHCP, DNS and logging have
+staged draft/review/apply paths (ADR-016). The remaining gap is operational
+depth: row-level detail, live firewall apply/reorder, advanced settings and
+pagination rather than missing resource pages.
 
 This assumes v1.0 has shipped, the control socket is stable, and the deployment
 is Linux with one daemon and one web process per instance.
@@ -98,12 +99,13 @@ journal or edits the config file directly.
 - `src/web/server.zig` serves server-rendered HTMX 4.0.0 pages and fragments
   with embedded assets, plus a small same-origin JSON API backed by the Unix
   control socket.
-- The JSON API remains read-only: `GET /api/status`, `GET /api/nat`,
-  `GET /api/conntrack`. HTML NAT writes use `POST /nat/rules` to stage a draft,
-  `POST /nat/review` to diff it, `POST /nat/apply` to commit it, and
-  `GET /partials/nat` to discard it. DHCP and DNS use the same pattern under
-  `/dhcp/rules`, `/dhcp/review`, `/dhcp/apply`, `/partials/dhcp` and
-  `/dns/rules`, `/dns/review`, `/dns/apply`, `/partials/dns`.
+- The JSON API remains read-only: `GET /api/status`, `/api/nat`,
+  `/api/conntrack`, `/api/network`, `/api/clients`, `/api/firewall`,
+  `/api/logs` and `/api/config`. HTML forms stage drafts through
+  `POST <resource>/rules`, diff through `POST <resource>/review`, commit
+  through `POST <resource>/apply`, and discard through the resource partial.
+  This covers NAT, DHCP, DNS, interfaces (ports/bridges/SVIs), routes,
+  firewall and logging (`/config/logging`, `/config/apply`).
 - Control protocol v2 supports `ping`, `status`, `nat.list`, `nat.apply` and
   `conntrack.list`. Request and response parsing is strict: a v2 daemon rejects
   v3 envelope fields as `invalid_request`, and deployed v2 clients reject
@@ -132,26 +134,27 @@ journal or edits the config file directly.
 
 ### Gaps
 
-1. **No web read model for most resources.** v3 list reads expose ports,
-   bridges, interfaces, routes, DHCP, DNS and firewall config, plus bounded
-   audit and journal tails, but there are no detail pages or lease views yet.
-2. **No general write API.** NAT, DHCP and DNS have staged config paths; there
-   is no web CRUD for ports, bridges, interfaces, routes or firewall. Restart
-   and stop are available through the token-gated lifecycle flow only.
+1. **Read coverage is complete for config, partial for live state.** Pages
+   cover ports, bridges, interfaces, routes, DHCP leases, DNS, firewall,
+   diagnostics, logs and the running config. Per-row detail views and
+   paginated live tables are still missing.
+2. **Write coverage is staged, not complete.** Ports, bridges, interfaces,
+   routes, firewall, NAT, DHCP, DNS and logging have draft/review/apply paths.
+   Conntrack deletion and advanced settings still need dedicated wired flows;
+   DNS query, journaled link up/down and DHCP lease revoke are wired.
 3. **No single write path.** CLI address/route mutations bypass the daemon.
    Running them while `vrouterd` is live can race the datapath and the config.
 4. **No live structural apply.** Ports, bridges, interfaces, routes, DHCP, DNS
-   and firewall changes require a daemon restart today. The web saves DHCP/DNS
-   and reports restart-required rather than pretending they are live.
+   and firewall changes require a daemon restart today. NAT applies live; all
+   other writes report restart-required rather than pretending they are live.
 5. **No write authorization.** Read and write scopes are not distinct.
 6. **Audit/journal reads have no paging.** The web renders bounded audit and
-   journal tails, including malformed entries, but cursor pagination and
-   journal repair guidance are not implemented.
+   journal tails, including malformed entries, and diagnostics shows the
+   offline repair commands; cursor pagination is still missing.
 7. **Limits are only partly lifted.** The web request limit is 64 KiB for
-   staged NAT/DHCP/DNS drafts; control config frames are 16 MiB on a dedicated
-   worker (ADR-015).
-   Full config editing still needs bounded request/response handling and
-   large-table paging.
+   staged drafts; control config frames are 16 MiB on a dedicated worker
+   (ADR-015). Raw config editing is intentionally excluded; large-table paging
+   is still missing.
 8. **Unprivileged deployment is not wired.** The server accepts root or the
    daemon effective uid only; group authorization is absent. State-directory
    creation is inconsistent: the control server and `vrouter up` use `0750`
@@ -182,18 +185,18 @@ restarts it after confirmation.
 | Area | Read | Write | Apply | Phase |
 |---|---|---|---|---|
 | Dashboard, status, counters | Instance, version, uptime, ports, counters, health | — | — | P0 |
-| Ports | List/detail, link state, config, counters | Create/edit/delete, MTU, PVID, tagged VLANs, storm control | Link up/down live; structural restart | P0 read; P1 write |
-| Bridges | List/detail, members, SVI count, STP/VLAN/offload | Create/edit/delete, member ports, STP, VLAN-aware, offload | Restart | P0 read; P1 write |
-| Interfaces/SVIs | List/detail, addresses, bridge/port/VLAN, link state | Create/edit/delete, address add/remove, link up/down, VLAN | Address/link live where supported; membership/VLAN restart | P0 read; P1 write |
-| Routes | List/detail, IPv4/IPv6, table/metric | Add/edit/delete | Live if the route transaction is implemented; otherwise restart | P0 read; P1 write |
+| Ports | List/detail, link state, config, counters | Create/edit/delete, MTU, PVID, tagged VLANs, storm control | Link up/down live; structural restart | P0 read; P1 write implemented |
+| Bridges | List/detail, members, SVI count, STP/VLAN/offload | Create/edit/delete, member ports, STP, VLAN-aware, offload (staged draft) | Restart | P0 read; P1 write implemented |
+| Interfaces/SVIs | List/detail, addresses, bridge/port/VLAN, link state | Create/edit/delete, address add/remove, VLAN (staged draft); live link up/down | Link state live with typed confirmation; membership/VLAN restart | P0 read; P1 write implemented; P2 link actions |
+| Routes | List/detail, IPv4/IPv6, table/metric | Add/edit/delete (staged draft) | Restart until the route transaction is implemented | P0 read; P1 write implemented |
 | NAT | Masquerade and port forwards | Add/edit/delete (staged draft) | Live via `config.apply` + `nat.apply` | P0 read; P1 write |
-| DHCP | Server config, pool, options, reservations, leases | Server/reservation CRUD (staged draft); lease actions if supported | Restart for config; lease actions live in P2 | P0 read; P1 config write implemented; P2 lease actions |
-| DNS | Upstreams, cache, listen, zones, query test | Config CRUD (staged draft); diagnostic query | Restart for config; query live in P2 | P0 read; P1 config write implemented; P2 query |
-| Firewall | Defaults, rp_filter, rate limits, ordered rules, counters, test probe | Rule/default/rate CRUD, reorder | Restart in P2; live firewall apply is future work | P0 read; P2 write |
-| Logging/advanced | Log level/format, instance, lease DB path | Edit | Restart; instance/lease DB need extra confirmation | P0 read; P2 write |
+| DHCP | Server config, pool, options, reservations, leases | Server/reservation CRUD (staged draft); lease revoke with typed address | Restart for config; lease revoke live | P0 read; P1 config write implemented; P2 lease revoke implemented |
+| DNS | Upstreams, cache, listen, zones, diagnostic A/AAAA query | Config CRUD (staged draft) | Restart for config; query is read-only and live | P0 read; P1 config write implemented; P2 query implemented |
+| Firewall | Defaults, rp_filter, rate limits, ordered rules, counters, test probe | Rule/default/rate CRUD (staged draft); reorder not yet | Restart in P2; live firewall apply is future work | P0 read; P2 write implemented |
+| Logging/advanced | Log level/format, instance, lease DB path | Log level/format edit (staged draft) | Restart or live per daemon result; instance/lease DB not editable | P0 read; P2 logging write implemented |
 | Conntrack | Paginated/filterable table | — | — | P0 |
-| Journal | Health, bounded entries, malformed tail | — (repair is offline CLI) | Offline CLI; `doctor.status` live | P0 read; P2 repair guidance |
-| Lifecycle | Daemon status, config revision, restart-required state | Validate, diff, apply, rollback; stop/restart while connected | Daemon/service manager; start is CLI/service manager | P0 read; P1 apply; P2 lifecycle |
+| Journal | Health, bounded entries, malformed tail | — (repair is offline CLI) | Offline CLI; `doctor.status` live | P0 read; P2 repair guidance implemented |
+| Lifecycle | Daemon status, config revision, restart-required state | Validate, diff, apply, rollback; stop/restart while connected | Daemon/service manager; start is CLI/service manager | P0 read; P1 apply; P2 stop/restart implemented |
 | Audit | Append-only write history, filters | — | — | P0 read; P1 write |
 | Config | Raw JSON view, revision, diff | Apply/rollback only; no raw write editor | Daemon | P0 read; P1 apply/rollback |
 | System | Paths, socket, build/version, uptime, session | — | — | P0 |
@@ -755,9 +758,10 @@ These are not optional polish; the scope cannot be implemented without them:
 
 1. **Config store.** Path, raw bytes, revision, canonical serializer, atomic
    writer, shared lock, previous snapshot and transaction history.
-2. **Always-available `Host`.** The daemon only opens `Host` for kernel offload
-   today. Live address/route/link writes need a journaled host path and a state
-   directory even when offload is off.
+2. **Host lifecycle.** The daemon opens `Host` before the control socket when
+   host changes are enabled (state directory present), so journaled link writes
+   work without kernel offload. Address/route writes still need transactional
+   runtime update APIs or explicit restart-required behavior.
 3. **Runtime update APIs.** The forwarder compiles local addresses, FIB and
    ports at startup. Live address/route/link operations need transactional
    add/remove/refresh APIs, or those resources must be explicitly

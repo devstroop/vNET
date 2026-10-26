@@ -240,6 +240,12 @@ Post-v1 hardening: 7-day soak and multi-OEM root coverage.
 Prerequisites: v1.0 shipped, the R7 control socket is stable, and read/write
 authorization scopes exist. v1 scope does not change (ADR-011).
 
+Current preview status: read pages and staged write flows cover interfaces,
+routes, firewall, NAT, DHCP, DNS, logging, clients, diagnostics and logs.
+Remaining R10 work is authorization scopes, Playwright coverage, generated
+deployment packaging and the remaining P2 follow-ups (live firewall
+apply/reorder and advanced settings).
+
 - [ ] `vrouter-web`: unprivileged Unix-socket client, Zig HTTP server,
       server-rendered HTMX 4.0.0 with embedded assets; no Node build step, no
       CDN, no runtime asset directory.
@@ -249,8 +255,11 @@ authorization scopes exist. v1 scope does not change (ADR-011).
 - [ ] P1: two-phase apply with journal checkpoint and recoverable audit;
       validate/diff/confirm/rollback; live NAT/link; typed forms; group
       auth/deployment; CLI NAT/address/route/link migration.
-- [ ] P2: firewall, DHCP lease actions, DNS query, logging/advanced settings,
-      journal repair guidance, supervised stop/restart with restart tokens.
+- [x] P2: DNS query diagnostics, journaled link up/down with typed
+      confirmation, and DHCP lease revoke with typed address confirmation.
+- [x] P2: firewall staged CRUD, logging level/format, journal repair guidance
+      in Diagnostics, and supervised stop/restart with typed confirmation.
+- [ ] P2: advanced instance/lease-DB settings and live firewall apply/reorder.
 - [ ] Loopback/Unix-socket defaults; SSH-tunnel docs; no browser-facing LAN
       bind in R10.
 - [ ] Auth/session (PAM or Argon2id), CSRF, Origin/Host checks, strict CSP,

@@ -8,6 +8,19 @@ All notable changes to vRouter are documented here. The format follows
 
 ### Added
 
+- **Live DNS, link and lease actions (P2):** the DNS page sends read-only
+  A/AAAA diagnostic queries through `dns.query`; the daemon resolves against
+  the configured listener with a 2 s timeout. Interfaces lists kernel links and
+  performs journaled up/down changes through `link.set`, requiring an exact
+  typed link name and host-change permission. Clients can forget a DHCP lease
+  through `dhcp.lease.revoke`, which requires the exact lease address, frees
+  the in-memory binding without notifying the client, persists the lease
+  database, and is audited. All flows preserve staged drafts where present,
+  and successful link changes are audited.
+- **Supervised stop (P2):** the System page stops vrouterd after a typed
+  `stop` confirmation. The control call is audited, requires a supervisor
+  (`--enable-restart`), and reports the accepted stop before the daemon exits;
+  the UI explains that forwarding stops and the admin disconnects.
 - **Restart orchestration (ADR-015/016):** v3 `config.apply` returns
   `restart_required` with a one-time, boot-bound `restart_token` when restart
   support is enabled. `daemon.restart` consumes the token, audits the accepted
@@ -35,6 +48,14 @@ All notable changes to vRouter are documented here. The format follows
   DHCP edits server pools, options and reservations; DNS edits upstreams,
   listener, cache and split-DNS zones. Review normalizes JSON object order and
   null optionals so unchanged staged forms are not reported as pending.
+- **Operational web pages and write flows:** new Interfaces, Clients, Routes,
+  Firewall, Diagnostics and Logs pages read ports, bridges, interfaces, DHCP
+  leases, neighbours, routes, firewall counters, kernel link/address/neighbour
+  state and a bounded daemon log tail through the control socket. Interfaces,
+  routes, firewall and logging now use the same page-carried draft →
+  `config.diff` → `config.apply` flow as NAT/DHCP/DNS, with validation, review,
+  explicit discard and restart-required banners. Diagnostics and logs stay
+  read-only; Clients gained the typed-confirmation lease action above.
 - **Control protocol v3 (ADR-015):** request-versioned envelopes keep v2
   response shapes byte-compatible while v3 `status` adds `protocol_version`,
   `config_revision`, `restart_pending`, `config_writable` and
@@ -48,11 +69,11 @@ All notable changes to vRouter are documented here. The format follows
   `zig build web`. The Zig process serves server-rendered HTMX 4.0.0 pages and
   fragments with embedded assets, plus a same-origin JSON API backed by the
   Unix control socket. It binds loopback only, authenticates with an Argon2id
-  password and server-side sessions, validates `Host`/`Origin`, and exposes
-  status, NAT and conntrack. NAT edits are staged and applied explicitly; other
-  pages remain read-only. No Node build step, package manager or runtime asset
-  directory is required. It is excluded from the default build and not part of
-  the 0.2.0 scope. See `docs/WEB.md`.
+  password and server-side sessions, validates `Host`/`Origin`, and first
+  exposed status, NAT and conntrack; the operational pages and staged writes
+  above extend the same preview. No Node build step, package manager or runtime
+  asset directory is required. It is excluded from the default build and not
+  part of the 0.2.0 scope. See `docs/WEB.md`.
 - **Crash recovery:** `vrouter doctor` is now read-only but works after a
   daemon crash, and `vrouter doctor --repair` replays journal inverses while
   refusing to run against a live daemon. Malformed journal tails are quarantined

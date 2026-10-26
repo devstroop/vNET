@@ -102,9 +102,9 @@ fn usage(io: std.Io) !void {
         \\  vrouterd [-c <config.json>] [--enable-restart]
         \\
         \\Defaults to /etc/vrouter/vrouter.json. Stops on SIGINT or SIGTERM.
-        \\--enable-restart allows an authenticated control client to restart this
-        \\process after a restart-required config apply. The daemon re-execs itself
-        \\after a clean teardown; without this flag restart calls are refused.
+        \\--enable-restart allows an authenticated control client to restart or
+        \\stop this process. Restart re-execs after a clean teardown; stop exits.
+        \\Without this flag both control lifecycle calls are refused.
         \\
     );
 }
