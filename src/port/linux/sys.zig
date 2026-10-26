@@ -6,7 +6,7 @@
 
 const std = @import("std");
 const linux = std.os.linux;
-const PortError = @import("../../errors.zig").PortError;
+const PortError = @import("vnet-core").PortError;
 
 pub const fd_t = linux.fd_t;
 pub const IFNAMESIZE = 16;

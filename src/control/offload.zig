@@ -10,10 +10,10 @@
 //! the pre-start state.
 
 const std = @import("std");
-const schema = @import("../config/schema.zig");
+const schema = @import("vnet-core").config_schema;
 const Host = @import("host.zig").Host;
-const netlink = @import("../port/linux/netlink.zig");
-const iface = @import("../port/linux/iface.zig");
+const netlink = @import("vnet-port").linux.netlink;
+const iface = @import("vnet-port").linux.iface;
 
 pub const SyntheticPort = struct {
     config_name: []const u8,
@@ -289,7 +289,7 @@ test "offload device names fit IFNAMSIZ and are stable" {
 }
 
 test "trunk VLANs union members and SVIs" {
-    var parsed = try @import("../config/parse.zig").parse(testing.allocator,
+    var parsed = try @import("vnet-core").config_parse.parse(testing.allocator,
         \\{ "version": 1, "instance": "x",
         \\  "ports": {
         \\    "a": { "kind": "l2", "device": "eth1", "pvid": 10, "tagged": [20, 30] },
@@ -311,7 +311,7 @@ test "trunk VLANs union members and SVIs" {
 }
 
 test "trunk VLANs rejects out-of-range VLAN IDs" {
-    var parsed = try @import("../config/parse.zig").parse(testing.allocator,
+    var parsed = try @import("vnet-core").config_parse.parse(testing.allocator,
         \\{ "version": 1, "instance": "x",
         \\  "ports": { "lan": { "kind": "l2", "device": "eth1", "pvid": 5000 } },
         \\  "bridges": { "br": { "ports": ["lan"], "vlan_aware": true, "offload": "kernel" } } }
@@ -326,7 +326,7 @@ test "trunk VLANs rejects out-of-range VLAN IDs" {
 }
 
 test "offload is disabled without kernel bridges" {
-    var parsed = try @import("../config/parse.zig").parse(testing.allocator,
+    var parsed = try @import("vnet-core").config_parse.parse(testing.allocator,
         \\{ "version": 1, "instance": "x",
         \\  "ports": { "lan": { "kind": "l2", "device": "eth1" } },
         \\  "bridges": { "br": { "ports": ["lan"] } } }
@@ -336,7 +336,7 @@ test "offload is disabled without kernel bridges" {
 }
 
 test "kernel offload is detected" {
-    var parsed = try @import("../config/parse.zig").parse(testing.allocator,
+    var parsed = try @import("vnet-core").config_parse.parse(testing.allocator,
         \\{ "version": 1, "instance": "x",
         \\  "ports": { "lan": { "kind": "l2", "device": "eth1" } },
         \\  "bridges": { "br": { "ports": ["lan"], "offload": "kernel" } } }

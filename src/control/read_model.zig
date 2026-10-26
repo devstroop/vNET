@@ -3,7 +3,7 @@
 //! only serialize, they never touch live datapath state.
 
 const std = @import("std");
-const schema = @import("../config/schema.zig");
+const schema = @import("vnet-core").config_schema;
 
 pub fn isListOp(op: []const u8) bool {
     return std.mem.eql(u8, op, "ports.list") or
@@ -230,7 +230,7 @@ fn optional(json: *std.json.Stringify, name: []const u8, value: anytype) !void {
 
 test "config-backed read models serialize" {
     const testing = std.testing;
-    const config_parse = @import("../config/parse.zig");
+    const config_parse = @import("vnet-core").config_parse;
     const source =
         \\{
         \\  "version": 1,

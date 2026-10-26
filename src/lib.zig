@@ -1,143 +1,88 @@
-//! vNET core library root.
+//! vNET public Zig API.
+//!
+//! This is the composition root: it re-exports the shard surfaces and wires the
+//! forwarding engine and runtime that are not separate shards yet.
 
-const std = @import("std");
 const builtin = @import("builtin");
-const build_options = @import("build_options");
 
-pub const version = build_options.version;
+const core = @import("vnet-core");
+const port_shard = @import("vnet-port");
+const l2_shard = @import("vnet-l2");
+const l3_shard = @import("vnet-l3");
+const conntrack_shard = @import("vnet-conntrack");
+const nat_shard = @import("vnet-nat");
+const dhcp_shard = @import("vnet-dhcp");
+const dns_shard = @import("vnet-dns");
+const ctl_shard = @import("vnet-ctl");
 
-pub const types = @import("types.zig");
-pub const errors = @import("errors.zig");
-pub const io = @import("io.zig");
-pub const log = @import("log.zig");
+pub const version = core.version;
 
-pub const config_schema = @import("config/schema.zig");
-pub const config_parse = @import("config/parse.zig");
-pub const config_validate = @import("config/validate.zig");
-pub const config_write = @import("config/write.zig");
-pub const config_store = @import("config/store.zig");
+pub const types = core.types;
+pub const errors = core.errors;
+pub const io = core.io;
+pub const log = core.log;
 
-pub const port = @import("port/port.zig");
-pub const memory_port = @import("port/memory.zig");
-pub const fd_port = if (builtin.os.tag == .linux)
-    @import("port/fd.zig")
-else
-    struct {};
-pub const buffer_pool = @import("port/pool.zig");
+pub const config_schema = core.config_schema;
+pub const config_parse = core.config_parse;
+pub const config_validate = core.config_validate;
+pub const config_write = core.config_write;
+pub const config_store = core.config_store;
 
-pub const journal = @import("control/journal.zig");
-pub const firewall_counters = @import("control/firewall_counters.zig");
-pub const control_state = @import("control/state.zig");
-pub const control_protocol = @import("control/protocol.zig");
-pub const config_apply = @import("control/config_apply.zig");
-pub const control_transaction = @import("control/transaction.zig");
-pub const control_client = if (builtin.os.tag == .linux)
-    @import("control/client.zig")
-else
-    struct {};
-pub const control_server = if (builtin.os.tag == .linux)
-    @import("control/server.zig")
-else
-    struct {};
-pub const control_offload = if (builtin.os.tag == .linux)
-    @import("control/offload.zig")
-else
-    struct {};
-pub const control_host = if (builtin.os.tag == .linux)
-    @import("control/host.zig")
-else
-    struct {};
+pub const port = port_shard.port;
+pub const memory_port = port_shard.memory;
+pub const fd_port = port_shard.fd;
+pub const buffer_pool = port_shard.pool;
+pub const manager = port_shard.manager;
+pub const linux_ports = port_shard.linux;
 
-pub const ethernet = @import("l2/ethernet.zig");
-pub const stp = @import("l2/stp.zig");
-pub const ipv4 = @import("l3/ipv4.zig");
-pub const ipv6 = @import("l3/ipv6.zig");
-pub const arp = @import("l3/arp.zig");
-pub const ndp = @import("l3/ndp.zig");
-pub const fib = @import("l3/fib.zig");
-pub const fib6 = @import("l3/fib6.zig");
-pub const rate = @import("l3/rate.zig");
-pub const conntrack = @import("nat/conntrack.zig");
-pub const nat = @import("nat/nat.zig");
-pub const icmp = @import("l3/icmp.zig");
-pub const icmpv6 = @import("l3/icmpv6.zig");
+pub const ethernet = l2_shard.ethernet;
+pub const stp = l2_shard.stp;
+
+pub const ipv4 = l3_shard.ipv4;
+pub const ipv6 = l3_shard.ipv6;
+pub const arp = l3_shard.arp;
+pub const ndp = l3_shard.ndp;
+pub const fib = l3_shard.fib;
+pub const fib6 = l3_shard.fib6;
+pub const rate = l3_shard.rate;
+pub const icmp = l3_shard.icmp;
+pub const icmpv6 = l3_shard.icmpv6;
+
+pub const conntrack = conntrack_shard.conntrack;
+pub const nat = nat_shard.nat;
+
+pub const dhcp_message = dhcp_shard.message;
+pub const dhcp_server = dhcp_shard.server;
+pub const dhcp_leases = dhcp_shard.leases;
+
+pub const dns_message = dns_shard.message;
+pub const dns_probe = dns_shard.probe;
+pub const dns_cache = dns_shard.cache;
+pub const dns_service = dns_shard.service;
+
+pub const journal = ctl_shard.journal;
+pub const firewall_counters = ctl_shard.firewall_counters;
+pub const control_state = ctl_shard.state;
+pub const control_protocol = ctl_shard.protocol;
+pub const config_apply = ctl_shard.config_apply;
+pub const control_transaction = ctl_shard.transaction;
+pub const control_client = ctl_shard.client;
+pub const control_server = ctl_shard.server;
+pub const control_offload = ctl_shard.offload;
+pub const control_host = ctl_shard.host;
+
 pub const forward = @import("l3/forward.zig");
-pub const dhcp_message = @import("services/dhcp/message.zig");
-pub const dhcp_server = @import("services/dhcp/server.zig");
-pub const dhcp_leases = @import("services/dhcp/leases.zig");
-pub const dns_message = @import("services/dns/message.zig");
-pub const dns_probe = @import("services/dns/probe.zig");
-pub const dns_cache = @import("services/dns/cache.zig");
-pub const dns_service = @import("services/dns/service.zig");
-
-pub const linux_ports = if (builtin.os.tag == .linux)
-    @import("port/linux/root.zig")
-else
-    struct {};
-
-pub const manager = if (builtin.os.tag == .linux)
-    @import("port/manager.zig")
-else
-    struct {};
-
 pub const app_service = if (builtin.os.tag == .linux)
     @import("app/service.zig")
 else
     struct {};
 
-pub const Config = config_schema.Config;
+pub const Config = core.Config;
 pub const Port = port.Port;
-pub const PortId = types.PortId;
+pub const PortId = core.PortId;
 pub const MemoryPort = memory_port.MemoryPort;
 
 test {
-    _ = @import("types.zig");
-    _ = @import("errors.zig");
-    _ = @import("io.zig");
-    _ = @import("log.zig");
-    _ = @import("config/schema.zig");
-    _ = @import("config/parse.zig");
-    _ = @import("config/validate.zig");
-    _ = @import("config/write.zig");
-    _ = @import("port/port.zig");
-    _ = @import("port/memory.zig");
-    if (builtin.os.tag == .linux) _ = @import("port/fd.zig");
-    _ = @import("port/pool.zig");
-    _ = @import("control/journal.zig");
-    _ = @import("control/firewall_counters.zig");
-    _ = @import("control/state.zig");
-    _ = @import("control/protocol.zig");
-    _ = @import("control/config_apply.zig");
-    _ = @import("control/transaction.zig");
-    if (builtin.os.tag == .linux) {
-        _ = @import("control/host.zig");
-        _ = @import("control/offload.zig");
-        _ = @import("control/client.zig");
-        _ = @import("control/server.zig");
-    }
-    _ = @import("l2/ethernet.zig");
-    _ = @import("l2/stp.zig");
-    _ = @import("l3/ipv4.zig");
-    _ = @import("l3/ipv6.zig");
-    _ = @import("l3/arp.zig");
-    _ = @import("l3/ndp.zig");
-    _ = @import("l3/fib.zig");
-    _ = @import("l3/fib6.zig");
-    _ = @import("l3/rate.zig");
-    _ = @import("nat/conntrack.zig");
-    _ = @import("nat/nat.zig");
-    _ = @import("l3/icmp.zig");
-    _ = @import("l3/icmpv6.zig");
     _ = @import("l3/forward.zig");
-    _ = @import("services/dhcp/message.zig");
-    _ = @import("services/dhcp/server.zig");
-    _ = @import("services/dhcp/leases.zig");
-    _ = @import("services/dns/message.zig");
-    _ = @import("services/dns/cache.zig");
-    _ = @import("services/dns/service.zig");
-    if (builtin.os.tag == .linux) {
-        _ = @import("port/linux/root.zig");
-        _ = @import("port/manager.zig");
-        _ = @import("app/service.zig");
-    }
+    if (builtin.os.tag == .linux) _ = @import("app/service.zig");
 }

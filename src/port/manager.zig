@@ -5,10 +5,10 @@
 //! `Port.ctx` pointers stay stable even if the entry list grows.
 
 const std = @import("std");
-const schema = @import("../config/schema.zig");
+const schema = @import("vnet-core").config_schema;
 const port_mod = @import("port.zig");
-const types = @import("../types.zig");
-const PortError = @import("../errors.zig").PortError;
+const types = @import("vnet-core").types;
+const PortError = @import("vnet-core").PortError;
 const linux = @import("linux/root.zig");
 const fd_port = @import("fd.zig");
 

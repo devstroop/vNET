@@ -2,7 +2,7 @@
 //! loop owns the live tables; the control thread only sees this copy.
 
 const std = @import("std");
-const types = @import("../types.zig");
+const types = @import("vnet-core").types;
 
 pub const max_snat = 64;
 pub const max_port_forward = 128;

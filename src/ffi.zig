@@ -2,13 +2,13 @@
 
 const std = @import("std");
 const linux = std.os.linux;
-const build_options = @import("build_options");
-const config_parse = @import("config/parse.zig");
-const config_validate = @import("config/validate.zig");
-const manager = @import("port/manager.zig");
-const sys = @import("port/linux/sys.zig");
+const core = @import("vnet-core");
+const config_parse = core.config_parse;
+const config_validate = @import("vnet-core").config_validate;
+const manager = @import("vnet-port").manager;
+const sys = @import("vnet-port").linux.sys;
 const service = @import("app/service.zig");
-const thread_mod = @import("thread.zig");
+const thread_mod = @import("vnet-thread");
 
 pub const ABI_VERSION: u32 = 3;
 
@@ -55,7 +55,7 @@ pub const EventCb = *const fn (
     message: ?[*:0]const u8,
 ) callconv(.c) void;
 
-const version_z = build_options.version ++ "\x00";
+const version_z = core.version ++ "\x00";
 const allocator = std.heap.smp_allocator;
 
 const Handle = struct {
@@ -95,7 +95,7 @@ const Startup = struct {
 };
 
 pub export fn vnet_version() callconv(.c) [*:0]const u8 {
-    return @ptrCast(&version_z);
+    return @ptrCast(version_z.ptr);
 }
 
 pub export fn vnet_create(config_json: ?[*:0]const u8) callconv(.c) ?*anyopaque {

@@ -2,8 +2,8 @@
 //! diagnostics, logs and the config editor.
 
 const std = @import("std");
-const vnet = @import("vnet");
-const protocol = vnet.control_protocol;
+const ctl = @import("vnet-ctl");
+const protocol = ctl.protocol;
 const html = @import("html.zig");
 const pages = @import("pages.zig");
 

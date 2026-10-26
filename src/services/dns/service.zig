@@ -3,10 +3,10 @@
 //! router address, so it never shares the AF_PACKET datapath.
 
 const std = @import("std");
-const types = @import("../../types.zig");
+const types = @import("vnet-core").types;
 const message = @import("message.zig");
 const cache_mod = @import("cache.zig");
-const thread = @import("../../thread.zig");
+const thread = @import("vnet-thread");
 
 pub const Zone = struct {
     suffix: []const u8,

@@ -2,9 +2,9 @@
 //! one-time confirmation/idempotency state used by the v3 write path.
 
 const std = @import("std");
-const config_parse = @import("../config/parse.zig");
-const config_validate = @import("../config/validate.zig");
-const config_store = @import("../config/store.zig");
+const config_parse = @import("vnet-core").config_parse;
+const config_validate = @import("vnet-core").config_validate;
+const config_store = @import("vnet-core").config_store;
 
 pub const max_diff_bytes: usize = 8 * 1024 * 1024;
 pub const token_hex_len = 64;

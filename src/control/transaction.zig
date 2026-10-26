@@ -4,7 +4,7 @@
 
 const std = @import("std");
 const config_apply = @import("config_apply.zig");
-const config_store = @import("../config/store.zig");
+const config_store = @import("vnet-core").config_store;
 
 pub const pending_file = "transaction.pending";
 pub const audit_file = "audit.jsonl";

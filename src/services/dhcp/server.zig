@@ -2,7 +2,7 @@
 //! release. The datapath owns packet I/O; this module only produces replies.
 
 const std = @import("std");
-const types = @import("../../types.zig");
+const types = @import("vnet-core").types;
 const message = @import("message.zig");
 
 pub const offer_timeout_ms: i64 = 60_000;

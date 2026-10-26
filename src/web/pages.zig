@@ -2,8 +2,8 @@
 //! source of truth; these functions format running snapshots and staged drafts.
 
 const std = @import("std");
-const vnet = @import("vnet");
-const protocol = vnet.control_protocol;
+const ctl = @import("vnet-ctl");
+const protocol = ctl.protocol;
 const html = @import("html.zig");
 
 pub fn overviewPage(

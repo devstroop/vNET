@@ -4,9 +4,9 @@
 //! written by the datapath. Both copy, so callers own their buffers.
 
 const std = @import("std");
-const types = @import("../types.zig");
+const types = @import("vnet-core").types;
 const port_mod = @import("port.zig");
-const PortError = @import("../errors.zig").PortError;
+const PortError = @import("vnet-core").PortError;
 
 pub const MemoryPort = struct {
     gpa: std.mem.Allocator,

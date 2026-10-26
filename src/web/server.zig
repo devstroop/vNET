@@ -3,13 +3,14 @@
 //! write through the existing Unix control socket.
 
 const std = @import("std");
-const vnet = @import("vnet");
+const core = @import("vnet-core");
+const ctl = @import("vnet-ctl");
 const auth = @import("auth.zig");
 const assets = @import("assets.zig");
 const html = @import("html.zig");
 const pages = @import("pages.zig");
 const operations = @import("operations.zig");
-const protocol = vnet.control_protocol;
+const protocol = ctl.protocol;
 
 const cookie_name = "vnet_session";
 const max_body = 65536;
@@ -879,7 +880,7 @@ const App = struct {
     }
 
     fn configGet(self: *App) !std.json.Parsed(protocol.Response) {
-        var client = try vnet.control_client.Client.connect(self.io, self.gpa, self.control_path);
+        var client = try ctl.client.Client.connect(self.io, self.gpa, self.control_path);
         defer client.deinit();
         var status = try v3Status(&client);
         defer status.deinit();
@@ -899,7 +900,7 @@ const App = struct {
         confirm: ?[]const u8,
         idempotency_key: ?[]const u8,
     ) !std.json.Parsed(protocol.Response) {
-        var client = try vnet.control_client.Client.connect(self.io, self.gpa, self.control_path);
+        var client = try ctl.client.Client.connect(self.io, self.gpa, self.control_path);
         defer client.deinit();
         var status = try v3Status(&client);
         defer status.deinit();
@@ -915,7 +916,7 @@ const App = struct {
         });
     }
 
-    fn v3Status(client: *vnet.control_client.Client) !std.json.Parsed(protocol.Response) {
+    fn v3Status(client: *ctl.client.Client) !std.json.Parsed(protocol.Response) {
         var status = try client.call(.{ .version = protocol.version, .op = "status" });
         if (status.value.ok) {
             const status_value = status.value.status orelse {
@@ -945,7 +946,7 @@ const App = struct {
     }
 
     fn callNatApply(self: *App, nat: protocol.NatApply) !std.json.Parsed(protocol.Response) {
-        var client = try vnet.control_client.Client.connect(self.io, self.gpa, self.control_path);
+        var client = try ctl.client.Client.connect(self.io, self.gpa, self.control_path);
         defer client.deinit();
         return client.call(.{ .op = "nat.apply", .nat = nat });
     }
@@ -1388,7 +1389,7 @@ const App = struct {
     }
 
     fn callDnsQuery(self: *App, name: []const u8, qtype: []const u8) !std.json.Parsed(protocol.Response) {
-        var client = try vnet.control_client.Client.connect(self.io, self.gpa, self.control_path);
+        var client = try ctl.client.Client.connect(self.io, self.gpa, self.control_path);
         defer client.deinit();
         return client.call(.{
             .version = protocol.version,
@@ -1857,7 +1858,7 @@ const App = struct {
     }
 
     fn callLinkSet(self: *App, dev: []const u8, up: bool, confirm: []const u8) !std.json.Parsed(protocol.Response) {
-        var client = try vnet.control_client.Client.connect(self.io, self.gpa, self.control_path);
+        var client = try ctl.client.Client.connect(self.io, self.gpa, self.control_path);
         defer client.deinit();
         return client.call(.{
             .version = protocol.version,
@@ -2216,7 +2217,7 @@ const App = struct {
     }
 
     fn callDhcpLeaseRevoke(self: *App, iface: []const u8, ip: []const u8, confirm: []const u8) !std.json.Parsed(protocol.Response) {
-        var client = try vnet.control_client.Client.connect(self.io, self.gpa, self.control_path);
+        var client = try ctl.client.Client.connect(self.io, self.gpa, self.control_path);
         defer client.deinit();
         return client.call(.{
             .version = protocol.version,
@@ -3110,7 +3111,7 @@ const App = struct {
     }
 
     fn restartDaemon(self: *App, token: []const u8) !std.json.Parsed(protocol.Response) {
-        var client = try vnet.control_client.Client.connect(self.io, self.gpa, self.control_path);
+        var client = try ctl.client.Client.connect(self.io, self.gpa, self.control_path);
         defer client.deinit();
         return client.call(.{
             .version = protocol.version,
@@ -3156,7 +3157,7 @@ const App = struct {
     }
 
     fn stopDaemon(self: *App, confirm: []const u8) !std.json.Parsed(protocol.Response) {
-        var client = try vnet.control_client.Client.connect(self.io, self.gpa, self.control_path);
+        var client = try ctl.client.Client.connect(self.io, self.gpa, self.control_path);
         defer client.deinit();
         return client.call(.{
             .version = protocol.version,
@@ -3431,7 +3432,7 @@ const App = struct {
     }
 
     fn callStatus(self: *App) !std.json.Parsed(protocol.Response) {
-        var client = try vnet.control_client.Client.connect(self.io, self.gpa, self.control_path);
+        var client = try ctl.client.Client.connect(self.io, self.gpa, self.control_path);
         defer client.deinit();
         return v3Status(&client) catch |err| switch (err) {
             error.ProtocolVersionUnsupported => client.callOpVersion(protocol.v2_version, "status", null, null),
@@ -3440,7 +3441,7 @@ const App = struct {
     }
 
     fn call(self: *App, op: []const u8, state_filter: ?[]const u8, limit: ?u32) !std.json.Parsed(protocol.Response) {
-        var client = try vnet.control_client.Client.connect(self.io, self.gpa, self.control_path);
+        var client = try ctl.client.Client.connect(self.io, self.gpa, self.control_path);
         defer client.deinit();
         const version: ?u32 = if (protocol.isV3Only(op) or std.mem.eql(u8, op, "nat.list"))
             protocol.version
@@ -3864,9 +3865,9 @@ fn jsonStringify(allocator: std.mem.Allocator, value: std.json.Value) ![]const u
 }
 
 fn jsonValuesEqual(allocator: std.mem.Allocator, a: std.json.Value, b: std.json.Value) !bool {
-    const a_bytes = try vnet.config_apply.canonicalize(allocator, a);
+    const a_bytes = try ctl.config_apply.canonicalize(allocator, a);
     defer allocator.free(a_bytes);
-    const b_bytes = try vnet.config_apply.canonicalize(allocator, b);
+    const b_bytes = try ctl.config_apply.canonicalize(allocator, b);
     defer allocator.free(b_bytes);
     return std.mem.eql(u8, a_bytes, b_bytes);
 }
@@ -4079,7 +4080,7 @@ fn applyDnsForm(allocator: std.mem.Allocator, object: *std.json.ObjectMap, body:
         const entries_text = formValue(body, "max_entries", &entries_buf) orelse "1024";
         const upstreams = try dnsUpstreamArray(allocator, upstreams_text, false);
         if (listen.len != 0) {
-            _ = vnet.types.Ipv4.parse(listen) catch return error.InvalidField;
+            _ = core.types.Ipv4.parse(listen) catch return error.InvalidField;
         }
         const zones_nonempty = if (object.get("zones")) |zones| switch (zones) {
             .array => |array| array.items.len != 0,
@@ -4138,7 +4139,7 @@ fn dnsUpstreamArray(allocator: std.mem.Allocator, text: []const u8, required: bo
     var array = std.json.Array.init(allocator);
     var tokens = std.mem.tokenizeAny(u8, text, ", \t\r\n");
     while (tokens.next()) |token| {
-        _ = vnet.types.Ipv4.parse(token) catch return error.InvalidField;
+        _ = core.types.Ipv4.parse(token) catch return error.InvalidField;
         try array.append(.{ .string = try allocator.dupe(u8, token) });
     }
     if (required and array.items.len == 0) return error.InvalidField;
@@ -4568,7 +4569,7 @@ fn portFromForm(allocator: std.mem.Allocator, body: []const u8) !std.json.Object
     if (create.len != 0) try port.put(allocator, "create", .{ .string = try allocator.dupe(u8, create) });
     if (mtu.len != 0) {
         const value = std.fmt.parseInt(u16, mtu, 10) catch return error.InvalidField;
-        if (value < 576 or value > vnet.types.max_supported_mtu) return error.InvalidField;
+        if (value < 576 or value > core.types.max_supported_mtu) return error.InvalidField;
         try port.put(allocator, "mtu", .{ .integer = value });
     }
     if (pvid.len != 0) {
@@ -4765,16 +4766,16 @@ fn applyRoutesForm(allocator: std.mem.Allocator, routes: *std.json.Array, body: 
 }
 
 fn validPrefix(text: []const u8) bool {
-    _ = vnet.types.IpPrefix.parse(text) catch return false;
+    _ = core.types.IpPrefix.parse(text) catch return false;
     return true;
 }
 
 fn validIp(text: []const u8) bool {
-    _ = vnet.types.IpAddr.parse(text) catch return false;
+    _ = core.types.IpAddr.parse(text) catch return false;
     return true;
 }
 
-fn ruleFamilyAllows(rule_family: []const u8, value_family: vnet.types.IpFamily) bool {
+fn ruleFamilyAllows(rule_family: []const u8, value_family: core.types.IpFamily) bool {
     return std.mem.eql(u8, rule_family, "any") or
         (std.mem.eql(u8, rule_family, "ipv4") and value_family == .ipv4) or
         (std.mem.eql(u8, rule_family, "ipv6") and value_family == .ipv6);
@@ -4796,9 +4797,9 @@ fn routeFromForm(allocator: std.mem.Allocator, body: []const u8) !std.json.Objec
     if (via.len != 0 and !validIp(via)) return error.InvalidField;
     if (dev.len == 0 or dev.len > 127) return error.InvalidField;
     if (std.mem.indexOfAny(u8, dev, " \t\r\n") != null) return error.InvalidField;
-    const dst_prefix = vnet.types.IpPrefix.parse(dst) catch return error.InvalidField;
+    const dst_prefix = core.types.IpPrefix.parse(dst) catch return error.InvalidField;
     if (via.len != 0) {
-        const via_addr = vnet.types.IpAddr.parse(via) catch return error.InvalidField;
+        const via_addr = core.types.IpAddr.parse(via) catch return error.InvalidField;
         if (via_addr.family() != dst_prefix.family()) return error.InvalidField;
     }
     const metric = std.fmt.parseInt(u32, metric_text, 10) catch return error.InvalidField;
@@ -4998,15 +4999,15 @@ fn firewallRuleFromForm(allocator: std.mem.Allocator, body: []const u8) !std.jso
         !std.mem.eql(u8, proto, "icmp") and !std.mem.eql(u8, proto, "icmpv6")) return error.InvalidField;
     if (iif.len != 0 and !validName(iif)) return error.InvalidField;
     if (oif.len != 0 and !validName(oif)) return error.InvalidField;
-    var src_family: ?vnet.types.IpFamily = null;
-    var dst_family: ?vnet.types.IpFamily = null;
+    var src_family: ?core.types.IpFamily = null;
+    var dst_family: ?core.types.IpFamily = null;
     if (src.len != 0) {
         if (!validPrefix(src)) return error.InvalidField;
-        src_family = (vnet.types.IpPrefix.parse(src) catch return error.InvalidField).family();
+        src_family = (core.types.IpPrefix.parse(src) catch return error.InvalidField).family();
     }
     if (dst.len != 0) {
         if (!validPrefix(dst)) return error.InvalidField;
-        dst_family = (vnet.types.IpPrefix.parse(dst) catch return error.InvalidField).family();
+        dst_family = (core.types.IpPrefix.parse(dst) catch return error.InvalidField).family();
     }
     if (src_family != null and dst_family != null and src_family.? != dst_family.?) return error.InvalidField;
     if (src_family) |value_family| if (!ruleFamilyAllows(family, value_family)) return error.InvalidField;
@@ -5167,8 +5168,8 @@ fn dhcpReservationFromForm(allocator: std.mem.Allocator, body: []const u8) !std.
     const mac = formValue(body, "mac", &mac_buf) orelse return error.MissingField;
     const ip = formValue(body, "ip", &ip_buf) orelse return error.MissingField;
     if (mac.len == 0 or ip.len == 0) return error.MissingField;
-    _ = vnet.types.Mac.parse(mac) catch return error.InvalidField;
-    _ = vnet.types.Ipv4.parse(ip) catch return error.InvalidField;
+    _ = core.types.Mac.parse(mac) catch return error.InvalidField;
+    _ = core.types.Ipv4.parse(ip) catch return error.InvalidField;
     var reservation = try std.json.ObjectMap.init(allocator, &.{}, &.{});
     try reservation.put(allocator, "mac", .{ .string = try allocator.dupe(u8, mac) });
     try reservation.put(allocator, "ip", .{ .string = try allocator.dupe(u8, ip) });
@@ -5483,9 +5484,9 @@ fn masqueradeRuleFromForm(allocator: std.mem.Allocator, body: []const u8) !std.j
     const src = formValue(body, "src", &src_buf) orelse "";
     const addr = formValue(body, "addr", &addr_buf) orelse "";
     if (out.len == 0) return error.MissingField;
-    if (src.len != 0) _ = vnet.types.Prefix4.parse(src) catch return error.InvalidField;
+    if (src.len != 0) _ = core.types.Prefix4.parse(src) catch return error.InvalidField;
     if (addr.len != 0) {
-        const parsed = vnet.types.Ipv4.parse(addr) catch return error.InvalidField;
+        const parsed = core.types.Ipv4.parse(addr) catch return error.InvalidField;
         if (parsed.isUnspecified() or parsed.isMulticast()) return error.InvalidField;
     }
     var rule = try std.json.ObjectMap.init(allocator, &.{}, &.{});
@@ -5518,7 +5519,7 @@ fn forwardRuleFromForm(allocator: std.mem.Allocator, body: []const u8) !std.json
         if (to_addr.len == 0 or to_port_text.len == 0) return error.MissingField;
         const to_port = std.fmt.parseInt(u16, to_port_text, 10) catch return error.InvalidField;
         if (to_port == 0) return error.InvalidField;
-        const ip = vnet.types.Ipv4.parse(to_addr) catch return error.InvalidField;
+        const ip = core.types.Ipv4.parse(to_addr) catch return error.InvalidField;
         if (ip.isUnspecified() or ip.isMulticast()) return error.InvalidField;
         break :blk try std.fmt.allocPrint(allocator, "{s}:{d}", .{ to_addr, to_port });
     };
@@ -6083,9 +6084,9 @@ test "generated interface route and firewall config passes the real parser" {
 
     stripNulls(&root);
     const text = try jsonStringify(allocator, root);
-    var parsed = try vnet.config_parse.parse(allocator, text);
+    var parsed = try core.config_parse.parse(allocator, text);
     defer parsed.deinit();
-    try vnet.config_validate.validate(&parsed.config);
+    try core.config_validate.validate(&parsed.config);
 }
 
 test "form and query decoding handles plus and percent escapes" {

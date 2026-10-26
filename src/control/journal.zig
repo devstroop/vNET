@@ -3,7 +3,7 @@
 //! kernel mutation, so a crash leaves enough information to repair state.
 
 const std = @import("std");
-const types = @import("../types.zig");
+const types = @import("vnet-core").types;
 
 pub const Error = error{
     InvalidJournal,

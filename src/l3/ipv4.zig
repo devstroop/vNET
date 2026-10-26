@@ -3,7 +3,7 @@
 //! fragments are surfaced so callers can apply the no-L4-inspection rule.
 
 const std = @import("std");
-const types = @import("../types.zig");
+const types = @import("vnet-core").types;
 
 pub const Protocol = struct {
     pub const icmp: u8 = 1;

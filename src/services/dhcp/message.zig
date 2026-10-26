@@ -2,7 +2,7 @@
 //! never write past the caller's buffer.
 
 const std = @import("std");
-const types = @import("../../types.zig");
+const types = @import("vnet-core").types;
 
 pub const op_request: u8 = 1;
 pub const op_reply: u8 = 2;

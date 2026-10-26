@@ -3,23 +3,23 @@
 
 const std = @import("std");
 const linux = std.os.linux;
-const build_options = @import("build_options");
-const config_parse = @import("../config/parse.zig");
-const config_store = @import("../config/store.zig");
+const core = @import("vnet-core");
+const config_parse = core.config_parse;
+const config_store = @import("vnet-core").config_store;
 const config_apply = @import("config_apply.zig");
 const control_host = @import("host.zig");
-const dns_probe = @import("../services/dns/probe.zig");
+const dns_probe = @import("vnet-dns").probe;
 const transaction = @import("transaction.zig");
 const journal = @import("journal.zig");
 const protocol = @import("protocol.zig");
 const read_model = @import("read_model.zig");
 const firewall_counters = @import("firewall_counters.zig");
-const netlink = @import("../port/linux/netlink.zig");
+const netlink = @import("vnet-port").linux.netlink;
 const state = @import("state.zig");
-const types = @import("../types.zig");
+const types = @import("vnet-core").types;
 const transport = @import("transport.zig");
 const unix = @import("unix.zig");
-const thread = @import("../thread.zig");
+const thread = @import("vnet-thread");
 
 pub const max_request_bytes = 64 * 1024;
 pub const max_config_request_bytes = 16 * 1024 * 1024;
@@ -2220,7 +2220,7 @@ fn writeStatus(
 ) !void {
     try json.beginObject();
     try writeField(json, "instance", snapshot.instance);
-    try writeField(json, "version", build_options.version);
+    try writeField(json, "version", core.version);
     try json.objectField("pid");
     try json.write(linux.getpid());
     try writeField(json, "started_ms", snapshot.started_ms);

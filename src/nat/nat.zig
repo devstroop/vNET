@@ -3,9 +3,9 @@
 //! rewrites of the same packet adjust the checksum instead of rescanning L4.
 
 const std = @import("std");
-const types = @import("../types.zig");
-const ipv4 = @import("../l3/ipv4.zig");
-const icmp = @import("../l3/icmp.zig");
+const types = @import("vnet-core").types;
+const ipv4 = @import("vnet-l3").ipv4;
+const icmp = @import("vnet-l3").icmp;
 
 pub const Rule = struct {
     port: types.PortId,

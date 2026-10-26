@@ -4,7 +4,7 @@
 //! router does not initiate DAD but answers probes for its own addresses.
 
 const std = @import("std");
-const types = @import("../types.zig");
+const types = @import("vnet-core").types;
 const ipv6 = @import("ipv6.zig");
 
 pub const Error = error{
