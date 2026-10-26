@@ -1,0 +1,70 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            target: x86_64-linux-gnu
+            arch: amd64
+          - os: ubuntu-24.04-arm
+            target: aarch64-linux-gnu
+            arch: arm64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+      - name: Verify tag matches build.zig.zon
+        run: |
+          version="$(sed -n 's/^[[:space:]]*\.version = "\([^"]*\)".*/\1/p' build.zig.zon | head -n1)"
+          test "v$version" = "$GITHUB_REF_NAME" || {
+            echo "tag $GITHUB_REF_NAME does not match version $version" >&2
+            exit 1
+          }
+      - name: Test
+        run: |
+          zig fmt --check build.zig build.zig.zon fuzz.zig src test.zig exec
+          zig build test
+      - name: Install RPM tooling
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y rpm
+      - name: Package
+        run: bash scripts/package.sh --target "${{ matrix.target }}" --out dist --rpm
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vnet-${{ matrix.arch }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: vnet-*
+          merge-multiple: true
+          path: dist
+      - name: Combine checksums
+        run: |
+          cd dist
+          sha256sum *.tar.gz *.deb *.rpm >SHA256SUMS
+          cat SHA256SUMS
+      - uses: softprops/action-gh-release@v2
+        with:
+          name: vNET ${{ github.ref_name }}
+          generate_release_notes: true
+          files: dist/*

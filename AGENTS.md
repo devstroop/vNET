@@ -43,7 +43,9 @@ bash scripts/nat_matrix.sh     # NAT/port-forward matrix (R3+)
 bash scripts/test_firewall.sh  # ordered rules/default drop (R6)
 bash scripts/test_vlan.sh      # 802.1Q access/trunk + SVI isolation (R5)
 bash scripts/test_offload.sh   # kernel-bridge offload parity (R5)
-bash scripts/perf.sh           # throughput smoke (R9a)
+bash scripts/perf.sh           # throughput/latency matrix (R9a)
+bash scripts/soak.sh --duration 24h  # flaps, live NAT edits, restarts
+ZIG=/path/to/zig bash scripts/package.sh --rpm  # tarball + .deb + .rpm
 ```
 
 Always run `zig build test`. For port/forwarding changes, also run
@@ -137,6 +139,8 @@ Always run `zig build test`. For port/forwarding changes, also run
 - New config key → `docs/CORE-SCOPE.md` §9 + JSON schema.
 - User-visible change → `CHANGELOG.md` under `Unreleased`.
 - Platform quirk → `docs/ANDROID.md` or a platform note.
+- Release/package change → `docs/RELEASE.md`, `docs/PERFORMANCE.md` and
+  `packaging/vnetd.service`.
 
 ## Commits
 

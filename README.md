@@ -38,6 +38,14 @@ zig build
 zig build --release=fast
 ```
 
+Linux release artifacts:
+
+```sh
+ZIG=/path/to/zig bash scripts/package.sh --rpm
+```
+
+This writes a tarball, `.deb`, `.rpm` and checksums to `dist/`.
+
 ## Test
 
 ```sh
@@ -49,8 +57,18 @@ bash scripts/test_ipv6.sh
 bash scripts/test_journal.sh
 bash scripts/test_crash.sh
 bash scripts/nat_matrix.sh
+bash scripts/test_firewall.sh
+bash scripts/test_vlan.sh
+bash scripts/test_offload.sh
 bash scripts/test_dhcp.sh
 bash scripts/test_dns.sh
+```
+
+Soak and performance:
+
+```sh
+ZIG=/path/to/zig bash scripts/soak.sh --duration 5m
+ZIG=/path/to/zig bash scripts/perf.sh --scenario all
 ```
 
 Cross-build:
@@ -100,14 +118,18 @@ vnet dns query <name> [-c <config>]
 
 ## Documentation
 
-1. `docs/PRODUCT.md`
-2. `docs/CORE-SCOPE.md`
-3. `docs/ANDROID.md`
-4. `docs/ARCHITECTURE.md`
-5. `docs/PLAN.md`
-6. `docs/RESEARCH.md`
-7. `docs/SOURCES.md`
-8. `docs/adr/`
+1. `docs/QUICKSTART.md`
+2. `docs/TROUBLESHOOTING.md`
+3. `docs/PERFORMANCE.md`
+4. `docs/RELEASE.md`
+5. `docs/PRODUCT.md`
+6. `docs/CORE-SCOPE.md`
+7. `docs/ANDROID.md`
+8. `docs/ARCHITECTURE.md`
+9. `docs/PLAN.md`
+10. `docs/RESEARCH.md`
+11. `docs/SOURCES.md`
+12. `docs/adr/`
 
 Contributor rules: `AGENTS.md`.
 
@@ -115,9 +137,10 @@ Contributor rules: `AGENTS.md`.
 
 - R0-R6: complete, including live NAT add/del and incremental checksum
   rewrites
-- R9a (current): Linux 0.2.0 preview; IPv6 core complete (ADR-013), with
-  fuzzing, crash recovery, performance, 24 h soak, packaging and release work
-  remaining
+- R9a (current): Linux 0.2.0 preview. IPv6, crash recovery, performance and
+  soak harnesses, packaging, systemd unit and release workflow are in place.
+  The 24 h/72 h evidence, 64 B packet-rate budget and GSO handling remain
+  release blockers; see `docs/PERFORMANCE.md` and `docs/RELEASE.md`.
 - R7: Linux control socket and C ABI foundation complete; Android
   JNI/VpnService host and proxy NAT pending
 - R8: planned

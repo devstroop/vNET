@@ -8,6 +8,8 @@ All notable changes to vNET are documented here. The format follows
 
 ### Changed
 
+- Bump the development version to 0.2.0 for the Linux preview. This is not a
+  release tag; see `docs/RELEASE.md` for the remaining gates.
 - **Breaking:** rename the project from vRouter to vNET (ADR-017). Use `vNET`
   in prose and `vnet` in commands, identifiers, paths and package names. The
   CLI, daemon and web adapter are `vnet`, `vnetd` and `vnetweb`; the C ABI is
@@ -19,6 +21,18 @@ All notable changes to vNET are documented here. The format follows
 
 ### Added
 
+- **Linux release tooling:** `scripts/package.sh` builds a release tarball, a
+  Debian package without `dpkg-deb`, and an RPM with `--rpm`;
+  `packaging/vnetd.service` provides a hardened systemd unit, and
+  `.github/workflows/release.yml` builds native amd64 and arm64 artifacts on
+  `v*` tags. `docs/QUICKSTART.md`,
+  `docs/TROUBLESHOOTING.md`, `docs/PERFORMANCE.md` and `docs/RELEASE.md`
+  document install, diagnosis, measurements and the release gates.
+- **Performance and soak harnesses:** `scripts/perf.sh` measures L3, L2 and
+  NAT throughput/latency in a netns; `scripts/soak.sh` runs traffic with link
+  flaps, live NAT edits and daemon restarts. The baseline is recorded in
+  `docs/PERFORMANCE.md`; the 64 B packet-rate budget and long-duration
+  evidence remain open.
 - **Compiler-checked shard graph (ADR-018):** `vnet-core`, `vnet-port`,
   `vnet-l2`, `vnet-l3`, `vnet-conntrack`, `vnet-nat`, `vnet-dhcp`, `vnet-dns`
   and `vnet-ctl` are now named Zig modules with declared dependencies and

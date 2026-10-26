@@ -219,8 +219,14 @@ and packaged without waiting for host integration.
 - [ ] Performance: hit budgets in CORE-SCOPE §12 on a named reference host.
 - [ ] 24 h soak with flaps, live NAT edits and service restarts.
 - [ ] Packaging: `.deb`/`.rpm`/AppImage, systemd unit and release workflow.
-- [ ] Docs: quickstart, config reference, troubleshooting, performance report.
+- [x] Docs: quickstart, config reference, troubleshooting, performance report.
 - [ ] v0.2.0 Linux preview.
+
+**Status (partial):** `scripts/perf.sh`, `scripts/soak.sh`,
+`scripts/package.sh`, `packaging/vnetd.service`, the release workflow and the
+quickstart/troubleshooting/performance/release guides are landed. The remaining
+boxes are open because the 64 B packet-rate budget, 24 h soak and 72 h fuzz
+evidence, the AppImage artifact, and a tagged 0.2.0 release are not complete.
 
 **Exit:** A fresh package install passes the quickstart; the 24 h soak,
 performance budgets and fuzz campaign are green; `vnet down` restores the

@@ -1,6 +1,6 @@
 .{
     .name = .vnet,
-    .version = "0.1.0",
+    .version = "0.2.0",
     .fingerprint = 0x62bbecb1dc665715,
     .minimum_zig_version = "0.16.0",
     .dependencies = .{},
@@ -14,6 +14,8 @@
         "test.zig",
         "fuzz.zig",
         "examples",
+        "docs",
+        "packaging",
         "scripts",
         "LICENSE",
         "README.md",

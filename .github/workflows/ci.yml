@@ -78,6 +78,27 @@ jobs:
       - run: sudo env "PATH=$PATH" "ZIG=$(command -v zig)" bash scripts/test_offload.sh
       - run: sudo env "PATH=$PATH" "ZIG=$(command -v zig)" bash scripts/test_dhcp.sh
       - run: sudo env "PATH=$PATH" "ZIG=$(command -v zig)" bash scripts/test_dns.sh
+      - run: sudo env "PATH=$PATH" "ZIG=$(command -v zig)" bash scripts/soak.sh --duration 30s --interval 2 --flap-interval 5 --restart-interval 10
+
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+      - run: sudo apt-get update && sudo apt-get install -y rpm
+      - run: bash scripts/package.sh --out dist --rpm
+      - run: |
+          version="$(sed -n 's/^[[:space:]]*\.version = "\([^"]*\)".*/\1/p' build.zig.zon | head -n1)"
+          test -f "dist/vnet_${version}_amd64.deb"
+          test -f "dist/vnet-${version}-linux-amd64.tar.gz"
+          test -f "dist/vnet-${version}-1.x86_64.rpm"
+          ar t "dist/vnet_${version}_amd64.deb"
+          tar -tzf "dist/vnet-${version}-linux-amd64.tar.gz" >/dev/null
+          rpm -qpl "dist/vnet-${version}-1.x86_64.rpm" >/dev/null
+          tar -xzf "dist/vnet-${version}-linux-amd64.tar.gz" -C /tmp
+          "/tmp/vnet-${version}/usr/bin/vnet" version
 
   zig-next:
     runs-on: ubuntu-latest
