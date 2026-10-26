@@ -43,15 +43,15 @@ pub fn build(b: *std.Build) void {
 
     const static_lib = b.addLibrary(.{
         .linkage = .static,
-        .name = "vrouter",
+        .name = "vnet",
         .root_module = ffi_mod,
     });
     b.installArtifact(static_lib);
-    static_lib.installHeader(b.path("include/vrouter.h"), "vrouter.h");
+    static_lib.installHeader(b.path("include/vnet.h"), "vnet.h");
 
     const shared_lib = b.addLibrary(.{
         .linkage = .dynamic,
-        .name = "vrouter",
+        .name = "vnet",
         .root_module = ffi_mod,
         .version = semantic_version,
     });
@@ -60,16 +60,16 @@ pub fn build(b: *std.Build) void {
 
     if (is_linux and !is_android) {
         const exe_mod = b.createModule(.{
-            .root_source_file = b.path("exec/vrouter/main.zig"),
+            .root_source_file = b.path("exec/vnet/main.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{
-                .{ .name = "vrouter", .module = core_mod },
+                .{ .name = "vnet", .module = core_mod },
             },
         });
 
         const exe = b.addExecutable(.{
-            .name = "vrouter",
+            .name = "vnet",
             .root_module = exe_mod,
         });
         b.installArtifact(exe);
@@ -82,20 +82,20 @@ pub fn build(b: *std.Build) void {
             run_cmd.addPassthruArgs();
         }
 
-        const run_step = b.step("run", "Run vRouter");
+        const run_step = b.step("run", "Run vNET");
         run_step.dependOn(&run_cmd.step);
 
         const daemon_mod = b.createModule(.{
-            .root_source_file = b.path("exec/vrouterd/main.zig"),
+            .root_source_file = b.path("exec/vnetd/main.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{
-                .{ .name = "vrouter", .module = core_mod },
+                .{ .name = "vnet", .module = core_mod },
             },
         });
 
         const daemon = b.addExecutable(.{
-            .name = "vrouterd",
+            .name = "vnetd",
             .root_module = daemon_mod,
         });
         b.installArtifact(daemon);
@@ -105,13 +105,13 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
             .imports = &.{
-                .{ .name = "vrouter", .module = core_mod },
+                .{ .name = "vnet", .module = core_mod },
             },
         });
         web_mod.addImport("build_options", core_options_mod);
 
         const web_exe_mod = b.createModule(.{
-            .root_source_file = b.path("exec/vrouterweb/main.zig"),
+            .root_source_file = b.path("exec/vnetweb/main.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{
@@ -120,7 +120,7 @@ pub fn build(b: *std.Build) void {
             },
         });
         const web_exe = b.addExecutable(.{
-            .name = "vrouterweb",
+            .name = "vnetweb",
             .root_module = web_exe_mod,
         });
         const web_step = b.step("web", "Build the HTMX web admin");

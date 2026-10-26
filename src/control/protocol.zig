@@ -461,7 +461,7 @@ test "v3 response round-trips config fields" {
         .op = "config.get",
         .protocol_version = version,
         .revision = "sha256:abc",
-        .source_path = "/etc/vrouter/vrouter.json",
+        .source_path = "/etc/vnet/vnet.json",
         .writable = true,
         .config = .{ .object = config },
     };

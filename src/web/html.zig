@@ -38,7 +38,7 @@ pub fn writePage(w: *std.Io.Writer, opts: PageOptions) !void {
     );
     try writeEscaped(w, opts.title);
     try w.writeAll(
-        \\ · vRouter</title>
+        \\ · vNET</title>
         \\  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
         \\  <script src="/assets/theme-init.js"></script>
         \\  <link rel="stylesheet" href="/assets/app.css?v=
@@ -56,9 +56,9 @@ pub fn writePage(w: *std.Io.Writer, opts: PageOptions) !void {
         \\<body>
         \\<div class="app-shell">
         \\  <aside class="sidebar">
-        \\    <a class="brand" href="/overview" aria-label="vRouter overview">
+        \\    <a class="brand" href="/overview" aria-label="vNET overview">
         \\      <span class="brand-mark">VR</span>
-        \\      <span class="brand-copy"><strong>vRouter</strong><small>Admin preview</small></span>
+        \\      <span class="brand-copy"><strong>vNET</strong><small>Admin preview</small></span>
         \\    </a>
         \\    <nav class="nav" aria-label="Primary">
     );
@@ -149,7 +149,7 @@ pub fn writeLoginPage(w: *std.Io.Writer, error_message: ?[]const u8) !void {
         \\<head>
         \\  <meta charset="utf-8">
         \\  <meta name="viewport" content="width=device-width, initial-scale=1">
-        \\  <title>Sign in · vRouter</title>
+        \\  <title>Sign in · vNET</title>
         \\  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
         \\  <script src="/assets/theme-init.js"></script>
         \\  <link rel="stylesheet" href="/assets/app.css?v=
@@ -161,9 +161,9 @@ pub fn writeLoginPage(w: *std.Io.Writer, error_message: ?[]const u8) !void {
         \\<body class="login-body">
         \\<main class="login-shell">
         \\  <section class="login-hero">
-        \\    <a class="brand brand-on-dark" href="/login" aria-label="vRouter">
+        \\    <a class="brand brand-on-dark" href="/login" aria-label="vNET">
         \\      <span class="brand-mark">VR</span>
-        \\      <span class="brand-copy"><strong>vRouter</strong><small>Admin preview</small></span>
+        \\      <span class="brand-copy"><strong>vNET</strong><small>Admin preview</small></span>
         \\    </a>
         \\    <div class="login-hero-copy">
         \\      <span class="pill">Local control plane</span>
@@ -175,11 +175,11 @@ pub fn writeLoginPage(w: *std.Io.Writer, error_message: ?[]const u8) !void {
         \\        <li>Changes are staged; nothing is applied implicitly</li>
         \\      </ul>
         \\    </div>
-        \\    <p class="login-hero-foot">vRouter 0.2 preview · loopback only</p>
+        \\    <p class="login-hero-foot">vNET 0.2 preview · loopback only</p>
         \\  </section>
         \\  <section class="login-panel">
         \\    <div class="login-card">
-        \\      <p class="eyebrow">vRouter admin</p>
+        \\      <p class="eyebrow">vNET admin</p>
         \\      <h2>Sign in</h2>
         \\      <p class="muted">Use the password configured for the local web admin.</p>
         \\

@@ -17,7 +17,7 @@
       const next = currentTheme() === "dark" ? "light" : "dark";
       root.dataset.theme = next;
       try {
-        localStorage.setItem("vrouter-theme", next);
+        localStorage.setItem("vnet-theme", next);
       } catch {
         // Ignore storage failures; the current page still switches.
       }

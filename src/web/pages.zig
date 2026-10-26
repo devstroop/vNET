@@ -2,8 +2,8 @@
 //! source of truth; these functions format running snapshots and staged drafts.
 
 const std = @import("std");
-const vrouter = @import("vrouter");
-const protocol = vrouter.control_protocol;
+const vnet = @import("vnet");
+const protocol = vnet.control_protocol;
 const html = @import("html.zig");
 
 pub fn overviewPage(
@@ -395,7 +395,7 @@ fn writeStagedReviewDialog(
         try w.writeAll("</div>");
     }
     if (review.restart_required) {
-        try w.writeAll("<div class=\"alert alert-warn\" role=\"alert\"><strong>Restart required.</strong> This change cannot be applied live; it is saved and applied after vrouterd restarts.</div>");
+        try w.writeAll("<div class=\"alert alert-warn\" role=\"alert\"><strong>Restart required.</strong> This change cannot be applied live; it is saved and applied after vnetd restarts.</div>");
     }
     if (review.diff.len > 0) {
         try w.writeAll("<pre class=\"diff\">");
@@ -424,7 +424,7 @@ fn writeStagedReviewDialog(
 fn writeRestartBanner(w: *std.Io.Writer, csrf: []const u8, token: ?[]const u8, supported: bool) !void {
     try w.writeAll("<div class=\"alert alert-warn\" role=\"alert\"><strong>Restart required.</strong> The running daemon still uses the old service configuration. ");
     if (token) |value| {
-        try w.writeAll("Restart vrouterd to activate the committed config.");
+        try w.writeAll("Restart vnetd to activate the committed config.");
         if (supported) {
             try w.writeAll("<form class=\"inline-form restart-form\" method=\"post\" action=\"/restart\" hx-post=\"/restart\" hx-target=\"#restart-result\" hx-swap=\"innerHTML\" hx-indicator=\"#refresh-indicator\"><input type=\"hidden\" name=\"csrf\" value=\"");
             try html.writeEscaped(w, csrf);
@@ -433,7 +433,7 @@ fn writeRestartBanner(w: *std.Io.Writer, csrf: []const u8, token: ?[]const u8, s
             try w.writeAll("\"><button class=\"button button-primary button-inline\" type=\"submit\">Restart daemon</button></form><div id=\"restart-result\"></div>");
         }
     } else {
-        try w.writeAll("Run <code>systemctl restart vrouterd</code> from a local shell; this deployment did not expose a restart token.");
+        try w.writeAll("Run <code>systemctl restart vnetd</code> from a local shell; this deployment did not expose a restart token.");
     }
     try w.writeAll("</div>");
 }
@@ -604,7 +604,7 @@ pub fn dhcpPage(gpa: std.mem.Allocator, w: *std.Io.Writer, view: DhcpView) !void
     try writeDhcpBody(&body.writer, view);
     try html.writePage(w, .{
         .title = "DHCP",
-        .subtitle = "Address pools, lease policy and static reservations. Saved changes take effect after vrouterd restarts.",
+        .subtitle = "Address pools, lease policy and static reservations. Saved changes take effect after vnetd restarts.",
         .active = .dhcp,
         .csrf = view.csrf,
         .body = body.written(),
@@ -639,7 +639,7 @@ pub fn dhcpFragment(w: *std.Io.Writer, view: DhcpView) !void {
         try html.writeNumber(w, view.pending);
         try w.writeAll(" pending change");
         if (view.pending != 1) try w.writeAll("s");
-        try w.writeAll("</strong><p>DHCP config is staged. Saving writes the config file; restart vrouterd to activate it.</p></div>");
+        try w.writeAll("</strong><p>DHCP config is staged. Saving writes the config file; restart vnetd to activate it.</p></div>");
     } else {
         try w.writeAll("<span class=\"badge badge-ok\">Running</span><div><strong>Running configuration</strong><p>Add or edit servers to stage a draft. Nothing changes until Save.</p></div>");
     }
@@ -860,7 +860,7 @@ pub fn dnsPage(gpa: std.mem.Allocator, w: *std.Io.Writer, view: DnsView) !void {
     try writeDnsBody(&body.writer, view);
     try html.writePage(w, .{
         .title = "DNS",
-        .subtitle = "Forwarder upstreams, listener and split-DNS zones. Saved changes take effect after vrouterd restarts.",
+        .subtitle = "Forwarder upstreams, listener and split-DNS zones. Saved changes take effect after vnetd restarts.",
         .active = .dns,
         .csrf = view.csrf,
         .body = body.written(),
@@ -895,7 +895,7 @@ pub fn dnsFragment(w: *std.Io.Writer, view: DnsView) !void {
         try html.writeNumber(w, view.pending);
         try w.writeAll(" pending change");
         if (view.pending != 1) try w.writeAll("s");
-        try w.writeAll("</strong><p>DNS config is staged. Saving writes the config file; restart vrouterd to activate it.</p></div>");
+        try w.writeAll("</strong><p>DNS config is staged. Saving writes the config file; restart vnetd to activate it.</p></div>");
     } else {
         try w.writeAll("<span class=\"badge badge-ok\">Running</span><div><strong>Running configuration</strong><p>Edit the resolver settings or add a zone to stage a draft. Nothing changes until Save.</p></div>");
     }
@@ -1666,7 +1666,7 @@ pub fn systemPage(
     try writeSystemBody(&body.writer, status, err, now_ms, restart);
     try html.writePage(w, .{
         .title = "System",
-        .subtitle = "Runtime identity and paths reported by the vRouter daemon.",
+        .subtitle = "Runtime identity and paths reported by the vNET daemon.",
         .active = .system,
         .csrf = csrf,
         .body = body.written(),
@@ -1703,7 +1703,7 @@ fn writeSystemBody(
     try systemFragment(w, status, err, now_ms, restart);
     try w.writeAll("</div>\n");
     if (restart.supported) {
-        try w.writeAll("<dialog id=\"daemon-stop\" class=\"dialog dialog-sm\"><div class=\"dialog-card\"><header class=\"dialog-head\"><div><h3>Stop vrouterd?</h3><p>Forwarding stops immediately and this admin disconnects. The daemon only returns if a supervisor starts it again.</p></div><button class=\"icon-button\" type=\"button\" data-dialog-close aria-label=\"Close\">×</button></header><form class=\"dialog-form\" method=\"post\" action=\"/stop\" hx-post=\"/stop\" hx-target=\"#stop-result\" hx-swap=\"innerHTML\" hx-indicator=\"#refresh-indicator\"><input type=\"hidden\" name=\"csrf\" value=\"");
+        try w.writeAll("<dialog id=\"daemon-stop\" class=\"dialog dialog-sm\"><div class=\"dialog-card\"><header class=\"dialog-head\"><div><h3>Stop vnetd?</h3><p>Forwarding stops immediately and this admin disconnects. The daemon only returns if a supervisor starts it again.</p></div><button class=\"icon-button\" type=\"button\" data-dialog-close aria-label=\"Close\">×</button></header><form class=\"dialog-form\" method=\"post\" action=\"/stop\" hx-post=\"/stop\" hx-target=\"#stop-result\" hx-swap=\"innerHTML\" hx-indicator=\"#refresh-indicator\"><input type=\"hidden\" name=\"csrf\" value=\"");
         try html.writeEscaped(w, restart.csrf);
         try w.writeAll("\"><label class=\"field\"><span>Type <code class=\"mono\">stop</code> to confirm</span><input name=\"confirm\" required autocomplete=\"off\" autocapitalize=\"none\" spellcheck=\"false\" placeholder=\"stop\"></label><footer class=\"dialog-actions\"><button class=\"button\" type=\"button\" data-dialog-close>Cancel</button><button class=\"button button-danger\" type=\"submit\">Stop daemon</button></footer></form></div></dialog>");
     }

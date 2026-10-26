@@ -1,10 +1,21 @@
 # Changelog
 
-All notable changes to vRouter are documented here. The format follows
+All notable changes to vNET are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
+
+### Changed
+
+- **Breaking:** rename the project from vRouter to vNET (ADR-017). Use `vNET`
+  in prose and `vnet` in commands, identifiers, paths and package names. The
+  CLI, daemon and web adapter are `vnet`, `vnetd` and `vnetweb`; the C ABI is
+  `vnet_*` in `include/vnet.h` (ABI 3); environment variables, default config
+  and run paths, the control socket, journals, the daemon log and the local DNS
+  status zone use `vnet`/`VNET`. There are no compatibility aliases. Stop any
+  pre-rename daemon with the old `vrouter down` before upgrading; `/run/vrouter`
+  state is not migrated.
 
 ### Added
 
@@ -17,7 +28,7 @@ All notable changes to vRouter are documented here. The format follows
   the in-memory binding without notifying the client, persists the lease
   database, and is audited. All flows preserve staged drafts where present,
   and successful link changes are audited.
-- **Supervised stop (P2):** the System page stops vrouterd after a typed
+- **Supervised stop (P2):** the System page stops vnetd after a typed
   `stop` confirmation. The control call is audited, requires a supervisor
   (`--enable-restart`), and reports the accepted stop before the daemon exits;
   the UI explains that forwarding stops and the admin disconnects.
@@ -25,8 +36,8 @@ All notable changes to vRouter are documented here. The format follows
   `restart_required` with a one-time, boot-bound `restart_token` when restart
   support is enabled. `daemon.restart` consumes the token, audits the accepted
   operation and asks the service loop to exit cleanly; `daemon.stop` uses typed
-  `stop` confirmation. `vrouter up` passes `--enable-restart`, and direct
-  `vrouterd` runs can opt in with the same flag, to perform a clean teardown and
+  `stop` confirmation. `vnet up` passes `--enable-restart`, and direct
+  `vnetd` runs can opt in with the same flag, to perform a clean teardown and
   self re-exec for preview deployments; without it, lifecycle calls fail with
   `restart_unavailable`. The DHCP, DNS and System
   pages show a persistent restart banner and a restart button when a token is
@@ -65,7 +76,7 @@ All notable changes to vRouter are documented here. The format follows
   worker, and the client accepts 16 MiB config responses. v3 list reads expose
   ports, bridges, interfaces, routes, DHCP, DNS and firewall configuration from
   the current on-disk document.
-- **Web admin preview (post-v1, ADR-011):** opt-in `vrouterweb` built with
+- **Web admin preview (post-v1, ADR-011):** opt-in `vnetweb` built with
   `zig build web`. The Zig process serves server-rendered HTMX 4.0.0 pages and
   fragments with embedded assets, plus a same-origin JSON API backed by the
   Unix control socket. It binds loopback only, authenticates with an Argon2id
@@ -74,15 +85,15 @@ All notable changes to vRouter are documented here. The format follows
   above extend the same preview. No Node build step, package manager or runtime
   asset directory is required. It is excluded from the default build and not
   part of the 0.2.0 scope. See `docs/WEB.md`.
-- **Crash recovery:** `vrouter doctor` is now read-only but works after a
-  daemon crash, and `vrouter doctor --repair` replays journal inverses while
+- **Crash recovery:** `vnet doctor` is now read-only but works after a
+  daemon crash, and `vnet doctor --repair` replays journal inverses while
   refusing to run against a live daemon. Malformed journal tails are quarantined
   to `<instance>.journal.quarantine.<timestamp>`; malformed records before valid
   ones refuse repair without mutating host state. `scripts/test_crash.sh` covers
   kill -9, dry-run, live-daemon refusal, unmanaged-state preservation, and
   malformed-journal handling.
-- **Live NAT updates (ADR-014):** `vrouter nat add|del masquerade` and
-  `vrouter nat add|del port-forward` validate and atomically save the config,
+- **Live NAT updates (ADR-014):** `vnet nat add|del masquerade` and
+  `vnet nat add|del port-forward` validate and atomically save the config,
   apply the complete desired NAT tables over the protocol-v2 `nat.apply`
   control operation, and restore the previous config if the daemon rejects the
   update. With no daemon the change is saved with a warning. The NAT apply queue
@@ -97,34 +108,34 @@ All notable changes to vRouter are documented here. The format follows
   CIDRs, IPv6 routes with family-checked next hops, firewall `family` and
   `proto: "icmpv6"`, and `firewall.rate_limit.ndp`. IPv6-enabled interfaces
   require MTU >= 1280.
-- `vrouter iface set|del` and `vrouter route add|del` accept IPv6 values and
-  journal AF_INET6 host mutations; `vrouter firewall test` accepts IPv6
+- `vnet iface set|del` and `vnet route add|del` accept IPv6 values and
+  journal AF_INET6 host mutations; `vnet firewall test` accepts IPv6
   addresses and `icmpv6`.
 - `scripts/test_ipv6.sh` netns test for IPv6 ping and TCP forwarding.
 
 - R7 Linux control socket: line-delimited JSON over
-  `/run/vrouter/control.sock` (mode `0660`, peer-uid check), live read-only
-  `status`, `nat.list` and `conntrack.list`, and the `vrouter up`, `vrouter doctor`,
-  `vrouter nat list` and `vrouter conntrack list` CLI commands. The daemon publishes
+  `/run/vnet/control.sock` (mode `0660`, peer-uid check), live read-only
+  `status`, `nat.list` and `conntrack.list`, and the `vnet up`, `vnet doctor`,
+  `vnet nat list` and `vnet conntrack list` CLI commands. The daemon publishes
   immutable datapath snapshots once per second. A run-dir lock rejects a
-  second daemon, concurrent `vrouter up` starts are serialized, and `vrouter down`
-  refuses while a matching daemon is live. `vrouter up` writes daemon stderr to
-  `<state_dir>/vrouterd.log` and reports its path and tail on failure.
+  second daemon, concurrent `vnet up` starts are serialized, and `vnet down`
+  refuses while a matching daemon is live. `vnet up` writes daemon stderr to
+  `<state_dir>/vnetd.log` and reports its path and tail on failure.
 - R7 foundation: reusable daemon lifecycle (`src/app/service.zig`) shared by
-  `vrouterd` and the versioned C ABI (`include/vrouter.h`, `src/ffi.zig`), an
+  `vnetd` and the versioned C ABI (`include/vnet.h`, `src/ffi.zig`), an
   injected-fd L3 port for Android `VpnService`, stable lifecycle/error/status
   codes, and a compiled C header/link smoke test.
 - Optional Linux kernel-bridge offload (`bridge.offload = "kernel"`): creates a
   journaled kernel bridge, enslaves existing L2 members, and attaches a veth
   trunk as the bridge's synthetic userspace port. Kernel VLAN filtering/STP,
-  transactional rollback, `vrouter down` restoration, and the
+  transactional rollback, `vnet down` restoration, and the
   `scripts/test_offload.sh` L2/SVI/DHCP/NAT/STP parity test are included.
   Offloaded members reject `create`/`mtu` overrides and warn when per-port
   `storm_control` cannot be enforced by the kernel bridge.
 - R0 scaffold: `build.zig`/`build.zig.zon`, cross-compilation for Linux and
   Android, CI matrix.
 - Strict JSON configuration schema, parser and semantic validator.
-- `vrouter` CLI with `version`, `validate` and `help`.
+- `vnet` CLI with `version`, `validate` and `help`.
 - `std.Io` context helper and leveled text/JSON logger (stack-buffered).
 - `Port` vtable, in-memory reference port, fixed-size buffer pool.
 - Golden Ethernet/IPv4/UDP frame fixtures and round-trip tests.
@@ -144,15 +155,15 @@ All notable changes to vRouter are documented here. The format follows
   `iif`/`oif` (port, interface or bridge), `accept`/`drop`/`reject`,
   `ct_state`, per-rule counters, and default deny before the conntrack
   established shortcut.
-- `vrouter firewall list` prints the ordered rule set, default policies and
+- `vnet firewall list` prints the ordered rule set, default policies and
   control-plane rate limits.
-- `vrouter firewall test` evaluates a synthetic packet against the configured
+- `vnet firewall test` evaluates a synthetic packet against the configured
   rules and prints the matching rule or default action.
-- `vrouter firewall counters` reads the per-rule packet and drop snapshot that
-  `vrouterd` writes to the run directory every 5 s and on shutdown.
+- `vnet firewall counters` reads the per-rule packet and drop snapshot that
+  `vnetd` writes to the run directory every 5 s and on shutdown.
 - Token-bucket limits for generated ICMP errors, ARP processing and DHCP
   server requests (`firewall.rate_limit`); `0` disables a limit.
-- `vrouter bridge list` shows bridge membership, effective PVID/tagged VLANs,
+- `vnet bridge list` shows bridge membership, effective PVID/tagged VLANs,
   tri-state STP/offload and SVI addressing.
 - Per-port storm control (`ports.<name>.storm_control`, default 1000
   flooded frames/s, `0` disables) with a `storm_dropped` counter.
@@ -243,23 +254,23 @@ All notable changes to vRouter are documented here. The format follows
 - Forwarding pipeline: TTL decrement, IPv4/TCP/UDP checksum repair (ADR-007),
   ICMP unreachable/time-exceeded/frag-needed, egress MTU enforcement, Ethernet
   and TUN egress.
-- `vrouterd` data loop: polls ports, forwards frames and logs counters.
+- `vnetd` data loop: polls ports, forwards frames and logs counters.
 - Config interfaces/static routes populate local addresses, connected routes
   and the FIB.
 - `scripts/test_route.sh`: two isolated hosts ping and fetch HTTP through
-  `vrouterd`; verifies TTL=63, TCP and graceful shutdown.
+  `vnetd`; verifies TTL=63, TCP and graceful shutdown.
 - Gratuitous ARP announcements for configured local addresses at daemon start.
 - ARP pending-packet queue (32 slots, 1 s): the first packet to an unresolved
   neighbor is flushed on reply instead of being dropped.
 - TUN/L3 ingress and egress: bare IPv4, local echo replies, ICMP errors and
   forwarding between TUN and L2 ports. `scripts/test_tun.sh` covers ICMP and
   TCP through a kernel TUN peer.
-- `vrouter iface set|del|up|down` and `vrouter route add|del` with journal-before-
-  mutation, ownership-gated deletes, and `vrouter down` reverse rollback.
-- JSONL journal under `$VROUTER_RUN_DIR` (default `/run/vrouter`), atomic and
+- `vnet iface set|del|up|down` and `vnet route add|del` with journal-before-
+  mutation, ownership-gated deletes, and `vnet down` reverse rollback.
+- JSONL journal under `$VNET_RUN_DIR` (default `/run/vnet`), atomic and
   fsynced; failed applies remove their record; partial rollback keeps the
   journal for inspection and retry.
-- `vrouter journal` for inspecting recorded mutations.
+- `vnet journal` for inspecting recorded mutations.
 - `scripts/test_journal.sh`: address/route/link mutations, duplicate no-ops,
   unmanaged-delete rejection, pre-existing state preservation and rollback.
 
@@ -275,11 +286,11 @@ All notable changes to vRouter are documented here. The format follows
   configurable cache size (`dns.max_entries`) and counters.
 - `scripts/test_dhcp.sh`: raw Ethernet DHCP client obtains a lease, pings the
   router and verifies persistence across a daemon restart.
-- `scripts/test_dns.sh`: query through `vrouterd`, answer from the fake upstream,
+- `scripts/test_dns.sh`: query through `vnetd`, answer from the fake upstream,
   then a cache hit; both tests run in CI.
 - Not yet: DNS DoH/DoT.
 - Added: initial DHCP client on the uplink, DNS over TCP, split zones and a
-  local `vrouter.` / `router.vrouter.` status zone.
+  local `vnet.` / `router.vnet.` status zone.
 
 ### R3 — NAT and conntrack
 
@@ -310,7 +321,7 @@ All notable changes to vRouter are documented here. The format follows
 - TUN (`IFF_NO_PI`) and TAP ports, created from config (`"create": "tun"|"tap"`).
 - rtnetlink link dump and link/addr/neigh monitor with bounds-checked parsing.
 - Port manager with stable IDs, MTU application and hotplug refresh.
-- `vrouter port list`, `vrouter status`, `vrouter selftest`, and the `vrouterd` daemon
+- `vnet port list`, `vnet status`, `vnet selftest`, and the `vnetd` daemon
   skeleton with graceful SIGINT/SIGTERM shutdown.
 - `scripts/test_netns.sh`: veth L2 forwarding, TUN/TAP creation, netlink dump,
   manager status and daemon hotplug in a private netns.

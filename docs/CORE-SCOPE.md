@@ -1,4 +1,4 @@
-# vRouter — Core Scope (v1)
+# vNET — Core Scope (v1)
 
 > This is the functional contract for the first release. If it is not in this
 > document, it is not in v1.
@@ -17,7 +17,7 @@ corresponding evidence exists.
 
 ## 1. What "router" means here
 
-vRouter is a **userspace L2/L3 forwarding engine**. It opens interfaces directly,
+vNET is a **userspace L2/L3 forwarding engine**. It opens interfaces directly,
 moves frames/packets between them, and implements bridging, routing, NAT,
 DHCP, DNS and a packet filter. A kernel fast path may be used as an
 optimization, but the portable userspace path is the reference behavior.
@@ -31,7 +31,7 @@ subsystems for offload, but it must still work when they are unavailable.
         └──────────────────────────────┬───────────────────────────────┘
                                        │ desired state
         ┌──────────────────────────────▼───────────────────────────────┐
-        │                         vRouter core                         │
+        │                         vNET core                         │
         │                                                              │
         │  ┌─────────┐   ┌──────────┐   ┌────────┐   ┌─────────────┐   │
         │  │ L2 port │──▶│  bridge  │──▶│ router │──▶│ NAT/conntrack│  │
@@ -75,10 +75,10 @@ Every port exposes:
 | monitor | rtnetlink `RTMGRP_LINK`, `RTMGRP_IPV4_IFADDR`, `RTMGRP_IPV6_IFADDR`, `RTMGRP_NEIGH` | — |
 
 - Config creation: set `"create": "tun"` (L3) or `"create": "tap"` (L2) to
-  have vRouter create the device. Existing L2 devices are opened via `AF_PACKET`;
-  existing L3 devices are rejected because vRouter cannot adopt their fd from
+  have vNET create the device. Existing L2 devices are opened via `AF_PACKET`;
+  existing L3 devices are rejected because vNET cannot adopt their fd from
   config (hosts may still inject a TUN fd through the C ABI).
-- Default: **no kernel bridge**, vRouter bridges in userspace. Optional
+- Default: **no kernel bridge**, vNET bridges in userspace. Optional
   `bridge.offload = "kernel"` creates a kernel bridge and enslaves ports for
   higher throughput.
 - Checksums: do not request hardware offload on TUN; compute in software so the
@@ -92,7 +92,7 @@ Every port exposes:
 | VPN (no root) | L3 | `VpnService.Builder.establish()` fd passed over JNI |
 | VPN (no root) | L3 uplink | protected `Socket`/`DatagramSocket` (bypasses VPN) |
 | Root | L2 | `AF_PACKET` on `wlan0`/`ap0`/`usb0`/`rmnet*` |
-| Root | L3 | TUN created by vRouter or injected by host |
+| Root | L3 | TUN created by vNET or injected by host |
 
 Host integration is defined in [ANDROID.md](./ANDROID.md).
 
@@ -102,7 +102,7 @@ Host integration is defined in [ANDROID.md](./ANDROID.md).
   disappearance are events.
 - On disappearance: flush neighbors, routes, conntrack entries and DHCP leases
   bound to that port; emit `port_removed`; do not crash.
-- `admin_up` is a vRouter concept (port enabled) separate from kernel link state.
+- `admin_up` is a vNET concept (port enabled) separate from kernel link state.
 
 ### 2.6 Frame/packet representation
 
@@ -163,7 +163,7 @@ pub const Frame = struct {
 `bridge.offload = "none" | "kernel"`:
 - `none`: userspace forwarding (default, portable).
 - `kernel` (Linux): create one kernel bridge and enslave the configured
-  members. vRouter opens the peer of a veth trunk as a synthetic L2 port, so SVIs,
+  members. vNET opens the peer of a veth trunk as a synthetic L2 port, so SVIs,
   routing, NAT, DHCP, DNS and firewall remain in userspace. When
   `vlan_aware = true`, the kernel bridge filters VLANs and the trunk carries
   PVID 1 untagged plus the union of member/SVI VLANs tagged. `bridge.stp`
@@ -172,10 +172,10 @@ pub const Frame = struct {
   are rejected), rejects a `pvid` that is also tagged, and never adopts an
   existing bridge or an already-enslaved port. Setup is journaled as one
   transaction; on failure the inverse is replayed to its checkpoint.
-  `vrouter down` removes the bridge, veth and VLAN entries and restores member
+  `vnet down` removes the bridge, veth and VLAN entries and restores member
   link state.
 - Per-port `storm_control` is not enforced on offloaded physical members; the
-  bridge is forwarded by the kernel. vrouterd warns while any offloaded member
+  bridge is forwarded by the kernel. vnetd warns while any offloaded member
   requests it (set `storm_control = 0` to silence).
 - Firewall `iif`/`oif` references to offloaded physical members are rejected;
   use the bridge name to match the synthetic trunk.
@@ -249,7 +249,7 @@ Per bridge/port: rx/tx frames, bytes, flooded, learned, aged, drops
   VLAN-aware bridges enforce per-port PVID/tagged membership.
 - TCP/UDP checksums are recomputed on forwarded, non-fragmented packets
   (ADR-007).
-- Gratuitous ARP is sent for configured local addresses when `vrouterd` starts.
+- Gratuitous ARP is sent for configured local addresses when `vnetd` starts.
   On a neighbor miss, up to 32 packets are queued for 1 s and flushed when the
   ARP reply arrives; overflow/expiry drops are counted. Proxy ARP and periodic
   neighbor refresh are not enabled yet.
@@ -263,8 +263,8 @@ Per bridge/port: rx/tx frames, bytes, flooded, learned, aged, drops
 - IPv6 forwarding repairs TCP/UDP checksums, enforces the hop limit and
   supports IPv6 static/connected routes. There is no IPv6 conntrack or NAT in
   v1.0.
-- `vrouter iface`/`vrouter route` mutations are journaled under `$VROUTER_RUN_DIR` and
-  restored by `vrouter down` (§9.4).
+- `vnet iface`/`vnet route` mutations are journaled under `$VNET_RUN_DIR` and
+  restored by `vnet down` (§9.4).
 
 ## 5. NAT and conntrack
 
@@ -288,7 +288,7 @@ pub const FlowState = enum { new, established, related, closing };
 - GC: 1 s sweep, incremental; hard cap `max_entries` (default 65,536).
 - Fragments: first-fragment creates state; subsequent fragments matched by
   `(src, dst, id, proto)`; no reassembly in v1.
-- Exposed in `vrouter conntrack` with bytes/packets/age/state.
+- Exposed in `vnet conntrack` with bytes/packets/age/state.
 
 ### 5.2 SNAT / masquerade
 
@@ -304,9 +304,9 @@ pub const FlowState = enum { new, established, related, closing };
 ### 5.3 DNAT / port forwarding
 
 ```
-vrouter nat add port-forward --proto tcp --ext-port 8080 --to 10.10.0.5:80
-vrouter nat add port-forward --proto udp --ext-port 51820 --to 10.10.0.7:51820
-vrouter nat del port-forward --proto tcp --ext-port 8080
+vnet nat add port-forward --proto tcp --ext-port 8080 --to 10.10.0.5:80
+vnet nat add port-forward --proto udp --ext-port 51820 --to 10.10.0.7:51820
+vnet nat del port-forward --proto tcp --ext-port 8080
 ```
 
 - Match on the local destination address, protocol, external port and the
@@ -353,7 +353,7 @@ vrouter nat del port-forward --proto tcp --ext-port 8080
   conntrack/NAT (ADR-007). Ordinary and multi-step NAT rewrites then adjust
   TCP/UDP/ICMP checksums incrementally (RFC 1624); ICMP-error quoted headers use
   the same incremental mechanism.
-- `vrouter nat add|del` is a config-backed live transaction (ADR-014): the CLI
+- `vnet nat add|del` is a config-backed live transaction (ADR-014): the CLI
   validates and atomically saves the config, sends the complete desired NAT
   tables over the control socket (`nat.apply`, protocol v2), and restores the
   file if the daemon rejects or cannot receive the apply. With no daemon it
@@ -393,11 +393,11 @@ admin-prohibited). `mark`, `dscp`, `log`, and NAT actions remain future work.
   second of burst: `icmp` for generated ICMP errors, `arp` for ARP frames,
   `ndp` for NDP messages and `dhcp` for DHCP server requests. `0` disables a
   limit; excess packets are dropped and counted.
-- `vrouter firewall test` evaluates a synthetic packet against the ordered rules
+- `vnet firewall test` evaluates a synthetic packet against the ordered rules
   offline (same compiler as the datapath) and prints the match.
-- `vrouterd` rewrites `<run>/<instance>.firewall.json` atomically every 5 s and
+- `vnetd` rewrites `<run>/<instance>.firewall.json` atomically every 5 s and
   on shutdown with per-rule packet counts and drop/rate-limit aggregates;
-  `vrouter firewall counters` reads it. Export is best-effort so an unwritable
+  `vnet firewall counters` reads it. Export is best-effort so an unwritable
   run directory never stops forwarding.
 
 ### 6.2 Limits
@@ -413,7 +413,7 @@ admin-prohibited). `mark`, `dscp`, `log`, and NAT actions remain future work.
 - Pool, static reservations by MAC or client-id, lease time, renewal/rebind.
 - Options: router, DNS, domain, MTU, NTP, lease time, vendor class.
 - Conflict detection: ARP probe before offer; handle DECLINE.
-- Persisted leases (`/var/lib/vrouter/leases.json`), restored on start.
+- Persisted leases (`/var/lib/vnet/leases.json`), restored on start.
 - DHCP relay: out of scope v1.
 - DHCPv6/RA: v1.1.
 
@@ -422,7 +422,7 @@ admin-prohibited). `mark`, `dscp`, `log`, and NAT actions remain future work.
 - Implemented: pool allocation, MAC reservations, options 1/3/6/15/26/28/42,
   OFFER/ACK/NAK/DECLINE/RELEASE/INFORM, offer/decline timers and optional
   `lease_db` persistence (atomic JSON, restored on start).
-- The server is userspace-only: `vrouterd` intercepts UDP/67 on configured ports
+- The server is userspace-only: `vnetd` intercepts UDP/67 on configured ports
   and sends replies through the L2 egress path.
 - Not yet implemented: ARP conflict probe before OFFER, client-id lease
   identity, DHCP relay. Initial DHCP client on the uplink is implemented.
@@ -431,7 +431,7 @@ admin-prohibited). `mark`, `dscp`, `log`, and NAT actions remain future work.
 
 - Forwarder over UDP (TCP fallback), per-network upstreams.
 - Cache respecting TTL, negative caching, max entries.
-- Local zone: `vrouter.` / `router.vrouter.` for status (opt-in).
+- Local zone: `vnet.` / `router.vnet.` for status (opt-in).
 - Split DNS by domain suffix.
 - DoH/DoT: later.
 - Serves DHCP-advertised DNS; binds to router addresses only.
@@ -440,11 +440,11 @@ admin-prohibited). `mark`, `dscp`, `log`, and NAT actions remain future work.
 
 - Implemented: UDP listener, upstream pool with per-query retry, positive TTL
   cache, basic negative caching, `max_entries`, SERVFAIL on upstream failure.
-- The listener is a kernel UDP socket bound to `dns.listen`; `vrouterd` does not
+- The listener is a kernel UDP socket bound to `dns.listen`; `vnetd` does not
   assign interface addresses itself, so the address must already exist
-  (`vrouter iface set <dev> <cidr>` or the host network manager).
+  (`vnet iface set <dev> <cidr>` or the host network manager).
 - Implemented: client TCP listener, upstream TCP fallback, split zones and
-  local `vrouter.`/`router.vrouter.` status zone.
+  local `vnet.`/`router.vnet.` status zone.
 - Not yet implemented: DoH/DoT.
 
 ## 9. Control plane
@@ -459,12 +459,12 @@ machine-checked configs live in `examples/`):
   "version": 1,
   "instance": "travel-router",
   "log": { "level": "info", "format": "json" },
-  "lease_db": "/var/lib/vrouter/leases.json",
+  "lease_db": "/var/lib/vnet/leases.json",
   "ports": {
     "uplink":  { "kind": "l2", "device": "wlan0" },
     "lan":     { "kind": "l2", "device": "usb0", "pvid": 10, "tagged": [20],
                  "storm_control": 1000 },
-    "vpn0":    { "kind": "l3", "device": "vrouter0", "create": "tun", "mtu": 1380 }
+    "vpn0":    { "kind": "l3", "device": "vnet0", "create": "tun", "mtu": 1380 }
   },
   "bridges": {
     "lan-br": { "ports": ["lan"], "vlan_aware": true, "stp": true }
@@ -560,10 +560,10 @@ Rules for config:
   them (R4 DHCP/DNS, R5 VLAN/STP, R6 firewall, R9 IPv6); existing keys never
   change meaning.
 - Validation before any mutation; all-or-nothing apply.
-- `vrouter up` currently validates the config, starts `vrouterd` and waits for the
+- `vnet up` currently validates the config, starts `vnetd` and waits for the
   control socket; the journaled config diff/apply path remains R7 work. R2
-  exposes direct `vrouter iface`/`vrouter route` verbs. Daemon stderr is written to
-  `<state_dir>/vrouterd.log` (mode `0600`, truncated when a daemon is launched);
+  exposes direct `vnet iface`/`vnet route` verbs. Daemon stderr is written to
+  `<state_dir>/vnetd.log` (mode `0600`, truncated when a daemon is launched);
   startup failures print the path and the last 2 KiB of the log.
 - Live-reload only for fields marked hot; otherwise restart required.
 
@@ -587,37 +587,37 @@ apply first.
 Implemented:
 
 ```
-vrouter validate <config.json>
-vrouter port list
-vrouter status [-c] <config.json>
-vrouter up [-c <config>]
-vrouter doctor [--repair] [-c <config>]
-vrouter nat list [-c <config>]
-vrouter nat add|del masquerade --out <iface|port> [-c <config>]
-vrouter nat add|del port-forward --proto tcp|udp --ext-port <n> [--to <ip:port>] [--in <name>] [-c <config>]
-vrouter conntrack list [--state new|established|closing] [--limit <n>] [-c <config>]
-vrouter iface set|del <dev> <cidr> [-c <config>]
-vrouter iface up|down <dev> [-c <config>]
-vrouter route add|del <dst> [via <ip>] dev <dev> [metric <n>] [table <n>] [-c <config>]
-vrouter down [-c <config>]
-vrouter journal [-c <config>]
-vrouter selftest ...
-vrouter bridge list [-c <config>]
-vrouter dhcp status
-vrouter dns query example.com
-vrouter firewall list [-c <config>]
-vrouter firewall counters [-c <config>]
-vrouter firewall test --proto tcp --src 10.0.0.2 --dst 1.1.1.1 --dport 443 [--iif lan0] [-c <config>]
-vrouter firewall test --proto icmpv6 --src 2001:db8:1::2 --dst 2001:db8:2::2
+vnet validate <config.json>
+vnet port list
+vnet status [-c] <config.json>
+vnet up [-c <config>]
+vnet doctor [--repair] [-c <config>]
+vnet nat list [-c <config>]
+vnet nat add|del masquerade --out <iface|port> [-c <config>]
+vnet nat add|del port-forward --proto tcp|udp --ext-port <n> [--to <ip:port>] [--in <name>] [-c <config>]
+vnet conntrack list [--state new|established|closing] [--limit <n>] [-c <config>]
+vnet iface set|del <dev> <cidr> [-c <config>]
+vnet iface up|down <dev> [-c <config>]
+vnet route add|del <dst> [via <ip>] dev <dev> [metric <n>] [table <n>] [-c <config>]
+vnet down [-c <config>]
+vnet journal [-c <config>]
+vnet selftest ...
+vnet bridge list [-c <config>]
+vnet dhcp status
+vnet dns query example.com
+vnet firewall list [-c <config>]
+vnet firewall counters [-c <config>]
+vnet firewall test --proto tcp --src 10.0.0.2 --dst 1.1.1.1 --dport 443 [--iif lan0] [-c <config>]
+vnet firewall test --proto icmpv6 --src 2001:db8:1::2 --dst 2001:db8:2::2
 ```
 
-`vrouter down` refuses while the matching daemon is live; stop `vrouterd` first.
+`vnet down` refuses while the matching daemon is live; stop `vnetd` first.
 
 Planned with their milestones:
 
 ```
-vrouter bridge create lan                   # R5
-vrouter pcap --iface lan --write cap.pcap   # post-0.2.0
+vnet bridge create lan                   # R5
+vnet pcap --iface lan --write cap.pcap   # post-0.2.0
 ```
 
 JSON output (`--json`) is planned. Exit codes are stable.
@@ -626,15 +626,15 @@ JSON output (`--json`) is planned. Exit codes are stable.
 
 Implemented (R7 control-socket foundation):
 
-- Unix domain socket (`/run/vrouter/control.sock`) under `$VROUTER_RUN_DIR`, mode
-  `0660`; the socket group is the daemon's primary group, so run `vrouterd` and
-  the CLI as the intended `vrouter` user or adjust ownership during deployment.
+- Unix domain socket (`/run/vnet/control.sock`) under `$VNET_RUN_DIR`, mode
+  `0660`; the socket group is the daemon's primary group, so run `vnetd` and
+  the CLI as the intended `vnet` user or adjust ownership during deployment.
   Group-based authorization is not implemented yet.
 - One line-delimited JSON request per connection, one response. The CLI opens
   a fresh connection per command; streaming events remain planned.
-- One daemon per `$VROUTER_RUN_DIR`; a non-blocking advisory lock on
+- One daemon per `$VNET_RUN_DIR`; a non-blocking advisory lock on
   `<state_dir>/control.sock.lock` is taken before host mutations. A separate
-  `<state_dir>/control.sock.up.lock` serializes concurrent `vrouter up` starts.
+  `<state_dir>/control.sock.up.lock` serializes concurrent `vnet up` starts.
   Use separate run directories for separate instances.
 - Operations: `ping`, `status`, `nat.list`, `nat.apply`, `conntrack.list`
   (optional `state` and `limit`). Protocol version 2 adds `nat.apply`, which
@@ -650,7 +650,7 @@ Implemented (R7 control-socket foundation):
   forwards and conntrack responses at 256 entries (the response carries the
   full table count). A write apply is queued to the single-threaded data loop;
   one may be pending at a time and the request limit is 64 KiB.
-- No TCP listener. v1 exposes no HTTP listener. A post-v1 optional `vrouter-web`
+- No TCP listener. v1 exposes no HTTP listener. A post-v1 optional `vnet-web`
   adapter may render this API in a browser; it is an unprivileged client and
   never mutates host state directly (ADR-011).
 - Streaming events (planned): `port_up`, `port_down`, `link_change`,
@@ -659,8 +659,8 @@ Implemented (R7 control-socket foundation):
 ### 9.4 Journal and rollback
 
 R2 records one **forward operation** per JSON line under
-`$VROUTER_RUN_DIR/<instance>.journal` (default `/run/vrouter`). The inverse is derived
-by `vrouter down`; the journal is fsynced and atomically replaced before the
+`$VNET_RUN_DIR/<instance>.journal` (default `/run/vnet`). The inverse is derived
+by `vnet down`; the journal is fsynced and atomically replaced before the
 netlink call. NAT rules are datapath state rather than host mutations, so live
 NAT edits are recorded in the config file and not in this journal:
 
@@ -670,52 +670,52 @@ NAT edits are recorded in the config file and not in this journal:
 {"op":"link","dev":"lan0","up":true}
 ```
 
-- `vrouter iface del` and `vrouter route del` only remove state recorded as
-  vRouter-owned; unmanaged state must be removed with `ip`.
-- `vrouter down` applies the inverse of each record in reverse order, treating
+- `vnet iface del` and `vnet route del` only remove state recorded as
+  vNET-owned; unmanaged state must be removed with `ip`.
+- `vnet down` applies the inverse of each record in reverse order, treating
   "already absent" and "already present" as success. A fully successful
   rollback deletes the journal; failures keep it for inspection and retry.
 - If a mutation fails after its journal write, the record is removed.
 - A crash between the write and the mutation leaves an idempotent record; the
-  next `vrouter down` cleans it up.
+  next `vnet down` cleans it up.
 - `/run` is used because host state is recreated per boot; persisting a journal
   across a reboot would reference state that no longer exists.
-- `vrouter doctor` is read-only and works with the daemon running or after a
-  crash. `vrouter doctor --repair` refuses while a daemon is live, replays the
+- `vnet doctor` is read-only and works with the daemon running or after a
+  crash. `vnet doctor --repair` refuses while a daemon is live, replays the
   journal inverses, preserves unmanaged state, and leaves records in place if a
   mutation still fails. Malformed trailing records are copied to
   `<instance>.journal.quarantine.<timestamp>` before repair; malformed records
   followed by valid ones are ambiguous and refuse repair without mutation.
 - PID locking and read-only diagnostics landed with R7; crash reconciliation
-  and `vrouter doctor --repair` land with R9a. Pending/applied status, sequence
+  and `vnet doctor --repair` land with R9a. Pending/applied status, sequence
   numbers and batch apply remain future control-plane work (ADR-006).
 - The journal never contains secrets.
 
 ### 9.5 C ABI (Android / future desktop)
 
-`include/vrouter.h` is the ABI; `src/ffi.zig` implements it. ABI version 2:
+`include/vnet.h` is the ABI; `src/ffi.zig` implements it. ABI version 2:
 
 ```c
-typedef void* vrouter_t;
-vrouter_t vrouter_create(const char* config_json);
-int    vrouter_start(vrouter_t);
-int    vrouter_stop(vrouter_t);
-void   vrouter_destroy(vrouter_t);
-int    vrouter_set_port_fd(vrouter_t, const char* name, int fd); // VpnService
-int    vrouter_set_event_cb(vrouter_t, cb, void*);
-int    vrouter_get_status(vrouter_t, vrouter_status_t*);
-const char* vrouter_version(void);
+typedef void* vnet_t;
+vnet_t vnet_create(const char* config_json);
+int    vnet_start(vnet_t);
+int    vnet_stop(vnet_t);
+void   vnet_destroy(vnet_t);
+int    vnet_set_port_fd(vnet_t, const char* name, int fd); // VpnService
+int    vnet_set_event_cb(vnet_t, cb, void*);
+int    vnet_get_status(vnet_t, vnet_status_t*);
+const char* vnet_version(void);
 ```
 
 Rules:
 - Opaque handles, fixed-size status, stable error/event codes, no allocation
   across the boundary.
 - Configured existing L3 ports are eligible for fd injection (`kind = "l3"`,
-  no `create`). The fd is borrowed and duplicated during `vrouter_start`; the
+  no `create`). The fd is borrowed and duplicated during `vnet_start`; the
   host may close its copy after startup.
-- `vrouter_start` blocks until ready; `STARTED` is delivered before it returns.
-  `vrouter_stop` is idempotent. Events run on the data-plane thread; callbacks
-  must not call `vrouter_*` functions other than `vrouter_get_status`.
+- `vnet_start` blocks until ready; `STARTED` is delivered before it returns.
+  `vnet_stop` is idempotent. Events run on the data-plane thread; callbacks
+  must not call `vnet_*` functions other than `vnet_get_status`.
 - The FFI profile disables host mutations and hotplug monitoring. It uses the
   host's pthread implementation rather than Zig's raw-clone thread path.
 - ADR-010 records the ownership, threading and compatibility contract.
@@ -752,7 +752,7 @@ Rules:
    disappears.
 8. Default inbound/forward policy is drop.
 9. Journal before mutation; no silent host changes.
-10. `vrouter down` is idempotent and restores the pre-start state.
+10. `vnet down` is idempotent and restores the pre-start state.
 
 ## 12. Performance budgets (v1)
 

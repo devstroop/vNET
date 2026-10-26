@@ -29,7 +29,7 @@ jobs:
       - run: zig build
       - run: zig build web
       - run: zig build web-test
-      - run: for f in examples/*.json; do ./zig-out/bin/vrouter validate "$f"; done
+      - run: for f in examples/*.json; do ./zig-out/bin/vnet validate "$f"; done
 
   fuzz:
     runs-on: ubuntu-latest

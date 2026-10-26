@@ -6,16 +6,16 @@ set -u
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-if [ "${VROUTER_DHCP_NETNS:-0}" != "1" ]; then
+if [ "${VNET_DHCP_NETNS:-0}" != "1" ]; then
     ZIG="${ZIG:-zig}"
     command -v "$ZIG" >/dev/null 2>&1 || {
         echo "FAIL: zig not found (set ZIG=/path/to/zig)" >&2
         exit 1
     }
     if [ "${EUID}" -eq 0 ]; then
-        exec unshare -n env VROUTER_DHCP_NETNS=1 "ZIG=$(command -v "$ZIG")" bash "$0" "$@"
+        exec unshare -n env VNET_DHCP_NETNS=1 "ZIG=$(command -v "$ZIG")" bash "$0" "$@"
     fi
-    exec unshare -rn env VROUTER_DHCP_NETNS=1 "ZIG=$(command -v "$ZIG")" bash "$0" "$@"
+    exec unshare -rn env VNET_DHCP_NETNS=1 "ZIG=$(command -v "$ZIG")" bash "$0" "$@"
 fi
 
 ZIG="${ZIG:-zig}"
@@ -25,10 +25,10 @@ command -v "$ZIG" >/dev/null 2>&1 || {
 }
 
 WORK="$(mktemp -d)"
-export VROUTER_RUN_DIR="$WORK/run"
+export VNET_RUN_DIR="$WORK/run"
 BIN="$ROOT/zig-out/bin"
-CFG="$WORK/vrouter-dhcp.json"
-LOG="$WORK/vrouterd.log"
+CFG="$WORK/vnet-dhcp.json"
+LOG="$WORK/vnetd.log"
 
 vpid=""
 client_pid=""
@@ -107,20 +107,20 @@ for i in $(seq 1 250); do
 done
 [ -f "$WORK/client.ready" ] || die "client did not configure"
 
-log "vrouterd"
-"$BIN/vrouterd" -c "$CFG" >"$LOG" 2>&1 &
+log "vnetd"
+"$BIN/vnetd" -c "$CFG" >"$LOG" 2>&1 &
 vpid=$!
 for i in $(seq 1 100); do
     grep -q "started instance" "$LOG" && break
     if ! kill -0 "$vpid" 2>/dev/null; then
         cat "$LOG"
-        die "vrouterd exited"
+        die "vnetd exited"
     fi
     sleep 0.02
 done
 grep -q "started instance" "$LOG" || {
     cat "$LOG"
-    die "vrouterd did not start"
+    die "vnetd did not start"
 }
 
 log "dhcp discover/request"
@@ -241,7 +241,7 @@ echo "$ping_out" | grep -q "2 received" || {
 }
 ok "client $ip pings router 10.20.0.1"
 
-kill -0 "$vpid" 2>/dev/null || die "vrouterd exited during test"
+kill -0 "$vpid" 2>/dev/null || die "vnetd exited during test"
 kill -TERM "$vpid"
 for i in $(seq 1 100); do
     kill -0 "$vpid" 2>/dev/null || break
@@ -263,13 +263,13 @@ ok "lease database persisted"
 
 log "restart"
 : > "$LOG"
-"$BIN/vrouterd" -c "$CFG" >"$LOG" 2>&1 &
+"$BIN/vnetd" -c "$CFG" >"$LOG" 2>&1 &
 vpid=$!
 for i in $(seq 1 100); do
     grep -q "started instance" "$LOG" && break
     if ! kill -0 "$vpid" 2>/dev/null; then
         cat "$LOG"
-        die "vrouterd restart exited"
+        die "vnetd restart exited"
     fi
     sleep 0.02
 done

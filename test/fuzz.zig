@@ -6,7 +6,7 @@
 //! --fuzz=<iterations-per-target>`.
 
 const std = @import("std");
-const vrouter = @import("../src/lib.zig");
+const vnet = @import("../src/lib.zig");
 
 fn input(smith: *std.testing.Smith, buf: []u8) []const u8 {
     if (smith.in) |bytes| return bytes;
@@ -17,14 +17,14 @@ fn input(smith: *std.testing.Smith, buf: []u8) []const u8 {
 fn fuzzEthernet(_: void, smith: *std.testing.Smith) anyerror!void {
     var in_buf: [2048]u8 = undefined;
     const bytes = input(smith, &in_buf);
-    const header = vrouter.ethernet.parse(bytes) catch return;
+    const header = vnet.ethernet.parse(bytes) catch return;
 
     try std.testing.expect(header.header_len >= 14);
     try std.testing.expect(header.header_len <= bytes.len);
     try std.testing.expectEqual(bytes.len - header.header_len, header.payload.len);
 
     var out: [18]u8 = undefined;
-    const n = try vrouter.ethernet.write(
+    const n = try vnet.ethernet.write(
         &out,
         header.dst,
         header.src,
@@ -48,7 +48,7 @@ fn fuzzEthernet(_: void, smith: *std.testing.Smith) anyerror!void {
 fn fuzzIpv4(_: void, smith: *std.testing.Smith) anyerror!void {
     var in_buf: [2048]u8 = undefined;
     const bytes = input(smith, &in_buf);
-    const header = vrouter.ipv4.parse(bytes) catch return;
+    const header = vnet.ipv4.parse(bytes) catch return;
 
     try std.testing.expect(header.header_len >= 20);
     try std.testing.expect(header.header_len <= header.total_len);
@@ -57,19 +57,19 @@ fn fuzzIpv4(_: void, smith: *std.testing.Smith) anyerror!void {
         @as(usize, header.total_len) - header.header_len,
         header.payload.len,
     );
-    try std.testing.expectEqual(@as(u16, 0), vrouter.ipv4.checksum(bytes[0..header.header_len]));
+    try std.testing.expectEqual(@as(u16, 0), vnet.ipv4.checksum(bytes[0..header.header_len]));
 
     if (header.ttl > 1) {
         var copy: [2048]u8 = undefined;
         @memcpy(copy[0..header.total_len], bytes[0..header.total_len]);
-        try vrouter.ipv4.decrementTtl(copy[0..header.total_len]);
+        try vnet.ipv4.decrementTtl(copy[0..header.total_len]);
     }
 }
 
 fn fuzzIpv6(_: void, smith: *std.testing.Smith) anyerror!void {
     var in_buf: [2048]u8 = undefined;
     const bytes = input(smith, &in_buf);
-    const header = vrouter.ipv6.parse(bytes) catch return;
+    const header = vnet.ipv6.parse(bytes) catch return;
 
     try std.testing.expect(header.header_len >= 40);
     try std.testing.expect(header.header_len <= header.total_len);
@@ -83,17 +83,17 @@ fn fuzzIpv6(_: void, smith: *std.testing.Smith) anyerror!void {
     if (header.hop_limit > 1) {
         var copy: [2048]u8 = undefined;
         @memcpy(copy[0..header.total_len], bytes[0..header.total_len]);
-        try vrouter.ipv6.decrementHopLimit(copy[0..header.total_len]);
+        try vnet.ipv6.decrementHopLimit(copy[0..header.total_len]);
     }
 }
 
 fn fuzzArp(_: void, smith: *std.testing.Smith) anyerror!void {
     var in_buf: [2048]u8 = undefined;
     const bytes = input(smith, &in_buf);
-    const packet = vrouter.arp.parse(bytes) catch return;
+    const packet = vnet.arp.parse(bytes) catch return;
 
     var out: [28]u8 = undefined;
-    const n = try vrouter.arp.write(
+    const n = try vnet.arp.write(
         &out,
         packet.operation,
         packet.sender_mac,
@@ -112,46 +112,46 @@ fn fuzzIcmp(_: void, smith: *std.testing.Smith) anyerror!void {
 
     var request: [1024]u8 = undefined;
     @memcpy(request[0..bytes.len], bytes);
-    request[0] = vrouter.icmp.Type.echo_request;
+    request[0] = vnet.icmp.Type.echo_request;
 
     var reply: [1024]u8 = undefined;
-    const n = try vrouter.icmp.writeEchoReply(&reply, request[0..bytes.len]);
+    const n = try vnet.icmp.writeEchoReply(&reply, request[0..bytes.len]);
     try std.testing.expectEqual(bytes.len, n);
-    try std.testing.expectEqual(@as(u16, 0), vrouter.ipv4.checksum(reply[0..n]));
+    try std.testing.expectEqual(@as(u16, 0), vnet.ipv4.checksum(reply[0..n]));
 
     var error_msg: [1032]u8 = undefined;
-    if (vrouter.icmp.writeError(
+    if (vnet.icmp.writeError(
         &error_msg,
-        vrouter.icmp.Type.destination_unreachable,
-        vrouter.icmp.Code.host_unreachable,
+        vnet.icmp.Type.destination_unreachable,
+        vnet.icmp.Code.host_unreachable,
         bytes,
         0,
     )) |len| {
-        try std.testing.expectEqual(@as(u16, 0), vrouter.ipv4.checksum(error_msg[0..len]));
+        try std.testing.expectEqual(@as(u16, 0), vnet.ipv4.checksum(error_msg[0..len]));
     } else |_| {}
 }
 
 fn fuzzNdp(_: void, smith: *std.testing.Smith) anyerror!void {
     var in_buf: [2048]u8 = undefined;
     const bytes = input(smith, &in_buf);
-    _ = vrouter.icmpv6.parse(bytes) catch return;
-    _ = vrouter.ndp.parse(bytes) catch return;
+    _ = vnet.icmpv6.parse(bytes) catch return;
+    _ = vnet.ndp.parse(bytes) catch return;
 }
 
 fn fuzzStp(_: void, smith: *std.testing.Smith) anyerror!void {
     var in_buf: [2048]u8 = undefined;
     const bytes = input(smith, &in_buf);
-    const bpdu = vrouter.stp.parse(bytes) catch return;
+    const bpdu = vnet.stp.parse(bytes) catch return;
 
-    var out: [vrouter.stp.payload_len]u8 = undefined;
-    const n = try vrouter.stp.write(&out, bpdu);
-    try std.testing.expectEqual(vrouter.stp.payload_len, n);
+    var out: [vnet.stp.payload_len]u8 = undefined;
+    const n = try vnet.stp.write(&out, bpdu);
+    try std.testing.expectEqual(vnet.stp.payload_len, n);
 }
 
 fn fuzzDhcp(_: void, smith: *std.testing.Smith) anyerror!void {
     var in_buf: [2048]u8 = undefined;
     const bytes = input(smith, &in_buf);
-    const message = vrouter.dhcp_message.Message.parse(bytes) catch return;
+    const message = vnet.dhcp_message.Message.parse(bytes) catch return;
 
     try message.options.validate();
     _ = message.messageType();
@@ -168,41 +168,41 @@ fn fuzzDns(_: void, smith: *std.testing.Smith) anyerror!void {
     var in_buf: [2048]u8 = undefined;
     const bytes = input(smith, &in_buf);
 
-    _ = vrouter.dns_message.parseHeader(bytes) catch return;
-    _ = vrouter.dns_message.isStandardQuery(bytes);
-    _ = vrouter.dns_message.questionEnd(bytes) catch return;
-    _ = vrouter.dns_message.questionKey(bytes) catch return;
-    _ = vrouter.dns_message.rcode(bytes);
-    _ = vrouter.dns_message.truncated(bytes);
-    _ = vrouter.dns_message.minTtl(bytes);
-    _ = vrouter.dns_message.cacheTtl(bytes);
-    _ = vrouter.dns_message.negativeTtl(bytes);
-    _ = vrouter.dns_message.questionType(bytes);
+    _ = vnet.dns_message.parseHeader(bytes) catch return;
+    _ = vnet.dns_message.isStandardQuery(bytes);
+    _ = vnet.dns_message.questionEnd(bytes) catch return;
+    _ = vnet.dns_message.questionKey(bytes) catch return;
+    _ = vnet.dns_message.rcode(bytes);
+    _ = vnet.dns_message.truncated(bytes);
+    _ = vnet.dns_message.minTtl(bytes);
+    _ = vnet.dns_message.cacheTtl(bytes);
+    _ = vnet.dns_message.negativeTtl(bytes);
+    _ = vnet.dns_message.questionType(bytes);
 
     var copy: [2048]u8 = undefined;
     @memcpy(copy[0..bytes.len], bytes);
-    vrouter.dns_message.ageTtls(copy[0..bytes.len], 7);
+    vnet.dns_message.ageTtls(copy[0..bytes.len], 7);
 
     var out: [2048]u8 = undefined;
-    _ = vrouter.dns_message.buildError(&out, bytes, 2) catch {};
+    _ = vnet.dns_message.buildError(&out, bytes, 2) catch {};
 
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    _ = vrouter.dns_probe.parseResponse(arena.allocator(), bytes) catch return;
+    _ = vnet.dns_probe.parseResponse(arena.allocator(), bytes) catch return;
 }
 
 fn fuzzConfig(_: void, smith: *std.testing.Smith) anyerror!void {
     var in_buf: [4096]u8 = undefined;
     const bytes = input(smith, &in_buf);
-    var parsed = vrouter.config_parse.parse(std.testing.allocator, bytes) catch return;
+    var parsed = vnet.config_parse.parse(std.testing.allocator, bytes) catch return;
     defer parsed.deinit();
-    _ = vrouter.config_validate.validate(&parsed.config) catch {};
+    _ = vnet.config_validate.validate(&parsed.config) catch {};
 }
 
 fn fuzzControl(_: void, smith: *std.testing.Smith) anyerror!void {
     var in_buf: [4096]u8 = undefined;
     const bytes = input(smith, &in_buf);
-    var parsed = vrouter.control_protocol.parseRequest(std.testing.allocator, bytes) catch return;
+    var parsed = vnet.control_protocol.parseRequest(std.testing.allocator, bytes) catch return;
     defer parsed.deinit();
     _ = parsed.value.id;
     _ = parsed.value.op;
@@ -212,12 +212,12 @@ fn fuzzControl(_: void, smith: *std.testing.Smith) anyerror!void {
 fn fuzzJournal(_: void, smith: *std.testing.Smith) anyerror!void {
     var in_buf: [4096]u8 = undefined;
     const bytes = input(smith, &in_buf);
-    var parsed = vrouter.journal.parseLine(std.testing.allocator, bytes) catch return;
+    var parsed = vnet.journal.parseLine(std.testing.allocator, bytes) catch return;
     defer parsed.deinit();
 
-    const op = vrouter.journal.toOp(parsed.value) catch return;
+    const op = vnet.journal.toOp(parsed.value) catch return;
     var out: [4096]u8 = undefined;
-    _ = vrouter.journal.writeLine(&out, op) catch return;
+    _ = vnet.journal.writeLine(&out, op) catch return;
 }
 
 fn fuzzNat(_: void, smith: *std.testing.Smith) anyerror!void {
@@ -236,7 +236,7 @@ fn fuzzNat(_: void, smith: *std.testing.Smith) anyerror!void {
             std.mem.writeInt(u16, l4[2..4], 443, .big);
             std.mem.writeInt(u16, l4[4..6], @intCast(l4_len), .big);
             @memcpy(l4[8..l4_len], body);
-            break :blk vrouter.ipv4.Protocol.udp;
+            break :blk vnet.ipv4.Protocol.udp;
         },
         1 => blk: {
             l4_len = 20 + body.len;
@@ -244,19 +244,19 @@ fn fuzzNat(_: void, smith: *std.testing.Smith) anyerror!void {
             std.mem.writeInt(u16, l4[2..4], 80, .big);
             l4[12] = 5 << 4;
             @memcpy(l4[20..l4_len], body);
-            break :blk vrouter.ipv4.Protocol.tcp;
+            break :blk vnet.ipv4.Protocol.tcp;
         },
         else => blk: {
             l4_len = 8 + body.len;
-            l4[0] = vrouter.icmp.Type.echo_request;
+            l4[0] = vnet.icmp.Type.echo_request;
             std.mem.writeInt(u16, l4[4..6], 7, .big);
             @memcpy(l4[8..l4_len], body);
-            break :blk vrouter.ipv4.Protocol.icmp;
+            break :blk vnet.ipv4.Protocol.icmp;
         },
     };
 
     var packet: [2048]u8 = undefined;
-    const n = try vrouter.ipv4.write(
+    const n = try vnet.ipv4.write(
         &packet,
         .{ .value = 0x0a000102 },
         .{ .value = 0xc0a80101 },
@@ -265,11 +265,11 @@ fn fuzzNat(_: void, smith: *std.testing.Smith) anyerror!void {
         1,
         l4[0..l4_len],
     );
-    try std.testing.expect(vrouter.nat.rewriteSource(packet[0..n], .{ .value = 0xc0a80102 }, 12345));
-    try std.testing.expect(vrouter.nat.rewriteDestination(packet[0..n], .{ .value = 0x0a000103 }, 8080));
-    _ = vrouter.ipv4.parse(packet[0..n]) catch return error.TestUnexpectedResult;
+    try std.testing.expect(vnet.nat.rewriteSource(packet[0..n], .{ .value = 0xc0a80102 }, 12345));
+    try std.testing.expect(vnet.nat.rewriteDestination(packet[0..n], .{ .value = 0x0a000103 }, 8080));
+    _ = vnet.ipv4.parse(packet[0..n]) catch return error.TestUnexpectedResult;
 
-    _ = vrouter.nat.adjustL4Checksum(
+    _ = vnet.nat.adjustL4Checksum(
         std.mem.readInt(u16, l4[0..2], .big),
         .{ .value = 0x0a000102 },
         .{ .value = 0xc0a80102 },
@@ -280,7 +280,7 @@ fn fuzzNat(_: void, smith: *std.testing.Smith) anyerror!void {
         443,
         8080,
     );
-    _ = vrouter.nat.adjustWordChecksum(
+    _ = vnet.nat.adjustWordChecksum(
         std.mem.readInt(u16, l4[2..4], .big),
         std.mem.readInt(u16, l4[4..6], .big),
         std.mem.readInt(u16, l4[6..8], .big),
@@ -288,8 +288,8 @@ fn fuzzNat(_: void, smith: *std.testing.Smith) anyerror!void {
 }
 
 const ForwarderContext = struct {
-    fwd: *vrouter.forward.Forwarder,
-    ingress: vrouter.types.PortId,
+    fwd: *vnet.forward.Forwarder,
+    ingress: vnet.types.PortId,
 };
 
 fn fuzzForwarder(ctx: ForwarderContext, smith: *std.testing.Smith) anyerror!void {
@@ -300,11 +300,11 @@ fn fuzzForwarder(ctx: ForwarderContext, smith: *std.testing.Smith) anyerror!void
 
 test "fuzz ethernet framing" {
     var seed_buf: [64]u8 = undefined;
-    const seed = try vrouter.ethernet.write(
+    const seed = try vnet.ethernet.write(
         &seed_buf,
-        vrouter.types.Mac.broadcast,
+        vnet.types.Mac.broadcast,
         .{ .bytes = .{ 0x02, 0, 0, 0, 0, 1 } },
-        vrouter.ethernet.EtherType.ipv4,
+        vnet.ethernet.EtherType.ipv4,
         null,
     );
     const corpus = [_][]const u8{seed_buf[0..seed]};
@@ -313,11 +313,11 @@ test "fuzz ethernet framing" {
 
 test "fuzz ipv4 headers" {
     var seed_buf: [128]u8 = undefined;
-    const seed = try vrouter.ipv4.write(
+    const seed = try vnet.ipv4.write(
         &seed_buf,
         .{ .value = 0x0a000001 },
         .{ .value = 0x0a000002 },
-        vrouter.ipv4.Protocol.udp,
+        vnet.ipv4.Protocol.udp,
         64,
         1,
         "payload",
@@ -328,11 +328,11 @@ test "fuzz ipv4 headers" {
 
 test "fuzz ipv6 extension headers" {
     var seed_buf: [160]u8 = undefined;
-    const seed = try vrouter.ipv6.write(
+    const seed = try vnet.ipv6.write(
         &seed_buf,
-        vrouter.types.Ipv6.parse("2001:db8::1") catch unreachable,
-        vrouter.types.Ipv6.parse("2001:db8::2") catch unreachable,
-        vrouter.ipv6.Protocol.udp,
+        vnet.types.Ipv6.parse("2001:db8::1") catch unreachable,
+        vnet.types.Ipv6.parse("2001:db8::2") catch unreachable,
+        vnet.ipv6.Protocol.udp,
         64,
         "payload",
     );
@@ -342,7 +342,7 @@ test "fuzz ipv6 extension headers" {
 
 test "fuzz arp" {
     var seed_buf: [28]u8 = undefined;
-    const seed = try vrouter.arp.write(
+    const seed = try vnet.arp.write(
         &seed_buf,
         .request,
         .{ .bytes = .{ 0x02, 0, 0, 0, 0, 1 } },
@@ -356,18 +356,18 @@ test "fuzz arp" {
 
 test "fuzz icmp builders" {
     var seed_buf: [64]u8 = undefined;
-    const seed = try vrouter.icmp.writeEchoRequest(&seed_buf, 1, 2, "payload");
+    const seed = try vnet.icmp.writeEchoRequest(&seed_buf, 1, 2, "payload");
     const corpus = [_][]const u8{seed_buf[0..seed]};
     try std.testing.fuzz({}, fuzzIcmp, .{ .corpus = &corpus });
 }
 
 test "fuzz ndp and icmpv6" {
     var seed_buf: [64]u8 = undefined;
-    const target = vrouter.types.Ipv6.parse("2001:db8::2") catch unreachable;
-    const seed = try vrouter.ndp.writeNeighborSolicitation(
+    const target = vnet.types.Ipv6.parse("2001:db8::2") catch unreachable;
+    const seed = try vnet.ndp.writeNeighborSolicitation(
         &seed_buf,
-        vrouter.types.Ipv6.parse("2001:db8::1") catch unreachable,
-        vrouter.ndp.solicitedNodeMulticast(target),
+        vnet.types.Ipv6.parse("2001:db8::1") catch unreachable,
+        vnet.ndp.solicitedNodeMulticast(target),
         target,
         .{ .bytes = .{ 0x02, 0, 0, 0, 0, 1 } },
     );
@@ -376,17 +376,17 @@ test "fuzz ndp and icmpv6" {
 }
 
 test "fuzz stp" {
-    var seed_buf: [vrouter.stp.payload_len]u8 = undefined;
-    const seed = try vrouter.stp.write(&seed_buf, .{ .root_id = 1, .bridge_id = 2 });
+    var seed_buf: [vnet.stp.payload_len]u8 = undefined;
+    const seed = try vnet.stp.write(&seed_buf, .{ .root_id = 1, .bridge_id = 2 });
     const corpus = [_][]const u8{seed_buf[0..seed]};
     try std.testing.fuzz({}, fuzzStp, .{ .corpus = &corpus });
 }
 
 test "fuzz dhcp" {
     var seed_buf: [512]u8 = undefined;
-    var builder = try vrouter.dhcp_message.Builder.init(
+    var builder = try vnet.dhcp_message.Builder.init(
         &seed_buf,
-        vrouter.dhcp_message.op_request,
+        vnet.dhcp_message.op_request,
         .discover,
         7,
         .{ .bytes = .{ 0x02, 0, 0, 0, 0, 1 } },
@@ -444,11 +444,11 @@ test "fuzz journal" {
 
 test "fuzz nat rewrite" {
     var seed_buf: [64]u8 = undefined;
-    const seed = try vrouter.ipv4.write(
+    const seed = try vnet.ipv4.write(
         &seed_buf,
         .{ .value = 0x0a000001 },
         .{ .value = 0xc0a80101 },
-        vrouter.ipv4.Protocol.udp,
+        vnet.ipv4.Protocol.udp,
         64,
         1,
         &.{ 0, 1, 0, 2, 0, 8, 0, 0 },
@@ -459,35 +459,35 @@ test "fuzz nat rewrite" {
 
 test "fuzz forwarder ingress" {
     const allocator = std.heap.page_allocator;
-    const port_a: vrouter.types.PortId = .{ .value = 1 };
-    const port_b: vrouter.types.PortId = .{ .value = 2 };
-    var a = vrouter.MemoryPort.init(allocator, port_a, "a", 1500);
+    const port_a: vnet.types.PortId = .{ .value = 1 };
+    const port_b: vnet.types.PortId = .{ .value = 2 };
+    var a = vnet.MemoryPort.init(allocator, port_a, "a", 1500);
     defer a.deinit();
-    var b = vrouter.MemoryPort.init(allocator, port_b, "b", 1500);
+    var b = vnet.MemoryPort.init(allocator, port_b, "b", 1500);
     defer b.deinit();
-    const entries = [2]vrouter.forward.PortEntry{
+    const entries = [2]vnet.forward.PortEntry{
         .{ .id = port_a, .config_name = "a", .port = a.port() },
         .{ .id = port_b, .config_name = "b", .port = b.port() },
     };
-    var fwd = try vrouter.forward.Forwarder.init(allocator, &entries);
+    var fwd = try vnet.forward.Forwarder.init(allocator, &entries);
     defer fwd.deinit();
 
     var frame: [128]u8 = undefined;
     var payload: [64]u8 = undefined;
-    const ip = try vrouter.ipv4.write(
+    const ip = try vnet.ipv4.write(
         &payload,
         .{ .value = 0x0a000001 },
         .{ .value = 0x0a000002 },
-        vrouter.ipv4.Protocol.udp,
+        vnet.ipv4.Protocol.udp,
         64,
         1,
         "x",
     );
-    const hlen = try vrouter.ethernet.write(
+    const hlen = try vnet.ethernet.write(
         &frame,
-        vrouter.types.Mac.broadcast,
+        vnet.types.Mac.broadcast,
         .{ .bytes = .{ 0x02, 0, 0, 0, 0, 1 } },
-        vrouter.ethernet.EtherType.ipv4,
+        vnet.ethernet.EtherType.ipv4,
         null,
     );
     @memcpy(frame[hlen..][0..ip], payload[0..ip]);

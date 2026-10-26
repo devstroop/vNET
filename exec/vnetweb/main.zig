@@ -1,13 +1,13 @@
 const std = @import("std");
 const web = @import("web");
 
-const default_password_file = "/etc/vrouter/web-password";
+const default_password_file = "/etc/vnet/web-password";
 const max_password_bytes = 1024;
 
 pub fn main(init: std.process.Init) void {
     run(init) catch |err| {
         var buf: [256]u8 = undefined;
-        const message = std.fmt.bufPrint(&buf, "vrouterweb: {s}\n", .{@errorName(err)}) catch "vrouterweb: error\n";
+        const message = std.fmt.bufPrint(&buf, "vnetweb: {s}\n", .{@errorName(err)}) catch "vnetweb: error\n";
         std.Io.File.stderr().writeStreamingAll(init.io, message) catch {};
         std.process.exit(1);
     };
@@ -31,7 +31,7 @@ fn run(init: std.process.Init) !void {
             return usage(io);
         }
         if (std.mem.eql(u8, arg, "--version")) {
-            try std.Io.File.stdout().writeStreamingAll(io, "vrouterweb " ++ @import("build_options").version ++ "\n");
+            try std.Io.File.stdout().writeStreamingAll(io, "vnetweb " ++ @import("build_options").version ++ "\n");
             return;
         }
         if (std.mem.eql(u8, arg, "--hash-password")) {
@@ -79,7 +79,7 @@ fn run(init: std.process.Init) !void {
         return;
     }
 
-    const run_dir = init.environ_map.get("VROUTER_RUN_DIR") orelse "/run/vrouter";
+    const run_dir = init.environ_map.get("VNET_RUN_DIR") orelse "/run/vnet";
     var control_buf: [512]u8 = undefined;
     const control = control_path orelse try std.fmt.bufPrint(&control_buf, "{s}/control.sock", .{run_dir});
 
@@ -100,16 +100,16 @@ fn run(init: std.process.Init) !void {
 
 fn usage(io: std.Io) !void {
     try std.Io.File.stdout().writeStreamingAll(io,
-        \\vrouterweb — vRouter web admin
+        \\vnetweb — vNET web admin
         \\
         \\Usage:
-        \\  vrouterweb [options]
-        \\  vrouterweb --hash-password < password.txt
+        \\  vnetweb [options]
+        \\  vnetweb --hash-password < password.txt
         \\
         \\Options:
         \\  --listen <addr:port>          Default 127.0.0.1:8080; loopback only.
-        \\  --control <path>              Default $VROUTER_RUN_DIR/control.sock.
-        \\  --password-hash-file <path>   Default /etc/vrouter/web-password.
+        \\  --control <path>              Default $VNET_RUN_DIR/control.sock.
+        \\  --password-hash-file <path>   Default /etc/vnet/web-password.
         \\  --session-ttl-hours <n>       Default 12, maximum 168.
         \\  --version                     Print version.
         \\  -h, --help                    Print this help.

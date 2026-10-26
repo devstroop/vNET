@@ -22,7 +22,7 @@ A write path has to answer three questions:
 
 ## Decision
 
-`vrouter nat add|del` is a **config-backed live update** for both masquerade and
+`vnet nat add|del` is a **config-backed live update** for both masquerade and
 port forwards (ADR-005).
 
 ### CLI transaction
@@ -40,7 +40,7 @@ port forwards (ADR-005).
 6. On a connect failure or a clear daemon rejection, restore the original
    config bytes atomically and exit non-zero. A transport timeout has an
    unknown outcome, so the CLI keeps the new file and tells the operator to
-   check `vrouter nat list` instead of racing a rollback.
+   check `vnet nat list` instead of racing a rollback.
 
 The writer (`src/config/write.zig`) rewrites the `nat` key in the parsed JSON
 document instead of serializing the typed config. Unrelated keys and unknown
@@ -83,7 +83,7 @@ Protocol version 2 adds `nat.apply`:
   until their normal timeout. Removing a rule affects **new** flows only; the
   CLI does not flush conntrack.
 - Host state is not mutated, so live NAT updates create no journal entry.
-  `vrouter down` restores host routes/addresses/links, while the config remains
+  `vnet down` restores host routes/addresses/links, while the config remains
   the durable NAT record.
 
 ### Checksum ordering

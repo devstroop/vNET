@@ -1,4 +1,4 @@
-# vRouter web admin — full functionality scope
+# vNET web admin — full functionality scope
 
 - **Status:** Draft for review
 - **Date:** 2026-10-25
@@ -8,7 +8,7 @@
 
 ## 1. Summary
 
-The `vrouterweb` preview started read-only. It now exposes status, interfaces,
+The `vnetweb` preview started read-only. It now exposes status, interfaces,
 clients/leases, routes, NAT, DHCP, DNS, firewall, diagnostics, logs, conntrack
 and config, and interfaces, routes, firewall, NAT, DHCP, DNS and logging have
 staged draft/review/apply paths (ADR-016). The remaining gap is operational
@@ -29,8 +29,8 @@ administrator, except for offline teardown/repair, which stays CLI-only:
 - keep the web process unprivileged and loopback-only.
 
 In the target model, the daemon is the only component that mutates host state
-while it is running. Offline CLI teardown/repair (`vrouter down`,
-`vrouter doctor --repair`) is the explicit exception. The web process never opens netlink, writes the
+while it is running. Offline CLI teardown/repair (`vnet down`,
+`vnet doctor --repair`) is the explicit exception. The web process never opens netlink, writes the
 journal or edits the config file directly.
 
 ### Baseline decisions
@@ -143,7 +143,7 @@ journal or edits the config file directly.
    Conntrack deletion and advanced settings still need dedicated wired flows;
    DNS query, journaled link up/down and DHCP lease revoke are wired.
 3. **No single write path.** CLI address/route mutations bypass the daemon.
-   Running them while `vrouterd` is live can race the datapath and the config.
+   Running them while `vnetd` is live can race the datapath and the config.
 4. **No live structural apply.** Ports, bridges, interfaces, routes, DHCP, DNS
    and firewall changes require a daemon restart today. NAT applies live; all
    other writes report restart-required rather than pretending they are live.
@@ -157,11 +157,11 @@ journal or edits the config file directly.
    is still missing.
 8. **Unprivileged deployment is not wired.** The server accepts root or the
    daemon effective uid only; group authorization is absent. State-directory
-   creation is inconsistent: the control server and `vrouter up` use `0750`
+   creation is inconsistent: the control server and `vnet up` use `0750`
    without a group owner, while journal and firewall-counter paths create it
    `0700`. Whichever runs first wins, and a CLI mutation before the daemon can
    leave a `0700` directory that blocks the group deployment. There is no
-   read-only socket, so the documented `sudo -u vrouter` deployment does not
+   read-only socket, so the documented `sudo -u vnet` deployment does not
    work yet.
 9. **Config store exists; web coverage is partial.** The daemon owns a
    revisioned `ConfigStore` and v3 `config.get/validate/diff/apply`, and the web
@@ -218,7 +218,7 @@ Notes:
   and does not survive a daemon restart. Address and route writes are
   config-backed.
 - The web cannot start a stopped daemon because it cannot reach a stopped
-  control socket. `start` remains the service manager or `vrouter up`.
+  control socket. `start` remains the service manager or `vnet up`.
 - Typed forms edit a complete config document round-tripped from `config.get`.
   The form submits the complete document, so fields outside the form are
   preserved; the daemon validates and canonically serializes it.
@@ -248,7 +248,7 @@ Notes:
 - `journal.list` / `doctor.status`: read-only diagnostics (P1).
 - `journal.repair`: **not a live control operation.** Repair mutates the journal
   while the daemon is stopped, so the UI shows the exact offline command
-  (`vrouter down` then `vrouter doctor --repair`) instead of pretending it can
+  (`vnet down` then `vnet doctor --repair`) instead of pretending it can
   perform the repair through a socket that no longer exists. This is an
   explicit exception to the "all operations from the web" goal.
 - `daemon.stop` / `daemon.restart`: lifecycle (P2, only while connected and
@@ -318,7 +318,7 @@ Compatibility is explicit and request-versioned:
 - Existing v2 `nat.apply` remains supported for deployed v2 clients. The web
   stages NAT edits, uses `config.apply` for revision, diff, confirm and audit,
   then calls `nat.apply` for the live tables. After the P1 CLI migration and an
-  atomic daemon apply, `vrouter nat` also uses `config.apply`; raw `nat.apply`
+  atomic daemon apply, `vnet nat` also uses `config.apply`; raw `nat.apply`
   becomes compatibility-only.
 
 Request envelope:
@@ -514,7 +514,7 @@ Crash recovery:
   `revision_before`, ensure the audit entry exists and clear the pending
   record.
 - Config hash matches neither revision: fail closed with `config_conflict` and
-  require `vrouter doctor --repair`. Do not overwrite an externally changed
+  require `vnet doctor --repair`. Do not overwrite an externally changed
   config and do not start the datapath with an ambiguous pending record.
 - A committed config with a `restart.pending` marker stays in place. The daemon
   reports `restart_pending` until a successful start clears it.
@@ -542,23 +542,23 @@ Rollback:
 
 ### 5.4 Single write path and CLI
 
-When `vrouterd` is running, CLI write commands use the control API instead of
+When `vnetd` is running, CLI write commands use the control API instead of
 mutating the host directly. The direct `Host` path remains for:
 
-- `vrouter down` and `vrouter doctor --repair` when the daemon is stopped;
+- `vnet down` and `vnet doctor --repair` when the daemon is stopped;
 - offload setup inside the daemon at startup and teardown;
 - bootstrap paths that run before the control socket exists.
 
-`vrouter up` only starts/checks the daemon; it is not a `Host` bootstrap path.
+`vnet up` only starts/checks the daemon; it is not a `Host` bootstrap path.
 This removes the current race between CLI address/route edits and the live
 datapath. The CLI keeps its existing output and exit-code contract; only the
 transport changes.
 
 NAT is the current exception: the CLI writes the config file and then calls
 `nat.apply`, while the daemon only applies the tables. P1 closes that gap:
-`vrouter nat` becomes a thin `config.apply` wrapper, so CLI and web share one
+`vnet nat` becomes a thin `config.apply` wrapper, so CLI and web share one
 transaction and the daemon owns the config write. P1 exit requires this
-migration; until then, `vrouter nat` is the documented exception, and the web
+migration; until then, `vnet nat` is the documented exception, and the web
 uses `config.apply` followed by `nat.apply` with the non-atomic gap recorded in
 ADR-016. Raw `nat.apply` remains available for deployed v2 clients after the
 migration.
@@ -572,16 +572,16 @@ Ownership contract:
 
 | Path | Mode | Owner:Group | Purpose |
 |---|---|---|---|
-| state dir | `0750` | `root:vrouter` | Traverse/list for read-only and write web accounts |
-| `control.sock` | `0660` | `root:vrouter-admin` | Read/write control |
-| `control-ro.sock` | `0660` | `root:vrouter` | Read-only control |
+| state dir | `0750` | `root:vnet` | Traverse/list for read-only and write web accounts |
+| `control.sock` | `0660` | `root:vnet-admin` | Read/write control |
+| `control-ro.sock` | `0660` | `root:vnet` | Read-only control |
 | `*.lock` | `0600` | daemon | Lock files |
 | config | existing mode, default `0600` | daemon | Config |
 | journal/audit/pending | `0600` | daemon | Transaction state |
 
-- The read-only web account is in `vrouter` only. The read/write web account is
-  in `vrouter` and `vrouter-admin`: `vrouter` lets it traverse the state
-  directory and open the read-only socket; `vrouter-admin` lets it open the
+- The read-only web account is in `vnet` only. The read/write web account is
+  in `vnet` and `vnet-admin`: `vnet` lets it traverse the state
+  directory and open the read-only socket; `vnet-admin` lets it open the
   read/write socket.
 - Both sockets use the same protocol; the server rejects write ops on the
   read-only socket with `read_only`.
@@ -589,12 +589,12 @@ Ownership contract:
   them in the audit entry.
 - The web process does not accept a client-supplied actor identity.
 - One canonical `ensureStateDir` helper creates the directory `0750` with group
-  `vrouter` and is used by the daemon, journal, firewall counters and
-  `vrouter up`. It never creates `0700`.
+  `vnet` and is used by the daemon, journal, firewall counters and
+  `vnet up`. It never creates `0700`.
 - If an existing state directory has the wrong owner or mode, startup fails
   with `permission_denied` and an actionable message. Root may repair it
   explicitly; the daemon does not silently `chmod` or `chown` it.
-- `vrouterweb` needs `--control-ro` (or equivalent) and a startup check that
+- `vnetweb` needs `--control-ro` (or equivalent) and a startup check that
   refuses write mode when the socket is read-only.
 
 This satisfies ADR-011's requirement that read and write capabilities are
@@ -604,7 +604,7 @@ fail closed if the groups cannot be applied.
 Until group authorization and the ownership matrix land in P1, only root or the
 daemon uid can read the socket. P0 read-only UI testing uses that path; it is
 not yet the documented unprivileged deployment. P1 exit requires the actual
-`vrouterd`/`vrouterweb` uid/gid split tests, not just unit-level peer checks.
+`vnetd`/`vnetweb` uid/gid split tests, not just unit-level peer checks.
 
 The web stays loopback-only. Remote access uses an SSH tunnel. A TLS reverse
 proxy is not part of this scope; supporting one later requires a public-origin
@@ -613,7 +613,7 @@ allowlist, trusted-proxy handling and a `Secure` cookie contract.
 ### 5.6 Config ownership
 
 The daemon needs a `ConfigStore` that owns the config path, raw bytes, revision,
-canonical serializer and atomic writer. `vrouterd` currently discards the path
+canonical serializer and atomic writer. `vnetd` currently discards the path
 after parsing and `src/config/write.zig` only handles NAT; this store is a
 prerequisite, not an implementation detail.
 
@@ -657,7 +657,7 @@ unprivileged process must not signal the daemon arbitrarily.
 
 - The daemon detects a supervisor through an explicit deployment setting and
   exposes `restart_supported` in `status`. It does not guess from PID 1.
-  `vrouterd --enable-restart` is the explicit preview setting for a
+  `vnetd --enable-restart` is the explicit preview setting for a
   daemon-managed clean re-exec; it is not a supervisor and is not enabled by
   default.
 - The supervisor contract (requested stop/restart versus crash) is deployment
@@ -678,7 +678,7 @@ unprivileged process must not signal the daemon arbitrarily.
   live connection; it does not imply a subsequent start, and it uses typed
   confirmation rather than a restart token.
 - The web cannot start a stopped daemon. Start remains the service manager or
-  `vrouter up`.
+  `vnet up`.
 - The daemon never reports `applied` for a change that is only durable but not
   live.
 - On clean exit for a restart, the daemon tears down or reconciles offload host
@@ -769,7 +769,7 @@ These are not optional polish; the scope cannot be implemented without them:
 4. **General read-command path.** A bounded queue or immutable per-resource
    snapshots; the current fixed snapshot and NAT-only queue are insufficient.
 5. **Group authorization and deployment.** Read/write gids, state-dir/socket
-   ownership, `vrouterweb --control-ro`, supervisor detection and tests.
+   ownership, `vnetweb --control-ro`, supervisor detection and tests.
 6. **Transaction artifacts.** Diff format (canonical JSON text or RFC 6902),
    revision hash input, confirm-token store/TTL, idempotency store, audit store,
    pending record with journal checkpoint, restart token store, pagination
@@ -848,8 +848,8 @@ Additional requirements:
 - `config.apply` requires a fresh confirm token bound to revision and diff.
 - Replayed or stale confirms fail closed.
 - The read-only socket cannot execute writes.
-- The web process runs as a dedicated unprivileged account: `vrouter` for
-  read-only mode, plus `vrouter-admin` for write mode. It never runs as root.
+- The web process runs as a dedicated unprivileged account: `vnet` for
+  read-only mode, plus `vnet-admin` for write mode. It never runs as root.
 - Session fixation is prevented by rotating the session id on login.
 - Login rate limiting remains global and gains a per-account backoff. Per-IP
   limiting is not meaningful on a loopback-only listener and is not in scope.
@@ -913,7 +913,7 @@ reinterpreted.
   `test_offload.sh`, `nat_matrix.sh`, `test_firewall.sh`, `test_dhcp.sh`,
   `test_dns.sh`, `test_tun.sh`, `test_ipv6.sh`, `test_journal.sh`,
   `test_crash.sh`.
-- **Deployment:** `vrouterd`/`vrouterweb` uid/gid split, state-dir and socket
+- **Deployment:** `vnetd`/`vnetweb` uid/gid split, state-dir and socket
   ownership matrix, wrong-mode fail-closed behavior, read-only socket
   rejection, supervisor detection.
 - **Web handlers:** auth, session rotation, CSRF on every write, Origin/Host,

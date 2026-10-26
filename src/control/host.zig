@@ -1,6 +1,6 @@
 //! Linux host mutations with journal-before-apply semantics. Ownership is
 //! derived from the journal: `iface del` and `route del` only touch state that
-//! vRouter added, and `down` replays the inverse of every recorded operation.
+//! vNET added, and `down` replays the inverse of every recorded operation.
 
 const std = @import("std");
 const types = @import("../types.zig");

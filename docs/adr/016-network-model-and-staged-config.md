@@ -33,7 +33,7 @@ Proxmox also shows that implementation choices (VLAN, QinQ, VXLAN, EVPN) should
 not be the primary mental model for an operator. They are backends behind an
 intent such as "isolated network with NAT" or "bridged uplink".
 
-vRouter already has the invariants needed for this model: a port belongs to at
+vNET already has the invariants needed for this model: a port belongs to at
 most one bridge or router zone, L2 and L3 are both first-class, and the control
 plane applies immutable snapshots. The missing piece is the UI model and the
 transaction boundary.

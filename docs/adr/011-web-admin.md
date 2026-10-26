@@ -25,13 +25,13 @@ A web admin must not weaken the existing contract:
 
 Add an **optional, post-v1 local web admin for Linux**:
 
-1. **Separate unprivileged adapter.** `vrouter-web` is a standalone executable
-   (planned `exec/vrouterweb`, `src/web/`), not part of the core library or
-   `vrouterd`. It speaks the same line-delimited JSON Unix-socket API as the CLI.
+1. **Separate unprivileged adapter.** `vnet-web` is a standalone executable
+   (planned `exec/vnetweb`, `src/web/`), not part of the core library or
+   `vnetd`. It speaks the same line-delimited JSON Unix-socket API as the CLI.
    It never opens ports, writes journals, calls netlink or edits config files
    directly.
-2. **Privilege separation.** `vrouterd` remains the sole mutator. The web process
-   runs as an unprivileged service account in the `vrouter` group and uses the
+2. **Privilege separation.** `vnetd` remains the sole mutator. The web process
+   runs as an unprivileged service account in the `vnet` group and uses the
    control socket (`0660`, peer credentials). Read and write capabilities are
    distinct API scopes; a read-only deployment must not receive write access.
 3. **Server-rendered HTMX.** The UI is server-rendered HTML with templates and
@@ -95,7 +95,7 @@ and no frontend package manager.
   build pipeline, a larger dependency surface and a second API layer for a
   local single-operator console. A hosted multi-router controller remains out
   of scope.
-- **Embed the HTTP server in `vrouterd`:** rejected. It would put browser parsing
+- **Embed the HTTP server in `vnetd`:** rejected. It would put browser parsing
   and session state in the privileged daemon.
 - **HTMX from a CDN:** rejected. Offline deployments cannot depend on a third
   party, and the CSP should remain `self`-only.

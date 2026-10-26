@@ -1262,7 +1262,7 @@ pub const Server = struct {
     }
 
     fn handleLogTail(self: *Server, stream: std.Io.net.Stream, request: protocol.Request) void {
-        const path = std.fs.path.join(self.gpa, &.{ self.state_dir, "vrouterd.log" }) catch {
+        const path = std.fs.path.join(self.gpa, &.{ self.state_dir, "vnetd.log" }) catch {
             return self.sendError(stream, request.id, request.op, "internal", "allocation failed");
         };
         defer self.gpa.free(path);
@@ -1830,7 +1830,7 @@ pub const Server = struct {
                 request.id,
                 request.op,
                 "restart_unavailable",
-                "no supervisor is configured; restart vrouterd with the service manager",
+                "no supervisor is configured; restart vnetd with the service manager",
             );
             return;
         }
@@ -1901,7 +1901,7 @@ pub const Server = struct {
                 request.id,
                 request.op,
                 "restart_unavailable",
-                "no supervisor is configured; stop vrouterd with the service manager",
+                "no supervisor is configured; stop vnetd with the service manager",
             );
             return;
         }
@@ -2499,10 +2499,10 @@ test "server starts, answers status, and removes its socket" {
     snapshot.conntrack_total = 1;
 
     try tmp.dir.writeFile(testing.io, .{
-        .sub_path = "vrouter.json",
+        .sub_path = "vnet.json",
         .data = "{\n  \"version\": 1,\n  \"instance\": \"test\",\n  \"ports\": {\"lan\": {\"kind\": \"l2\", \"device\": \"eth0\"}}\n}\n",
     });
-    const config_path = try std.fmt.allocPrint(testing.allocator, "{s}/vrouter.json", .{path_buf[0..dir]});
+    const config_path = try std.fmt.allocPrint(testing.allocator, "{s}/vnet.json", .{path_buf[0..dir]});
     defer testing.allocator.free(config_path);
     var store = try config_store.Store.open(testing.io, testing.allocator, config_path);
     defer store.deinit();
@@ -2692,7 +2692,7 @@ test "server starts, answers status, and removes its socket" {
     defer testing.allocator.free(first_revision);
 
     try tmp.dir.writeFile(testing.io, .{
-        .sub_path = "vrouter.json",
+        .sub_path = "vnet.json",
         .data = "{\"version\":1,\"instance\":\"test\",\"changed\":true}\n",
     });
     const refreshed_status_line = try sendRequest(
@@ -2777,8 +2777,8 @@ test "server diffs, applies and audits a config proposal" {
     const proposed_json =
         \\{"version":1,"instance":"test","ports":{"lan":{"kind":"l2","device":"eth0"}},"log":{"level":"debug"}}
     ;
-    try tmp.dir.writeFile(testing.io, .{ .sub_path = "vrouter.json", .data = current_json });
-    const config_path = try std.fmt.allocPrint(testing.allocator, "{s}/vrouter.json", .{state_dir});
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "vnet.json", .data = current_json });
+    const config_path = try std.fmt.allocPrint(testing.allocator, "{s}/vnet.json", .{state_dir});
     defer testing.allocator.free(config_path);
     var store = try config_store.Store.open(testing.io, testing.allocator, config_path);
     defer store.deinit();
@@ -2895,8 +2895,8 @@ test "server accepts restart once and audits the operation" {
     const proposed_json =
         \\{"version":1,"instance":"test","ports":{"lan":{"kind":"l2","device":"eth0"}},"log":{"level":"debug"}}
     ;
-    try tmp.dir.writeFile(testing.io, .{ .sub_path = "vrouter.json", .data = current_json });
-    const config_path = try std.fmt.allocPrint(testing.allocator, "{s}/vrouter.json", .{state_dir});
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "vnet.json", .data = current_json });
+    const config_path = try std.fmt.allocPrint(testing.allocator, "{s}/vnet.json", .{state_dir});
     defer testing.allocator.free(config_path);
     var store = try config_store.Store.open(testing.io, testing.allocator, config_path);
     defer store.deinit();

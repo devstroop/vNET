@@ -438,7 +438,7 @@ fn asciiLower(c: u8) u8 {
 }
 
 fn isLocalZone(qname: []const u8) bool {
-    return asciiEql(qname, "vrouter") or asciiEql(qname, "router.vrouter");
+    return asciiEql(qname, "vnet") or asciiEql(qname, "router.vnet");
 }
 
 fn questionName(query: []const u8, out: *[256]u8) ?[]const u8 {

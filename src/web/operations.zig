@@ -2,8 +2,8 @@
 //! diagnostics, logs and the config editor.
 
 const std = @import("std");
-const vrouter = @import("vrouter");
-const protocol = vrouter.control_protocol;
+const vnet = @import("vnet");
+const protocol = vnet.control_protocol;
 const html = @import("html.zig");
 const pages = @import("pages.zig");
 
@@ -111,7 +111,7 @@ fn interfacesBody(w: *std.Io.Writer, view: InterfacesView) !void {
     try w.writeAll("<div class=\"stat-grid stat-grid-4\">");
     try statCard(w, "Live links", if (view.network) |network| network.links.len else 0, "Kernel interfaces", "neutral");
     try statCard(w, "Links up", up, "Carrier and admin state", if (up > 0) "ok" else "warn");
-    try statCard(w, "Configured ports", view.ports.len, "vRouter datapath ports", "info");
+    try statCard(w, "Configured ports", view.ports.len, "vNET datapath ports", "info");
     try statCard(w, "Bridges", view.bridges.len, "L2 domains", "neutral");
     try w.writeAll("</div>");
 
@@ -176,7 +176,7 @@ fn interfacesBody(w: *std.Io.Writer, view: InterfacesView) !void {
 
     try w.writeAll("<div class=\"content-grid\"><section class=\"card\"><header class=\"card-head\"><div><h3>Ports</h3><p>Datapath members backed by kernel devices or TUN/TAP.</p></div></header>");
     if (view.ports.len == 0) {
-        try html.writeEmpty(w, "No ports", "Add a port to attach a device to vRouter.");
+        try html.writeEmpty(w, "No ports", "Add a port to attach a device to vNET.");
     } else {
         try w.writeAll("<div class=\"table-wrap\"><table><thead><tr><th>Name</th><th>Kind</th><th>Device</th><th>MTU</th><th>PVID</th><th>Tagged</th><th>Storm</th><th></th></tr></thead><tbody>");
         for (view.ports, 0..) |port, index| {
@@ -240,7 +240,7 @@ fn interfacesBody(w: *std.Io.Writer, view: InterfacesView) !void {
     try w.writeAll("</section></div>");
 
     if (view.network) |network| {
-        try w.writeAll("<section class=\"card\"><header class=\"card-head\"><div><h3>Live kernel links</h3><p>Interfaces reported by netlink, independent of vRouter configuration.</p></div></header>");
+        try w.writeAll("<section class=\"card\"><header class=\"card-head\"><div><h3>Live kernel links</h3><p>Interfaces reported by netlink, independent of vNET configuration.</p></div></header>");
         try w.writeAll("<div class=\"table-wrap\"><table><thead><tr><th>Name</th><th>Index</th><th>State</th><th>MTU</th><th>MAC</th><th>Master</th><th></th></tr></thead><tbody>");
         for (network.links, 0..) |link, index| {
             try w.writeAll("<tr><td class=\"mono strong\">");
@@ -267,7 +267,7 @@ fn interfacesBody(w: *std.Io.Writer, view: InterfacesView) !void {
             try html.writeNumber(w, index);
             try w.writeAll("\" class=\"dialog dialog-sm\"><div class=\"dialog-card\"><header class=\"dialog-head\"><div><h3>");
             if (link.up) try w.writeAll("Bring link down?") else try w.writeAll("Bring link up?");
-            try w.writeAll("</h3><p>This changes the host link immediately. The change is journaled so <code>vrouter down</code> can restore it.</p></div><button class=\"icon-button\" type=\"button\" data-dialog-close aria-label=\"Close\">×</button></header><form class=\"dialog-form\" method=\"post\" action=\"/interfaces/link\" hx-post=\"/interfaces/link\" hx-target=\"#interfaces-live\" hx-swap=\"innerHTML\" hx-indicator=\"#refresh-indicator\"><input type=\"hidden\" name=\"csrf\" value=\"");
+            try w.writeAll("</h3><p>This changes the host link immediately. The change is journaled so <code>vnet down</code> can restore it.</p></div><button class=\"icon-button\" type=\"button\" data-dialog-close aria-label=\"Close\">×</button></header><form class=\"dialog-form\" method=\"post\" action=\"/interfaces/link\" hx-post=\"/interfaces/link\" hx-target=\"#interfaces-live\" hx-swap=\"innerHTML\" hx-indicator=\"#refresh-indicator\"><input type=\"hidden\" name=\"csrf\" value=\"");
             try html.writeEscaped(w, view.csrf);
             try w.writeAll("\">");
             if (view.draft_json.len != 0) {
@@ -301,7 +301,7 @@ fn interfacesBody(w: *std.Io.Writer, view: InterfacesView) !void {
         for (view.interfaces, 0..) |iface, index| try writeInterfaceDialog(w, view, iface, index);
     }
     if (view.review) |review| try writeReviewDialog(w, view.csrf, view.draft_json, "/interfaces/apply", "#interfaces-live", review, "Apply interfaces");
-    try w.writeAll("<p class=\"refresh-note\">Link state is read when this page loads. Interface changes take effect when vrouterd restarts.</p>");
+    try w.writeAll("<p class=\"refresh-note\">Link state is read when this page loads. Interface changes take effect when vnetd restarts.</p>");
 }
 
 fn writeBool(w: *std.Io.Writer, value: bool) !void {
@@ -642,7 +642,7 @@ fn routesBody(w: *std.Io.Writer, view: RoutesView) !void {
     try statCard(w, "Pending", view.pending, "Unapplied changes", if (view.pending > 0) "warn" else "ok");
     try w.writeAll("</div>");
 
-    try w.writeAll("<section class=\"card\"><header class=\"card-head\"><div><h3>Routing table</h3><p>Routes are validated and written atomically. They take effect when vrouterd restarts.</p></div><div class=\"card-actions\">");
+    try w.writeAll("<section class=\"card\"><header class=\"card-head\"><div><h3>Routing table</h3><p>Routes are validated and written atomically. They take effect when vnetd restarts.</p></div><div class=\"card-actions\">");
     if (view.draft_json.len != 0) {
         try w.writeAll("<button class=\"button\" type=\"button\" data-dialog-open=\"route-add\">Add route</button>");
         try w.writeAll("<form class=\"inline-form\" method=\"post\" action=\"/routes/review\" hx-post=\"/routes/review\" hx-target=\"#routes-live\" hx-swap=\"innerHTML\" hx-indicator=\"#refresh-indicator\">");
@@ -902,7 +902,7 @@ fn firewallBody(w: *std.Io.Writer, view: FirewallView) !void {
         for (view.rules, 0..) |rule, index| try writeFirewallRuleDialog(w, view, rule, index);
     }
     if (view.review) |review| try writeReviewDialog(w, view.csrf, view.draft_json, "/firewall/apply", "#firewall-live", review, "Apply firewall");
-    try w.writeAll("<p class=\"refresh-note\">Counters are read when this page loads. Rule changes take effect when vrouterd restarts.</p>");
+    try w.writeAll("<p class=\"refresh-note\">Counters are read when this page loads. Rule changes take effect when vnetd restarts.</p>");
 }
 
 const SelectOption = struct { value: []const u8, label: []const u8 };
@@ -1073,7 +1073,7 @@ fn diagnosticsBody(w: *std.Io.Writer, data: PageData) !void {
     }
     try w.writeAll("</section>");
 
-    try w.writeAll("<section class=\"card\"><header class=\"card-head\"><div><h3>Offline recovery</h3><p>Journal repair is intentionally CLI-only; the web never edits the journal or config on disk.</p></div></header><div class=\"card-body\"><p>If <code>doctor.status</code> reports a malformed journal or a pending transaction, stop the daemon and repair it offline:</p><pre class=\"log-tail\"><code>sudo vrouter down\nsudo vrouter doctor --repair</code></pre></div></section>");
+    try w.writeAll("<section class=\"card\"><header class=\"card-head\"><div><h3>Offline recovery</h3><p>Journal repair is intentionally CLI-only; the web never edits the journal or config on disk.</p></div></header><div class=\"card-body\"><p>If <code>doctor.status</code> reports a malformed journal or a pending transaction, stop the daemon and repair it offline:</p><pre class=\"log-tail\"><code>sudo vnet down\nsudo vnet doctor --repair</code></pre></div></section>");
 
     try w.writeAll("<div class=\"content-grid\"><section class=\"card card-wide\"><header class=\"card-head\"><div><h3>Address table</h3><p>Addresses currently assigned in the kernel.</p></div></header>");
     if (network) |value| {
@@ -1275,7 +1275,7 @@ fn loggingReviewDialog(w: *std.Io.Writer, view: LoggingView, review: pages.Confi
         try w.writeAll("</div>");
     }
     if (review.restart_required) {
-        try w.writeAll("<div class=\"alert alert-warn\" role=\"alert\"><strong>Restart required.</strong> This change cannot be applied live; it is saved and applied after vrouterd restarts.</div>");
+        try w.writeAll("<div class=\"alert alert-warn\" role=\"alert\"><strong>Restart required.</strong> This change cannot be applied live; it is saved and applied after vnetd restarts.</div>");
     }
     if (review.diff.len > 0) {
         try w.writeAll("<pre class=\"diff\">");
@@ -1508,7 +1508,7 @@ fn writeReviewDialog(
         try w.writeAll("</div>");
     }
     if (review.restart_required) {
-        try w.writeAll("<div class=\"alert alert-warn\" role=\"alert\"><strong>Restart required.</strong> This change cannot be applied live; it is saved and applied after vrouterd restarts.</div>");
+        try w.writeAll("<div class=\"alert alert-warn\" role=\"alert\"><strong>Restart required.</strong> This change cannot be applied live; it is saved and applied after vnetd restarts.</div>");
     }
     if (review.diff.len > 0) {
         try w.writeAll("<pre class=\"diff\">");
@@ -1535,7 +1535,7 @@ fn writeReviewDialog(
 }
 
 fn writeRestartBanner(w: *std.Io.Writer, csrf: []const u8, token: ?[]const u8, supported: bool) !void {
-    try w.writeAll("<div class=\"alert alert-warn\" role=\"alert\"><strong>Restart required.</strong> Configuration changes are saved and activate when vrouterd restarts.");
+    try w.writeAll("<div class=\"alert alert-warn\" role=\"alert\"><strong>Restart required.</strong> Configuration changes are saved and activate when vnetd restarts.");
     if (supported) {
         try w.writeAll("<form class=\"inline-form restart-form\" method=\"post\" action=\"/restart\" hx-post=\"/restart\" hx-target=\"#restart-result\" hx-swap=\"innerHTML\"><input type=\"hidden\" name=\"csrf\" value=\"");
         try html.writeEscaped(w, csrf);

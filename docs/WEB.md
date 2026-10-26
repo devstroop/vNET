@@ -1,14 +1,14 @@
 # Web admin preview
 
-`vrouterweb` is an opt-in web frontend for a running Linux vRouter.
+`vnetweb` is an opt-in web frontend for a running Linux vNET.
 It is a post-v1 preview of ADR-011, not part of the default 0.2.0 build and not
 yet a replacement for the CLI.
 
 The adapter is unprivileged and has no direct netlink, journal or config-file
 access; link changes, DNS probes, lease revokes and lifecycle requests are
 requests to the daemon. It renders server-side HTML with HTMX fragments and
-exposes a small JSON API, all
-backed by the existing Unix control socket. Reads use v2/v3 list ops; writes
+exposes a small JSON API, all backed by the existing Unix control socket.
+Reads use v2/v3 list ops; writes
 are staged drafts that are diffed and applied by the daemon through
 `config.diff`/`config.apply`, never by direct host mutation.
 
@@ -22,20 +22,20 @@ are staged drafts that are diffed and applied by the daemon through
 - `src/web/assets/` — vendored HTMX 4.0.0 (0BSD), CSS and progressive-
   enhancement JavaScript, embedded with `@embedFile`.
 - `src/web/auth.zig` — Argon2id password verification, sessions, CSRF.
-- `exec/vrouterweb/main.zig` — loopback-only process and CLI flags.
+- `exec/vnetweb/main.zig` — loopback-only process and CLI flags.
 - `src/control/` — the existing Unix-socket control client used by the server.
 
 There is no frontend build step, Node runtime, package manager, CDN or runtime
-asset directory. `zig build web` builds only the `vrouterweb` executable.
+asset directory. `zig build web` builds only the `vnetweb` executable.
 
 ## Build
 
 ```bash
 zig build web
-./zig-out/bin/vrouterweb --help
+./zig-out/bin/vnetweb --help
 ```
 
-The default `zig build` does not install `vrouterweb`.
+The default `zig build` does not install `vnetweb`.
 
 ## Create an admin password
 
@@ -43,7 +43,7 @@ The password is stored as an Argon2id PHC string. Keep the file mode `0600`.
 
 ```bash
 printf '%s\n' 'replace-me-with-a-long-password' \
-  | ./zig-out/bin/vrouterweb --hash-password \
+  | ./zig-out/bin/vnetweb --hash-password \
   > /tmp/web-password
 chmod 600 /tmp/web-password
 ```
@@ -54,10 +54,10 @@ history that contains it.
 ## Run
 
 ```bash
-sudo -u vrouter \
-  ./zig-out/bin/vrouterweb \
+sudo -u vnet \
+  ./zig-out/bin/vnetweb \
     --listen 127.0.0.1:8080 \
-    --control /run/vrouter/control.sock \
+    --control /run/vnet/control.sock \
     --password-hash-file /tmp/web-password
 ```
 
@@ -66,8 +66,8 @@ Options:
 | Flag | Default | Meaning |
 |---|---|---|
 | `--listen` | `127.0.0.1:8080` | Loopback address only. |
-| `--control` | `$VROUTER_RUN_DIR/control.sock` | Existing control socket. |
-| `--password-hash-file` | `/etc/vrouter/web-password` | Argon2id PHC file. |
+| `--control` | `$VNET_RUN_DIR/control.sock` | Existing control socket. |
+| `--password-hash-file` | `/etc/vnet/web-password` | Argon2id PHC file. |
 | `--session-ttl-hours` | `12` | Session lifetime, 1–168 hours. |
 | `--hash-password` | — | Read a password from stdin and print a PHC hash. |
 
@@ -75,14 +75,14 @@ Restart-required saves return a one-time token. To let the web restart
 or stop the daemon locally, start it with `--enable-restart`:
 
 ```bash
-./zig-out/bin/vrouterd -c /etc/vrouter/vrouter.json --enable-restart
+./zig-out/bin/vnetd -c /etc/vnet/vnet.json --enable-restart
 ```
 
 Restart performs a clean teardown and re-exec; stop exits and expects the
-supervisor to start it again. This option is not a service manager. `vrouter
+supervisor to start it again. This option is not a service manager. `vnet
 up` passes it automatically when it launches the daemon. Without it,
 `restart_supported` is false, restart prints the exact `systemctl restart
-vrouterd` command, and the stop control is disabled.
+vnetd` command, and the stop control is disabled.
 
 ## Pages and fragments
 
@@ -108,7 +108,7 @@ The browser loads a full page once, then HTMX refreshes only the live region:
 | `/logs` | page | Bounded daemon log tail (48 KiB) with line/size metadata. |
 | `/config` | page | Revision/source/writability, logging editor and running JSON. |
 | `/restart` | action | Accepts a one-time restart token from a restart-required apply. |
-| `/stop` | action | Stops vrouterd after typed `stop` confirmation and a supervisor check. |
+| `/stop` | action | Stops vnetd after typed `stop` confirmation and a supervisor check. |
 | `/nat/rules` | action | Stages NAT masquerade/port-forward drafts. |
 | `/nat/review` | action | Diffs the staged NAT draft. |
 | `/nat/apply` | action | Applies the staged NAT draft and live NAT. |

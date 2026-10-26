@@ -1,4 +1,4 @@
-//! Reusable vRouter runtime lifecycle shared by `vrouterd` and the C ABI.
+//! Reusable vNET runtime lifecycle shared by `vnetd` and the C ABI.
 
 const std = @import("std");
 const schema = @import("../config/schema.zig");
@@ -38,7 +38,7 @@ pub const Runtime = struct {
 pub const ReadyFn = *const fn (ctx: ?*anyopaque) void;
 
 pub const Options = struct {
-    state_dir: ?[]const u8 = "/run/vrouter",
+    state_dir: ?[]const u8 = "/run/vnet",
     config_store: ?*config_store.Store = null,
     allow_host_changes: bool = true,
     enable_monitor: bool = true,
@@ -98,7 +98,7 @@ pub fn run(
     if (control_offload.isEnabled(cfg)) {
         if (host) |*h| {
             offload_plan = control_offload.apply(io, gpa, h, cfg) catch |err| {
-                logger.err("kernel offload: {s}; run `vrouter down -c <config>` to repair", .{
+                logger.err("kernel offload: {s}; run `vnet down -c <config>` to repair", .{
                     @errorName(err),
                 });
                 return err;
@@ -107,7 +107,7 @@ pub fn run(
                 logger.info("offload bridge={s} kernel={s} trunk={s}", .{
                     .bridge_name = device.bridge_name,
                     .kernel_bridge = device.kernel_bridge,
-                    .veth_vrouter = device.veth_vrouter,
+                    .veth_vnet = device.veth_vnet,
                 });
             }
             for (offload_plan.skipped) |port_name| {
@@ -215,7 +215,7 @@ pub fn run(
             .zones = if (dns_zones) |zones| zones else &.{},
         }) catch |err| {
             logger.err(
-                "dns listen={f}: {s}; assign the address first with `vrouter iface set <dev> <cidr>`",
+                "dns listen={f}: {s}; assign the address first with `vnet iface set <dev> <cidr>`",
                 .{ listen, @errorName(err) },
             );
             return err;

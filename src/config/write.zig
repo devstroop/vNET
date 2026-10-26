@@ -183,17 +183,17 @@ test "saveNat rotates an existing file atomically" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     const source = "{\"version\":1,\"instance\":\"test\",\"ports\":{\"wan\":{\"kind\":\"l2\",\"device\":\"eth0\"}},\"interfaces\":{\"wanif\":{\"port\":\"wan\",\"address\":\"10.0.0.1/24\"}}}\n";
-    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "vrouter.json", .data = source });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "vnet.json", .data = source });
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
     const dir = try tmp.dir.realPath(std.testing.io, &path_buf);
-    const path = try std.fmt.allocPrint(std.testing.allocator, "{s}/vrouter.json", .{path_buf[0..dir]});
+    const path = try std.fmt.allocPrint(std.testing.allocator, "{s}/vnet.json", .{path_buf[0..dir]});
     defer std.testing.allocator.free(path);
 
     try saveNat(std.testing.io, std.testing.allocator, path, source, .{
         .masquerade = &.{.{ .out = "wanif" }},
     });
 
-    const saved = try tmp.dir.readFileAlloc(std.testing.io, "vrouter.json", std.testing.allocator, .limited(4096));
+    const saved = try tmp.dir.readFileAlloc(std.testing.io, "vnet.json", std.testing.allocator, .limited(4096));
     defer std.testing.allocator.free(saved);
     try std.testing.expect(std.mem.indexOf(u8, saved, "\"masquerade\"") != null);
 }

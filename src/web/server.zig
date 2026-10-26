@@ -3,15 +3,15 @@
 //! write through the existing Unix control socket.
 
 const std = @import("std");
-const vrouter = @import("vrouter");
+const vnet = @import("vnet");
 const auth = @import("auth.zig");
 const assets = @import("assets.zig");
 const html = @import("html.zig");
 const pages = @import("pages.zig");
 const operations = @import("operations.zig");
-const protocol = vrouter.control_protocol;
+const protocol = vnet.control_protocol;
 
-const cookie_name = "vrouter_session";
+const cookie_name = "vnet_session";
 const max_body = 65536;
 const max_password_len = 256;
 const login_max_failures = 5;
@@ -24,7 +24,7 @@ pub const Options = struct {
     io: std.Io,
     gpa: std.mem.Allocator,
     listen: []const u8 = "127.0.0.1:8080",
-    control_path: []const u8 = "/run/vrouter/control.sock",
+    control_path: []const u8 = "/run/vnet/control.sock",
     password_phc: []const u8,
     session_ttl_ms: i64 = auth.default_session_ttl_ms,
 };
@@ -48,7 +48,7 @@ pub fn run(options: Options) !void {
     var listener = try address.listen(options.io, .{ .reuse_address = true });
     defer listener.deinit(options.io);
 
-    std.log.info("vrouter-web listening on {s} (control {s})", .{ options.listen, options.control_path });
+    std.log.info("vnet-web listening on {s} (control {s})", .{ options.listen, options.control_path });
     while (true) {
         const stream = try listener.accept(options.io);
         app.handleConnection(stream) catch |err| {
@@ -879,7 +879,7 @@ const App = struct {
     }
 
     fn configGet(self: *App) !std.json.Parsed(protocol.Response) {
-        var client = try vrouter.control_client.Client.connect(self.io, self.gpa, self.control_path);
+        var client = try vnet.control_client.Client.connect(self.io, self.gpa, self.control_path);
         defer client.deinit();
         var status = try v3Status(&client);
         defer status.deinit();
@@ -899,7 +899,7 @@ const App = struct {
         confirm: ?[]const u8,
         idempotency_key: ?[]const u8,
     ) !std.json.Parsed(protocol.Response) {
-        var client = try vrouter.control_client.Client.connect(self.io, self.gpa, self.control_path);
+        var client = try vnet.control_client.Client.connect(self.io, self.gpa, self.control_path);
         defer client.deinit();
         var status = try v3Status(&client);
         defer status.deinit();
@@ -915,7 +915,7 @@ const App = struct {
         });
     }
 
-    fn v3Status(client: *vrouter.control_client.Client) !std.json.Parsed(protocol.Response) {
+    fn v3Status(client: *vnet.control_client.Client) !std.json.Parsed(protocol.Response) {
         var status = try client.call(.{ .version = protocol.version, .op = "status" });
         if (status.value.ok) {
             const status_value = status.value.status orelse {
@@ -945,7 +945,7 @@ const App = struct {
     }
 
     fn callNatApply(self: *App, nat: protocol.NatApply) !std.json.Parsed(protocol.Response) {
-        var client = try vrouter.control_client.Client.connect(self.io, self.gpa, self.control_path);
+        var client = try vnet.control_client.Client.connect(self.io, self.gpa, self.control_path);
         defer client.deinit();
         return client.call(.{ .op = "nat.apply", .nat = nat });
     }
@@ -1162,9 +1162,9 @@ const App = struct {
         if (apply_response.value.restart_required orelse false) {
             self.rememberRestartResponse(&apply_response.value);
             const notice = if (apply_response.value.restart_token != null)
-                "DHCP configuration saved. Restart vrouterd to activate it."
+                "DHCP configuration saved. Restart vnetd to activate it."
             else
-                "DHCP configuration saved. Run systemctl restart vrouterd to activate it.";
+                "DHCP configuration saved. Run systemctl restart vnetd to activate it.";
             return self.renderDhcpApplied(request, csrf[0..], allocator, notice);
         }
         self.clearRestartToken();
@@ -1388,7 +1388,7 @@ const App = struct {
     }
 
     fn callDnsQuery(self: *App, name: []const u8, qtype: []const u8) !std.json.Parsed(protocol.Response) {
-        var client = try vrouter.control_client.Client.connect(self.io, self.gpa, self.control_path);
+        var client = try vnet.control_client.Client.connect(self.io, self.gpa, self.control_path);
         defer client.deinit();
         return client.call(.{
             .version = protocol.version,
@@ -1523,9 +1523,9 @@ const App = struct {
         if (apply_response.value.restart_required orelse false) {
             self.rememberRestartResponse(&apply_response.value);
             const notice = if (apply_response.value.restart_token != null)
-                "DNS configuration saved. Restart vrouterd to activate it."
+                "DNS configuration saved. Restart vnetd to activate it."
             else
-                "DNS configuration saved. Run systemctl restart vrouterd to activate it.";
+                "DNS configuration saved. Run systemctl restart vnetd to activate it.";
             return self.renderDnsApplied(request, csrf[0..], allocator, notice);
         }
         self.clearRestartToken();
@@ -1857,7 +1857,7 @@ const App = struct {
     }
 
     fn callLinkSet(self: *App, dev: []const u8, up: bool, confirm: []const u8) !std.json.Parsed(protocol.Response) {
-        var client = try vrouter.control_client.Client.connect(self.io, self.gpa, self.control_path);
+        var client = try vnet.control_client.Client.connect(self.io, self.gpa, self.control_path);
         defer client.deinit();
         return client.call(.{
             .version = protocol.version,
@@ -1999,9 +1999,9 @@ const App = struct {
         if (apply_response.value.restart_required orelse false) {
             self.rememberRestartResponse(&apply_response.value);
             const notice = if (apply_response.value.restart_token != null)
-                "Interface configuration saved. Restart vrouterd to activate it."
+                "Interface configuration saved. Restart vnetd to activate it."
             else
-                "Interface configuration saved. Run systemctl restart vrouterd to activate it.";
+                "Interface configuration saved. Run systemctl restart vnetd to activate it.";
             return self.renderInterfacesApplied(request, csrf[0..], allocator, notice);
         }
         self.clearRestartToken();
@@ -2216,7 +2216,7 @@ const App = struct {
     }
 
     fn callDhcpLeaseRevoke(self: *App, iface: []const u8, ip: []const u8, confirm: []const u8) !std.json.Parsed(protocol.Response) {
-        var client = try vrouter.control_client.Client.connect(self.io, self.gpa, self.control_path);
+        var client = try vnet.control_client.Client.connect(self.io, self.gpa, self.control_path);
         defer client.deinit();
         return client.call(.{
             .version = protocol.version,
@@ -2416,9 +2416,9 @@ const App = struct {
         if (apply_response.value.restart_required orelse false) {
             self.rememberRestartResponse(&apply_response.value);
             const notice = if (apply_response.value.restart_token != null)
-                "Route configuration saved. Restart vrouterd to activate it."
+                "Route configuration saved. Restart vnetd to activate it."
             else
-                "Route configuration saved. Run systemctl restart vrouterd to activate it.";
+                "Route configuration saved. Run systemctl restart vnetd to activate it.";
             return self.renderRoutesApplied(request, csrf[0..], allocator, notice);
         }
         self.clearRestartToken();
@@ -2650,9 +2650,9 @@ const App = struct {
         if (apply_response.value.restart_required orelse false) {
             self.rememberRestartResponse(&apply_response.value);
             const notice = if (apply_response.value.restart_token != null)
-                "Firewall configuration saved. Restart vrouterd to activate it."
+                "Firewall configuration saved. Restart vnetd to activate it."
             else
-                "Firewall configuration saved. Run systemctl restart vrouterd to activate it.";
+                "Firewall configuration saved. Run systemctl restart vnetd to activate it.";
             return self.renderFirewallApplied(request, csrf[0..], allocator, notice);
         }
         self.clearRestartToken();
@@ -2939,9 +2939,9 @@ const App = struct {
             restart_supported = self.restart_supported;
             restart_token = self.restartToken() orelse "";
             notice = if (apply_response.value.restart_token != null)
-                "Logging configuration saved. Restart vrouterd to activate it."
+                "Logging configuration saved. Restart vnetd to activate it."
             else
-                "Logging configuration saved. Run systemctl restart vrouterd to activate it.";
+                "Logging configuration saved. Run systemctl restart vnetd to activate it.";
         } else {
             self.clearRestartToken();
         }
@@ -3104,13 +3104,13 @@ const App = struct {
         self.restart_pending = false;
         return self.respondRestartResult(
             request,
-            "Restart accepted. vrouterd is stopping cleanly and will come back up; refresh in a few seconds.",
+            "Restart accepted. vnetd is stopping cleanly and will come back up; refresh in a few seconds.",
             false,
         );
     }
 
     fn restartDaemon(self: *App, token: []const u8) !std.json.Parsed(protocol.Response) {
-        var client = try vrouter.control_client.Client.connect(self.io, self.gpa, self.control_path);
+        var client = try vnet.control_client.Client.connect(self.io, self.gpa, self.control_path);
         defer client.deinit();
         return client.call(.{
             .version = protocol.version,
@@ -3150,13 +3150,13 @@ const App = struct {
         self.restart_pending = false;
         return self.respondStopResult(
             request,
-            "Stop accepted. vrouterd is shutting down; forwarding stops and this page will disconnect. Start it again with your service manager.",
+            "Stop accepted. vnetd is shutting down; forwarding stops and this page will disconnect. Start it again with your service manager.",
             false,
         );
     }
 
     fn stopDaemon(self: *App, confirm: []const u8) !std.json.Parsed(protocol.Response) {
-        var client = try vrouter.control_client.Client.connect(self.io, self.gpa, self.control_path);
+        var client = try vnet.control_client.Client.connect(self.io, self.gpa, self.control_path);
         defer client.deinit();
         return client.call(.{
             .version = protocol.version,
@@ -3431,7 +3431,7 @@ const App = struct {
     }
 
     fn callStatus(self: *App) !std.json.Parsed(protocol.Response) {
-        var client = try vrouter.control_client.Client.connect(self.io, self.gpa, self.control_path);
+        var client = try vnet.control_client.Client.connect(self.io, self.gpa, self.control_path);
         defer client.deinit();
         return v3Status(&client) catch |err| switch (err) {
             error.ProtocolVersionUnsupported => client.callOpVersion(protocol.v2_version, "status", null, null),
@@ -3440,7 +3440,7 @@ const App = struct {
     }
 
     fn call(self: *App, op: []const u8, state_filter: ?[]const u8, limit: ?u32) !std.json.Parsed(protocol.Response) {
-        var client = try vrouter.control_client.Client.connect(self.io, self.gpa, self.control_path);
+        var client = try vnet.control_client.Client.connect(self.io, self.gpa, self.control_path);
         defer client.deinit();
         const version: ?u32 = if (protocol.isV3Only(op) or std.mem.eql(u8, op, "nat.list"))
             protocol.version
@@ -3864,9 +3864,9 @@ fn jsonStringify(allocator: std.mem.Allocator, value: std.json.Value) ![]const u
 }
 
 fn jsonValuesEqual(allocator: std.mem.Allocator, a: std.json.Value, b: std.json.Value) !bool {
-    const a_bytes = try vrouter.config_apply.canonicalize(allocator, a);
+    const a_bytes = try vnet.config_apply.canonicalize(allocator, a);
     defer allocator.free(a_bytes);
-    const b_bytes = try vrouter.config_apply.canonicalize(allocator, b);
+    const b_bytes = try vnet.config_apply.canonicalize(allocator, b);
     defer allocator.free(b_bytes);
     return std.mem.eql(u8, a_bytes, b_bytes);
 }
@@ -4079,7 +4079,7 @@ fn applyDnsForm(allocator: std.mem.Allocator, object: *std.json.ObjectMap, body:
         const entries_text = formValue(body, "max_entries", &entries_buf) orelse "1024";
         const upstreams = try dnsUpstreamArray(allocator, upstreams_text, false);
         if (listen.len != 0) {
-            _ = vrouter.types.Ipv4.parse(listen) catch return error.InvalidField;
+            _ = vnet.types.Ipv4.parse(listen) catch return error.InvalidField;
         }
         const zones_nonempty = if (object.get("zones")) |zones| switch (zones) {
             .array => |array| array.items.len != 0,
@@ -4138,7 +4138,7 @@ fn dnsUpstreamArray(allocator: std.mem.Allocator, text: []const u8, required: bo
     var array = std.json.Array.init(allocator);
     var tokens = std.mem.tokenizeAny(u8, text, ", \t\r\n");
     while (tokens.next()) |token| {
-        _ = vrouter.types.Ipv4.parse(token) catch return error.InvalidField;
+        _ = vnet.types.Ipv4.parse(token) catch return error.InvalidField;
         try array.append(.{ .string = try allocator.dupe(u8, token) });
     }
     if (required and array.items.len == 0) return error.InvalidField;
@@ -4568,7 +4568,7 @@ fn portFromForm(allocator: std.mem.Allocator, body: []const u8) !std.json.Object
     if (create.len != 0) try port.put(allocator, "create", .{ .string = try allocator.dupe(u8, create) });
     if (mtu.len != 0) {
         const value = std.fmt.parseInt(u16, mtu, 10) catch return error.InvalidField;
-        if (value < 576 or value > vrouter.types.max_supported_mtu) return error.InvalidField;
+        if (value < 576 or value > vnet.types.max_supported_mtu) return error.InvalidField;
         try port.put(allocator, "mtu", .{ .integer = value });
     }
     if (pvid.len != 0) {
@@ -4765,16 +4765,16 @@ fn applyRoutesForm(allocator: std.mem.Allocator, routes: *std.json.Array, body: 
 }
 
 fn validPrefix(text: []const u8) bool {
-    _ = vrouter.types.IpPrefix.parse(text) catch return false;
+    _ = vnet.types.IpPrefix.parse(text) catch return false;
     return true;
 }
 
 fn validIp(text: []const u8) bool {
-    _ = vrouter.types.IpAddr.parse(text) catch return false;
+    _ = vnet.types.IpAddr.parse(text) catch return false;
     return true;
 }
 
-fn ruleFamilyAllows(rule_family: []const u8, value_family: vrouter.types.IpFamily) bool {
+fn ruleFamilyAllows(rule_family: []const u8, value_family: vnet.types.IpFamily) bool {
     return std.mem.eql(u8, rule_family, "any") or
         (std.mem.eql(u8, rule_family, "ipv4") and value_family == .ipv4) or
         (std.mem.eql(u8, rule_family, "ipv6") and value_family == .ipv6);
@@ -4796,9 +4796,9 @@ fn routeFromForm(allocator: std.mem.Allocator, body: []const u8) !std.json.Objec
     if (via.len != 0 and !validIp(via)) return error.InvalidField;
     if (dev.len == 0 or dev.len > 127) return error.InvalidField;
     if (std.mem.indexOfAny(u8, dev, " \t\r\n") != null) return error.InvalidField;
-    const dst_prefix = vrouter.types.IpPrefix.parse(dst) catch return error.InvalidField;
+    const dst_prefix = vnet.types.IpPrefix.parse(dst) catch return error.InvalidField;
     if (via.len != 0) {
-        const via_addr = vrouter.types.IpAddr.parse(via) catch return error.InvalidField;
+        const via_addr = vnet.types.IpAddr.parse(via) catch return error.InvalidField;
         if (via_addr.family() != dst_prefix.family()) return error.InvalidField;
     }
     const metric = std.fmt.parseInt(u32, metric_text, 10) catch return error.InvalidField;
@@ -4998,15 +4998,15 @@ fn firewallRuleFromForm(allocator: std.mem.Allocator, body: []const u8) !std.jso
         !std.mem.eql(u8, proto, "icmp") and !std.mem.eql(u8, proto, "icmpv6")) return error.InvalidField;
     if (iif.len != 0 and !validName(iif)) return error.InvalidField;
     if (oif.len != 0 and !validName(oif)) return error.InvalidField;
-    var src_family: ?vrouter.types.IpFamily = null;
-    var dst_family: ?vrouter.types.IpFamily = null;
+    var src_family: ?vnet.types.IpFamily = null;
+    var dst_family: ?vnet.types.IpFamily = null;
     if (src.len != 0) {
         if (!validPrefix(src)) return error.InvalidField;
-        src_family = (vrouter.types.IpPrefix.parse(src) catch return error.InvalidField).family();
+        src_family = (vnet.types.IpPrefix.parse(src) catch return error.InvalidField).family();
     }
     if (dst.len != 0) {
         if (!validPrefix(dst)) return error.InvalidField;
-        dst_family = (vrouter.types.IpPrefix.parse(dst) catch return error.InvalidField).family();
+        dst_family = (vnet.types.IpPrefix.parse(dst) catch return error.InvalidField).family();
     }
     if (src_family != null and dst_family != null and src_family.? != dst_family.?) return error.InvalidField;
     if (src_family) |value_family| if (!ruleFamilyAllows(family, value_family)) return error.InvalidField;
@@ -5167,8 +5167,8 @@ fn dhcpReservationFromForm(allocator: std.mem.Allocator, body: []const u8) !std.
     const mac = formValue(body, "mac", &mac_buf) orelse return error.MissingField;
     const ip = formValue(body, "ip", &ip_buf) orelse return error.MissingField;
     if (mac.len == 0 or ip.len == 0) return error.MissingField;
-    _ = vrouter.types.Mac.parse(mac) catch return error.InvalidField;
-    _ = vrouter.types.Ipv4.parse(ip) catch return error.InvalidField;
+    _ = vnet.types.Mac.parse(mac) catch return error.InvalidField;
+    _ = vnet.types.Ipv4.parse(ip) catch return error.InvalidField;
     var reservation = try std.json.ObjectMap.init(allocator, &.{}, &.{});
     try reservation.put(allocator, "mac", .{ .string = try allocator.dupe(u8, mac) });
     try reservation.put(allocator, "ip", .{ .string = try allocator.dupe(u8, ip) });
@@ -5483,9 +5483,9 @@ fn masqueradeRuleFromForm(allocator: std.mem.Allocator, body: []const u8) !std.j
     const src = formValue(body, "src", &src_buf) orelse "";
     const addr = formValue(body, "addr", &addr_buf) orelse "";
     if (out.len == 0) return error.MissingField;
-    if (src.len != 0) _ = vrouter.types.Prefix4.parse(src) catch return error.InvalidField;
+    if (src.len != 0) _ = vnet.types.Prefix4.parse(src) catch return error.InvalidField;
     if (addr.len != 0) {
-        const parsed = vrouter.types.Ipv4.parse(addr) catch return error.InvalidField;
+        const parsed = vnet.types.Ipv4.parse(addr) catch return error.InvalidField;
         if (parsed.isUnspecified() or parsed.isMulticast()) return error.InvalidField;
     }
     var rule = try std.json.ObjectMap.init(allocator, &.{}, &.{});
@@ -5518,7 +5518,7 @@ fn forwardRuleFromForm(allocator: std.mem.Allocator, body: []const u8) !std.json
         if (to_addr.len == 0 or to_port_text.len == 0) return error.MissingField;
         const to_port = std.fmt.parseInt(u16, to_port_text, 10) catch return error.InvalidField;
         if (to_port == 0) return error.InvalidField;
-        const ip = vrouter.types.Ipv4.parse(to_addr) catch return error.InvalidField;
+        const ip = vnet.types.Ipv4.parse(to_addr) catch return error.InvalidField;
         if (ip.isUnspecified() or ip.isMulticast()) return error.InvalidField;
         break :blk try std.fmt.allocPrint(allocator, "{s}:{d}", .{ to_addr, to_port });
     };
@@ -6083,9 +6083,9 @@ test "generated interface route and firewall config passes the real parser" {
 
     stripNulls(&root);
     const text = try jsonStringify(allocator, root);
-    var parsed = try vrouter.config_parse.parse(allocator, text);
+    var parsed = try vnet.config_parse.parse(allocator, text);
     defer parsed.deinit();
-    try vrouter.config_validate.validate(&parsed.config);
+    try vnet.config_validate.validate(&parsed.config);
 }
 
 test "form and query decoding handles plus and percent escapes" {

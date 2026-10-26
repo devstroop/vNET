@@ -5,7 +5,7 @@
 
 ## Context
 
-vRouter mutates host state: addresses, routes, links, bridge membership, NAT and
+vNET mutates host state: addresses, routes, links, bridge membership, NAT and
 firewall rules, Android tethering. A crash or `kill -9` must not leave the
 device blackholed or leaking traffic. The control plane also needs to diff
 configs, apply them transactionally, and be inspectable without a database.
@@ -20,7 +20,7 @@ configs, apply them transactionally, and be inspectable without a database.
   - no comments, no trailing commas;
   - all limits and defaults are documented in `docs/CORE-SCOPE.md`.
 - Parsed into an arena-owned typed model (`src/config/`). Validation is a
-  separate pass so `vrouter validate` can report schema errors without touching
+  separate pass so `vnet validate` can report schema errors without touching
   the host.
 - A config diff is computed on the typed model, not on text. Key order and
   whitespace never affect the diff.
@@ -29,18 +29,18 @@ configs, apply them transactionally, and be inspectable without a database.
 ### Journal (R2 implementation)
 
 - JSON Lines, one **forward operation** per line, under
-  `$VROUTER_RUN_DIR/<instance>.journal` (default `/run/vrouter/<instance>.journal`).
+  `$VNET_RUN_DIR/<instance>.journal` (default `/run/vnet/<instance>.journal`).
 - Operations: `addr_add`, `addr_del`, `link`, `route_add`, `route_del`.
 - Sequence:
   1. Write the line with an atomic temp-file rename and `fsync`.
   2. Apply the netlink/ioctl mutation.
   3. On failure, remove the line so rollback cannot touch pre-existing state.
-- `vrouter down` reads records and applies the inverse in reverse order:
+- `vnet down` reads records and applies the inverse in reverse order:
   add↔delete, link up↔down. "Already absent" on delete and "already exists" on
   add count as restored.
 - `iface del` and `route del` are ownership-gated by replaying the journal:
-  state that vRouter did not add is never removed.
-- A crash between (1) and (2) leaves an idempotent record that `vrouter down`
+  state that vNET did not add is never removed.
+- A crash between (1) and (2) leaves an idempotent record that `vnet down`
   cleans up. A fully successful rollback removes the journal; failures keep it
   so the operation can be retried.
 - `/run` is deliberate: host state is ephemeral across reboot, and a persistent
@@ -50,10 +50,10 @@ configs, apply them transactionally, and be inspectable without a database.
 ### Future (R7 control plane)
 
 - `pending`/`applied` status, sequence numbers and timestamps for audit.
-- Batch apply for `vrouter up`: write all records, then apply; roll back on the
+- Batch apply for `vnet up`: write all records, then apply; roll back on the
   first failure.
 - PID lock per instance and reconciliation at daemon startup.
-- `vrouter doctor --repair` for drift and stale records.
+- `vnet doctor --repair` for drift and stale records.
 
 ### Atomic apply
 

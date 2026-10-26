@@ -1,4 +1,4 @@
-//! vRouter core library root.
+//! vNET core library root.
 
 const std = @import("std");
 const builtin = @import("builtin");

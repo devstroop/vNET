@@ -291,13 +291,13 @@ test "store computes a revision, reads and replaces durably" {
     defer tmp.cleanup();
 
     try tmp.dir.writeFile(testing.io, .{
-        .sub_path = "vrouter.json",
+        .sub_path = "vnet.json",
         .data = "{\"version\":1,\"instance\":\"test\"}\n",
     });
 
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
     const dir = try tmp.dir.realPath(testing.io, &path_buf);
-    const path = try std.fmt.allocPrint(testing.allocator, "{s}/vrouter.json", .{path_buf[0..dir]});
+    const path = try std.fmt.allocPrint(testing.allocator, "{s}/vnet.json", .{path_buf[0..dir]});
     defer testing.allocator.free(path);
 
     var store = try Store.open(testing.io, testing.allocator, path);
@@ -332,7 +332,7 @@ test "store computes a revision, reads and replaces durably" {
     try testing.expectEqualStrings(next.slice(), reloaded.slice());
 
     try tmp.dir.writeFile(testing.io, .{
-        .sub_path = "vrouter.json",
+        .sub_path = "vnet.json",
         .data = "{\"version\":1,\"instance\":\"external\"}\n",
     });
     try testing.expect(try store.refreshIfChanged());
@@ -354,10 +354,10 @@ test "store rejects symlinks and directories" {
     defer tmp.cleanup();
 
     try tmp.dir.writeFile(testing.io, .{
-        .sub_path = "vrouter.json",
+        .sub_path = "vnet.json",
         .data = "{}\n",
     });
-    try tmp.dir.symLink(testing.io, "vrouter.json", "link.json", .{});
+    try tmp.dir.symLink(testing.io, "vnet.json", "link.json", .{});
 
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
     const dir = try tmp.dir.realPath(testing.io, &path_buf);

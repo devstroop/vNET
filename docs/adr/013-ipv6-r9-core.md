@@ -49,12 +49,12 @@ Implement an IPv6 **R9 core** in v1.0 and defer the rest to v1.1.
    IPv4. `firewall.rate_limit.ndp` bounds received NDP messages; generated
    solicitations are limited per unresolved target.
 7. **MTU.** An interface with an IPv6 address or route requires MTU >= 1280,
-   both at config validation and at `Forwarder.fromConfig`. vRouter does not
+   both at config validation and at `Forwarder.fromConfig`. vNET does not
    fragment IPv6; oversized packets are dropped and counted, and ICMPv6 Packet
    Too Big is generated where possible.
-8. **Host/CLI.** `vrouter iface set|del` and `vrouter route add|del` accept IPv6
+8. **Host/CLI.** `vnet iface set|del` and `vnet route add|del` accept IPv6
    values and mutate the host through AF_INET6 netlink. The journal records the
-   same operations and `vrouter down` reverses them. The daemon's declarative
+   same operations and `vnet down` reverses them. The daemon's declarative
    config path still does not add kernel addresses or routes.
 
 ### Explicitly deferred to v1.1
@@ -69,7 +69,7 @@ Implement an IPv6 **R9 core** in v1.0 and defer the rest to v1.1.
 
 ## Consequences
 
-- A Linux vRouter can route IPv6 between configured ports and SVIs using static
+- A Linux vNET can route IPv6 between configured ports and SVIs using static
   addresses and routes, with working neighbor discovery and checksum repair.
 - The v1 firewall remains stateless for IPv6; stateful policy requires IPv4 or a
   future explicit IPv6 conntrack design.
