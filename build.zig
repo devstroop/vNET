@@ -123,7 +123,7 @@ pub fn build(b: *std.Build) void {
             .name = "vrouterweb",
             .root_module = web_exe_mod,
         });
-        const web_step = b.step("web", "Build the read-only HTMX web admin");
+        const web_step = b.step("web", "Build the HTMX web admin");
         web_step.dependOn(&b.addInstallArtifact(web_exe, .{}).step);
 
         const web_tests = b.addTest(.{

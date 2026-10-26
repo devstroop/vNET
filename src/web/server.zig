@@ -8,6 +8,7 @@ const auth = @import("auth.zig");
 const assets = @import("assets.zig");
 const html = @import("html.zig");
 const pages = @import("pages.zig");
+const operations = @import("operations.zig");
 const protocol = vrouter.control_protocol;
 
 const cookie_name = "vrouter_session";
@@ -100,6 +101,34 @@ const ConntrackPayload = struct {
     conntrack: protocol.Conntrack,
 };
 
+const NetworkPayload = struct {
+    ok: bool = true,
+    network: protocol.Network,
+};
+
+const LeasesPayload = struct {
+    ok: bool = true,
+    leases: protocol.DhcpLeases,
+};
+
+const FirewallCountersPayload = struct {
+    ok: bool = true,
+    counters: protocol.FirewallCounters,
+};
+
+const LogsPayload = struct {
+    ok: bool = true,
+    logs: protocol.LogTail,
+};
+
+const ConfigPayload = struct {
+    ok: bool = true,
+    revision: ?[]const u8 = null,
+    source_path: ?[]const u8 = null,
+    writable: ?bool = null,
+    config: ?std.json.Value = null,
+};
+
 const LoginRequest = struct {
     password: []const u8 = "",
 };
@@ -181,6 +210,26 @@ const App = struct {
             if (method != .GET) return self.methodNotAllowed(request);
             return self.serveConntrack(request);
         }
+        if (std.mem.eql(u8, path, "/api/network") or std.mem.eql(u8, path, "/api/interfaces")) {
+            if (method != .GET) return self.methodNotAllowed(request);
+            return self.serveNetworkApi(request);
+        }
+        if (std.mem.eql(u8, path, "/api/leases") or std.mem.eql(u8, path, "/api/clients")) {
+            if (method != .GET) return self.methodNotAllowed(request);
+            return self.serveLeasesApi(request);
+        }
+        if (std.mem.eql(u8, path, "/api/firewall/counters") or std.mem.eql(u8, path, "/api/firewall")) {
+            if (method != .GET) return self.methodNotAllowed(request);
+            return self.serveFirewallCountersApi(request);
+        }
+        if (std.mem.eql(u8, path, "/api/logs")) {
+            if (method != .GET) return self.methodNotAllowed(request);
+            return self.serveLogsApi(request);
+        }
+        if (std.mem.eql(u8, path, "/api/config")) {
+            if (method != .GET) return self.methodNotAllowed(request);
+            return self.serveConfigApi(request);
+        }
         if (std.mem.eql(u8, path, "/api") or std.mem.startsWith(u8, path, "/api/")) {
             return self.apiError(request, .not_found, "not_found", "API endpoint not found.");
         }
@@ -201,6 +250,86 @@ const App = struct {
         if (std.mem.eql(u8, path, "/overview")) {
             if (method != .GET and method != .HEAD) return self.methodNotAllowedHtml(request);
             return self.serveOverviewPage(request);
+        }
+        if (std.mem.eql(u8, path, "/interfaces/link")) {
+            if (method != .POST) return self.methodNotAllowedHtml(request);
+            return self.serveInterfacesLink(request);
+        }
+        if (std.mem.eql(u8, path, "/interfaces/rules")) {
+            if (method != .POST) return self.methodNotAllowedHtml(request);
+            return self.serveInterfacesRules(request);
+        }
+        if (std.mem.eql(u8, path, "/interfaces/review")) {
+            if (method != .POST) return self.methodNotAllowedHtml(request);
+            return self.serveInterfacesReview(request);
+        }
+        if (std.mem.eql(u8, path, "/interfaces/apply")) {
+            if (method != .POST) return self.methodNotAllowedHtml(request);
+            return self.serveInterfacesApply(request);
+        }
+        if (std.mem.eql(u8, path, "/interfaces")) {
+            if (method != .GET and method != .HEAD) return self.methodNotAllowedHtml(request);
+            return self.serveInterfacesPage(request);
+        }
+        if (std.mem.eql(u8, path, "/clients/lease")) {
+            if (method != .POST) return self.methodNotAllowedHtml(request);
+            return self.serveClientsLease(request);
+        }
+        if (std.mem.eql(u8, path, "/clients")) {
+            if (method != .GET and method != .HEAD) return self.methodNotAllowedHtml(request);
+            return self.serveClientsPage(request);
+        }
+        if (std.mem.eql(u8, path, "/routes/rules")) {
+            if (method != .POST) return self.methodNotAllowedHtml(request);
+            return self.serveRoutesRules(request);
+        }
+        if (std.mem.eql(u8, path, "/routes/review")) {
+            if (method != .POST) return self.methodNotAllowedHtml(request);
+            return self.serveRoutesReview(request);
+        }
+        if (std.mem.eql(u8, path, "/routes/apply")) {
+            if (method != .POST) return self.methodNotAllowedHtml(request);
+            return self.serveRoutesApply(request);
+        }
+        if (std.mem.eql(u8, path, "/routes")) {
+            if (method != .GET and method != .HEAD) return self.methodNotAllowedHtml(request);
+            return self.serveRoutesPage(request);
+        }
+        if (std.mem.eql(u8, path, "/firewall/rules")) {
+            if (method != .POST) return self.methodNotAllowedHtml(request);
+            return self.serveFirewallRules(request);
+        }
+        if (std.mem.eql(u8, path, "/firewall/review")) {
+            if (method != .POST) return self.methodNotAllowedHtml(request);
+            return self.serveFirewallReview(request);
+        }
+        if (std.mem.eql(u8, path, "/firewall/apply")) {
+            if (method != .POST) return self.methodNotAllowedHtml(request);
+            return self.serveFirewallApply(request);
+        }
+        if (std.mem.eql(u8, path, "/firewall")) {
+            if (method != .GET and method != .HEAD) return self.methodNotAllowedHtml(request);
+            return self.serveFirewallPage(request);
+        }
+        if (std.mem.eql(u8, path, "/diagnostics")) {
+            if (method != .GET and method != .HEAD) return self.methodNotAllowedHtml(request);
+            return self.serveDiagnosticsPage(request);
+        }
+        if (std.mem.eql(u8, path, "/logs")) {
+            if (method != .GET and method != .HEAD) return self.methodNotAllowedHtml(request);
+            return self.serveLogsPage(request);
+        }
+        if (std.mem.eql(u8, path, "/config/logging")) {
+            if (method != .POST) return self.methodNotAllowedHtml(request);
+            return self.serveLoggingReview(request);
+        }
+        if (std.mem.eql(u8, path, "/config/apply")) {
+            if (method != .POST) return self.methodNotAllowedHtml(request);
+            return self.serveLoggingApply(request);
+        }
+        if (std.mem.eql(u8, path, "/config")) {
+            if (method != .GET and method != .HEAD) return self.methodNotAllowedHtml(request);
+            return self.serveConfigPage(request);
         }
         if (std.mem.eql(u8, path, "/nat/rules")) {
             if (method != .POST) return self.methodNotAllowedHtml(request);
@@ -233,6 +362,10 @@ const App = struct {
         if (std.mem.eql(u8, path, "/dhcp")) {
             if (method != .GET and method != .HEAD) return self.methodNotAllowedHtml(request);
             return self.serveDhcpPage(request);
+        }
+        if (std.mem.eql(u8, path, "/dns/query")) {
+            if (method != .POST) return self.methodNotAllowedHtml(request);
+            return self.serveDnsQuery(request);
         }
         if (std.mem.eql(u8, path, "/dns/rules")) {
             if (method != .POST) return self.methodNotAllowedHtml(request);
@@ -269,6 +402,34 @@ const App = struct {
         if (std.mem.eql(u8, path, "/restart")) {
             if (method != .POST) return self.methodNotAllowedHtml(request);
             return self.serveRestart(request);
+        }
+        if (std.mem.eql(u8, path, "/stop")) {
+            if (method != .POST) return self.methodNotAllowedHtml(request);
+            return self.serveStop(request);
+        }
+        if (std.mem.eql(u8, path, "/partials/interfaces")) {
+            if (method != .GET and method != .POST) return self.methodNotAllowed(request);
+            return self.serveInterfacesFragment(request);
+        }
+        if (std.mem.eql(u8, path, "/partials/clients")) {
+            if (method != .GET) return self.methodNotAllowed(request);
+            return self.serveClientsFragment(request);
+        }
+        if (std.mem.eql(u8, path, "/partials/routes")) {
+            if (method != .GET and method != .POST) return self.methodNotAllowed(request);
+            return self.serveRoutesFragment(request);
+        }
+        if (std.mem.eql(u8, path, "/partials/firewall")) {
+            if (method != .GET and method != .POST) return self.methodNotAllowed(request);
+            return self.serveFirewallFragment(request);
+        }
+        if (std.mem.eql(u8, path, "/partials/diagnostics")) {
+            if (method != .GET) return self.methodNotAllowed(request);
+            return self.serveDiagnosticsFragment(request);
+        }
+        if (std.mem.eql(u8, path, "/partials/logs")) {
+            if (method != .GET) return self.methodNotAllowed(request);
+            return self.serveLogsFragment(request);
         }
         if (std.mem.eql(u8, path, "/partials/status")) {
             if (method != .GET) return self.methodNotAllowed(request);
@@ -1147,6 +1308,95 @@ const App = struct {
         return self.renderDnsFragmentView(request, view);
     }
 
+    fn serveDnsQuery(self: *App, request: *std.http.Server.Request) !void {
+        if (!self.sameOrigin(request)) {
+            return self.respondHtml(request, .forbidden, "<h1>Cross-origin request rejected.</h1>");
+        }
+        const csrf = (try self.requireSessionFragment(request)) orelse return;
+        const body = self.readRequestBody(request) catch |err| {
+            return self.renderDnsFragmentView(request, .{ .csrf = csrf[0..], .draft_json = "", .err = bodyErrorMessage(err) });
+        };
+        defer self.gpa.free(body);
+        if (!try self.verifyFormCsrf(request, csrf, body)) return;
+
+        var name_buf: [254]u8 = undefined;
+        var type_buf: [16]u8 = undefined;
+        const name = formValue(body, "name", &name_buf) orelse "";
+        const qtype = formValue(body, "type", &type_buf) orelse "A";
+        var arena = std.heap.ArenaAllocator.init(self.gpa);
+        defer arena.deinit();
+        const allocator = arena.allocator();
+        const draft_value = readOptionalDraft(allocator, body) catch |err|
+            return self.renderDnsQueryResult(request, csrf[0..], name, qtype, null, null, dnsFormError(err));
+        if (name.len == 0) {
+            return self.renderDnsQueryResult(request, csrf[0..], name, qtype, draft_value, null, "Enter a name to query.");
+        }
+        if (!std.mem.eql(u8, qtype, "A") and !std.mem.eql(u8, qtype, "AAAA")) {
+            return self.renderDnsQueryResult(request, csrf[0..], name, qtype, draft_value, null, "Only A and AAAA queries are supported.");
+        }
+
+        var response = self.callDnsQuery(name, qtype) catch |err| {
+            return self.renderDnsQueryResult(request, csrf[0..], name, qtype, draft_value, null, @errorName(err));
+        };
+        defer response.deinit();
+        if (!response.value.ok) {
+            return self.renderDnsQueryResult(
+                request,
+                csrf[0..],
+                name,
+                qtype,
+                draft_value,
+                null,
+                response.value.message orelse "DNS query failed.",
+            );
+        }
+        const result = response.value.dns_query orelse
+            return self.renderDnsQueryResult(request, csrf[0..], name, qtype, draft_value, null, "Daemon did not return a DNS answer.");
+        return self.renderDnsQueryResult(request, csrf[0..], name, qtype, draft_value, result, null);
+    }
+
+    fn renderDnsQueryResult(
+        self: *App,
+        request: *std.http.Server.Request,
+        csrf: []const u8,
+        name: []const u8,
+        qtype: []const u8,
+        draft_value: ?std.json.Value,
+        result: ?protocol.DnsQueryResult,
+        message: ?[]const u8,
+    ) !void {
+        var arena = std.heap.ArenaAllocator.init(self.gpa);
+        defer arena.deinit();
+        const allocator = arena.allocator();
+        var response = self.call("dns.list", null, null) catch |err| {
+            return self.renderDnsFragmentView(request, .{ .csrf = csrf, .draft_json = "", .err = @errorName(err) });
+        };
+        defer response.deinit();
+        const running = response.value.dns orelse
+            return self.renderDnsFragmentView(request, .{ .csrf = csrf, .draft_json = "", .err = "Missing DNS snapshot" });
+        const draft = draft_value orelse running;
+        const draft_json = jsonStringify(allocator, draft) catch |err|
+            return self.renderDnsFragmentView(request, .{ .csrf = csrf, .draft_json = "", .err = @errorName(err) });
+        var view = buildDnsView(allocator, csrf, running, draft, draft_json, null, null, null) catch |err|
+            return self.renderDnsFragmentView(request, .{ .csrf = csrf, .draft_json = "", .err = @errorName(err) });
+        view.query_name = name;
+        view.query_type = qtype;
+        view.query_result = result;
+        view.query_error = message;
+        self.decorateDnsView(&view);
+        return self.renderDnsFragmentView(request, view);
+    }
+
+    fn callDnsQuery(self: *App, name: []const u8, qtype: []const u8) !std.json.Parsed(protocol.Response) {
+        var client = try vrouter.control_client.Client.connect(self.io, self.gpa, self.control_path);
+        defer client.deinit();
+        return client.call(.{
+            .version = protocol.version,
+            .op = "dns.query",
+            .dns_query = .{ .name = name, .qtype = qtype },
+        });
+    }
+
     fn serveDnsRules(self: *App, request: *std.http.Server.Request) !void {
         if (!self.sameOrigin(request)) {
             return self.respondHtml(request, .forbidden, "<h1>Cross-origin request rejected.</h1>");
@@ -1451,12 +1701,13 @@ const App = struct {
     fn serveSystemPage(self: *App, request: *std.http.Server.Request) !void {
         const csrf = (try self.requireSession(request)) orelse return;
         const now = self.nowMs();
-        var response = self.call("status", null, null) catch |err| {
+        var response = self.callStatus() catch |err| {
             return self.renderSystemPage(request, csrf[0..], null, @errorName(err), now);
         };
         defer response.deinit();
         const status = response.value.status orelse
             return self.renderSystemPage(request, csrf[0..], null, "Missing status", now);
+        if (status.restart_supported) |supported| self.restart_supported = supported;
         return self.renderSystemPage(request, csrf[0..], status, null, now);
     }
 
@@ -1465,7 +1716,7 @@ const App = struct {
         const now = self.nowMs();
         var out: std.Io.Writer.Allocating = .init(self.gpa);
         defer out.deinit();
-        var response = self.call("status", null, null) catch |err| {
+        var response = self.callStatus() catch |err| {
             try pages.systemFragment(&out.writer, null, @errorName(err), now, self.restartUi(csrf[0..]));
             return self.respondHtml(request, .ok, out.written());
         };
@@ -1474,8 +1725,1330 @@ const App = struct {
             try pages.systemFragment(&out.writer, null, "Missing status", now, self.restartUi(csrf[0..]));
             return self.respondHtml(request, .ok, out.written());
         };
+        if (status.restart_supported) |supported| self.restart_supported = supported;
         try pages.systemFragment(&out.writer, status, null, now, self.restartUi(csrf[0..]));
         return self.respondHtml(request, .ok, out.written());
+    }
+
+    fn serveInterfacesPage(self: *App, request: *std.http.Server.Request) !void {
+        const csrf = (try self.requireSession(request)) orelse return;
+        var arena = std.heap.ArenaAllocator.init(self.gpa);
+        defer arena.deinit();
+        const allocator = arena.allocator();
+        var fetch: FetchSet = .{};
+        defer fetch.deinit();
+        var err: ?[]const u8 = self.fetchInto(&fetch.network, "network.status", null);
+        if (err == null) err = self.fetchInto(&fetch.ports, "ports.list", null);
+        if (err == null) err = self.fetchInto(&fetch.bridges, "bridges.list", null);
+        if (err == null) err = self.fetchInto(&fetch.interfaces, "interfaces.list", null);
+        const network = if (fetch.network) |*parsed| parsed.value.network else null;
+        if (network == null and err == null) err = "Missing live network state";
+        const draft = interfaceDraft(allocator, if (fetch.ports) |*parsed| parsed.value.ports else null, if (fetch.bridges) |*parsed| parsed.value.bridges else null, if (fetch.interfaces) |*parsed| parsed.value.interfaces else null) catch |draft_err|
+            return self.renderInterfacesPageView(request, .{ .csrf = csrf[0..], .network = network, .err = @errorName(draft_err) });
+        const draft_json = jsonStringify(allocator, draft) catch |json_err|
+            return self.renderInterfacesPageView(request, .{ .csrf = csrf[0..], .network = network, .err = @errorName(json_err) });
+        var view = buildInterfacesView(allocator, csrf[0..], network, draft, draft_json, null, err, null) catch |view_err|
+            return self.renderInterfacesPageView(request, .{ .csrf = csrf[0..], .network = network, .err = @errorName(view_err) });
+        self.decorateInterfacesView(&view);
+        return self.renderInterfacesPageView(request, view);
+    }
+
+    fn serveInterfacesFragment(self: *App, request: *std.http.Server.Request) !void {
+        const csrf = (try self.requireSessionFragment(request)) orelse return;
+        var arena = std.heap.ArenaAllocator.init(self.gpa);
+        defer arena.deinit();
+        const allocator = arena.allocator();
+        var fetch: FetchSet = .{};
+        defer fetch.deinit();
+        var err: ?[]const u8 = self.fetchInto(&fetch.network, "network.status", null);
+        if (err == null) err = self.fetchInto(&fetch.ports, "ports.list", null);
+        if (err == null) err = self.fetchInto(&fetch.bridges, "bridges.list", null);
+        if (err == null) err = self.fetchInto(&fetch.interfaces, "interfaces.list", null);
+        const network = if (fetch.network) |*parsed| parsed.value.network else null;
+        if (network == null and err == null) err = "Missing live network state";
+        const draft = interfaceDraft(allocator, if (fetch.ports) |*parsed| parsed.value.ports else null, if (fetch.bridges) |*parsed| parsed.value.bridges else null, if (fetch.interfaces) |*parsed| parsed.value.interfaces else null) catch |draft_err|
+            return self.renderInterfacesFragmentView(request, .{ .csrf = csrf[0..], .network = network, .err = @errorName(draft_err) });
+        const draft_json = jsonStringify(allocator, draft) catch |json_err|
+            return self.renderInterfacesFragmentView(request, .{ .csrf = csrf[0..], .network = network, .err = @errorName(json_err) });
+        var view = buildInterfacesView(allocator, csrf[0..], network, draft, draft_json, null, err, null) catch |view_err|
+            return self.renderInterfacesFragmentView(request, .{ .csrf = csrf[0..], .network = network, .err = @errorName(view_err) });
+        self.decorateInterfacesView(&view);
+        return self.renderInterfacesFragmentView(request, view);
+    }
+
+    fn serveInterfacesLink(self: *App, request: *std.http.Server.Request) !void {
+        if (!self.sameOrigin(request)) {
+            return self.respondHtml(request, .forbidden, "<h1>Cross-origin request rejected.</h1>");
+        }
+        const csrf = (try self.requireSessionFragment(request)) orelse return;
+        const body = self.readRequestBody(request) catch |err| {
+            return self.renderInterfacesFragmentView(request, .{ .csrf = csrf[0..], .err = bodyErrorMessage(err) });
+        };
+        defer self.gpa.free(body);
+        if (!try self.verifyFormCsrf(request, csrf, body)) return;
+
+        var dev_buf: [16]u8 = undefined;
+        var confirm_buf: [16]u8 = undefined;
+        var up_buf: [8]u8 = undefined;
+        const dev = formValue(body, "dev", &dev_buf) orelse "";
+        const confirm = formValue(body, "confirm", &confirm_buf) orelse "";
+        const up_text = formValue(body, "up", &up_buf) orelse "";
+        const up = if (std.mem.eql(u8, up_text, "true"))
+            true
+        else if (std.mem.eql(u8, up_text, "false"))
+            false
+        else
+            return self.renderInterfacesFragmentView(request, .{ .csrf = csrf[0..], .err = "Invalid link state." });
+
+        var arena = std.heap.ArenaAllocator.init(self.gpa);
+        defer arena.deinit();
+        const allocator = arena.allocator();
+        const draft_text = formValueAlloc(allocator, body, "draft") catch |err|
+            return self.renderInterfacesFragmentView(request, .{ .csrf = csrf[0..], .err = @errorName(err) });
+        const draft_value: ?std.json.Value = if (draft_text) |text|
+            if (text.len == 0) null else std.json.parseFromSliceLeaky(std.json.Value, allocator, text, .{}) catch
+                return self.renderInterfacesFragmentView(request, .{ .csrf = csrf[0..], .err = "Invalid staged draft." })
+        else
+            null;
+
+        if (!std.mem.eql(u8, dev, confirm)) {
+            return self.renderInterfacesResult(
+                request,
+                csrf[0..],
+                allocator,
+                draft_value,
+                null,
+                "Type the link name exactly to confirm.",
+            );
+        }
+
+        var response = self.callLinkSet(dev, up, confirm) catch |err| {
+            return self.renderInterfacesResult(request, csrf[0..], allocator, draft_value, null, @errorName(err));
+        };
+        defer response.deinit();
+        if (!response.value.ok) {
+            return self.renderInterfacesResult(
+                request,
+                csrf[0..],
+                allocator,
+                draft_value,
+                null,
+                response.value.message orelse "Link update failed.",
+            );
+        }
+        const state = response.value.link orelse
+            return self.renderInterfacesResult(request, csrf[0..], allocator, draft_value, null, "Daemon did not return a link state.");
+        const notice = std.fmt.allocPrint(allocator, "{s} is already {s}.", .{
+            state.dev,
+            if (state.up) "up" else "down",
+        }) catch "Link is already in the requested state.";
+        const applied = std.fmt.allocPrint(allocator, "{s} is now {s}.", .{
+            state.dev,
+            if (state.up) "up" else "down",
+        }) catch "Link state changed.";
+        return self.renderInterfacesResult(
+            request,
+            csrf[0..],
+            allocator,
+            draft_value,
+            if (std.mem.eql(u8, state.change, "noop")) notice else applied,
+            null,
+        );
+    }
+
+    fn callLinkSet(self: *App, dev: []const u8, up: bool, confirm: []const u8) !std.json.Parsed(protocol.Response) {
+        var client = try vrouter.control_client.Client.connect(self.io, self.gpa, self.control_path);
+        defer client.deinit();
+        return client.call(.{
+            .version = protocol.version,
+            .op = "link.set",
+            .confirm = confirm,
+            .link = .{ .dev = dev, .up = up },
+        });
+    }
+
+    fn serveInterfacesRules(self: *App, request: *std.http.Server.Request) !void {
+        if (!self.sameOrigin(request)) {
+            return self.respondHtml(request, .forbidden, "<h1>Cross-origin request rejected.</h1>");
+        }
+        const csrf = (try self.requireSessionFragment(request)) orelse return;
+        const body = self.readRequestBody(request) catch |err| {
+            return self.renderInterfacesFragmentView(request, .{ .csrf = csrf[0..], .err = bodyErrorMessage(err) });
+        };
+        defer self.gpa.free(body);
+        if (!try self.verifyFormCsrf(request, csrf, body)) return;
+
+        var action_buf: [64]u8 = undefined;
+        const action = formValue(body, "action", &action_buf) orelse
+            return self.renderInterfacesFragmentView(request, .{ .csrf = csrf[0..], .err = "Missing interface action." });
+
+        var arena = std.heap.ArenaAllocator.init(self.gpa);
+        defer arena.deinit();
+        const allocator = arena.allocator();
+        const running = interfaceDraft(
+            allocator,
+            self.listSection(allocator, "ports.list") catch null,
+            self.listSection(allocator, "bridges.list") catch null,
+            self.listSection(allocator, "interfaces.list") catch null,
+        ) catch |err| return self.renderInterfacesFragmentView(request, .{ .csrf = csrf[0..], .err = @errorName(err) });
+        var input = readDraftInput(allocator, body) catch |err|
+            return self.renderInterfacesDraftError(request, csrf[0..], allocator, running, null, interfaceFormError(err));
+        const draft_object = switch (input.value) {
+            .object => |*object| object,
+            else => return self.renderInterfacesDraftError(request, csrf[0..], allocator, running, null, interfaceFormError(error.InvalidDraft)),
+        };
+        applyInterfacesForm(allocator, draft_object, body, action) catch |err|
+            return self.renderInterfacesDraftError(request, csrf[0..], allocator, running, input.value, interfaceFormError(err));
+        const draft_json = jsonStringify(allocator, input.value) catch |err|
+            return self.renderInterfacesDraftError(request, csrf[0..], allocator, running, input.value, @errorName(err));
+        const view = buildInterfacesView(allocator, csrf[0..], null, input.value, draft_json, null, null, null) catch |err|
+            return self.renderInterfacesFragmentView(request, .{ .csrf = csrf[0..], .err = @errorName(err) });
+        return self.renderInterfacesFragmentView(request, view);
+    }
+
+    fn serveInterfacesReview(self: *App, request: *std.http.Server.Request) !void {
+        if (!self.sameOrigin(request)) {
+            return self.respondHtml(request, .forbidden, "<h1>Cross-origin request rejected.</h1>");
+        }
+        const csrf = (try self.requireSessionFragment(request)) orelse return;
+        const body = self.readRequestBody(request) catch |err| {
+            return self.renderInterfacesFragmentView(request, .{ .csrf = csrf[0..], .err = bodyErrorMessage(err) });
+        };
+        defer self.gpa.free(body);
+        if (!try self.verifyFormCsrf(request, csrf, body)) return;
+
+        var arena = std.heap.ArenaAllocator.init(self.gpa);
+        defer arena.deinit();
+        const allocator = arena.allocator();
+        const running = interfaceDraft(
+            allocator,
+            self.listSection(allocator, "ports.list") catch null,
+            self.listSection(allocator, "bridges.list") catch null,
+            self.listSection(allocator, "interfaces.list") catch null,
+        ) catch |err| return self.renderInterfacesFragmentView(request, .{ .csrf = csrf[0..], .err = @errorName(err) });
+        const input = readDraftInput(allocator, body) catch |err|
+            return self.renderInterfacesDraftError(request, csrf[0..], allocator, running, null, interfaceFormError(err));
+        if (input.value != .object) return self.renderInterfacesDraftError(request, csrf[0..], allocator, running, null, interfaceFormError(error.InvalidDraft));
+        const draft_json = jsonStringify(allocator, input.value) catch |err|
+            return self.renderInterfacesDraftError(request, csrf[0..], allocator, running, input.value, @errorName(err));
+        const review = self.reviewInterfacesSection(allocator, input.value) catch |err|
+            return self.renderInterfacesDraftError(request, csrf[0..], allocator, running, input.value, @errorName(err));
+        const view = buildInterfacesView(allocator, csrf[0..], null, input.value, draft_json, null, null, review) catch |err|
+            return self.renderInterfacesFragmentView(request, .{ .csrf = csrf[0..], .err = @errorName(err) });
+        return self.renderInterfacesFragmentView(request, view);
+    }
+
+    fn serveInterfacesApply(self: *App, request: *std.http.Server.Request) !void {
+        if (!self.sameOrigin(request)) {
+            return self.respondHtml(request, .forbidden, "<h1>Cross-origin request rejected.</h1>");
+        }
+        const csrf = (try self.requireSessionFragment(request)) orelse return;
+        const body = self.readRequestBody(request) catch |err| {
+            return self.renderInterfacesFragmentView(request, .{ .csrf = csrf[0..], .err = bodyErrorMessage(err) });
+        };
+        defer self.gpa.free(body);
+        if (!try self.verifyFormCsrf(request, csrf, body)) return;
+
+        var arena = std.heap.ArenaAllocator.init(self.gpa);
+        defer arena.deinit();
+        const allocator = arena.allocator();
+        const running = interfaceDraft(
+            allocator,
+            self.listSection(allocator, "ports.list") catch null,
+            self.listSection(allocator, "bridges.list") catch null,
+            self.listSection(allocator, "interfaces.list") catch null,
+        ) catch |err| return self.renderInterfacesFragmentView(request, .{ .csrf = csrf[0..], .err = @errorName(err) });
+        const input = readDraftInput(allocator, body) catch |err|
+            return self.renderInterfacesDraftError(request, csrf[0..], allocator, running, null, interfaceFormError(err));
+        if (input.value != .object) return self.renderInterfacesDraftError(request, csrf[0..], allocator, running, null, interfaceFormError(error.InvalidDraft));
+
+        var config_response = self.configGet() catch |err|
+            return self.renderInterfacesDraftError(request, csrf[0..], allocator, running, input.value, @errorName(err));
+        defer config_response.deinit();
+        const config_value = if (config_response.value.config) |*value| value else return self.renderInterfacesDraftError(request, csrf[0..], allocator, running, input.value, "Missing config from daemon.");
+        const root = switch (config_value.*) {
+            .object => |*object| object,
+            else => return self.renderInterfacesDraftError(request, csrf[0..], allocator, running, input.value, "Config is not an object."),
+        };
+        const config_allocator = config_response.arena.allocator();
+        installInterfaceSections(config_allocator, root, input.value) catch |err|
+            return self.renderInterfacesDraftError(request, csrf[0..], allocator, running, input.value, @errorName(err));
+        const revision = config_response.value.revision orelse
+            return self.renderInterfacesDraftError(request, csrf[0..], allocator, running, input.value, "Missing config revision.");
+        var diff_response = self.configCall("config.diff", config_value.*, revision, null, null) catch |err|
+            return self.renderInterfacesDraftError(request, csrf[0..], allocator, running, input.value, @errorName(err));
+        defer diff_response.deinit();
+        if (!diff_response.value.ok) {
+            return self.renderInterfacesDraftError(request, csrf[0..], allocator, running, input.value, diff_response.value.message orelse "Config diff failed.");
+        }
+        const no_affected = if (diff_response.value.affected) |affected| affected.len == 0 else true;
+        if (isNoopResult(diff_response.value.result) or no_affected) {
+            return self.renderInterfacesApplied(request, csrf[0..], allocator, "Interfaces are already up to date.");
+        }
+        const confirm = diff_response.value.confirm orelse
+            return self.renderInterfacesDraftError(request, csrf[0..], allocator, running, input.value, "Daemon did not return a confirm token.");
+        var raw_key: [32]u8 = undefined;
+        try self.io.randomSecure(&raw_key);
+        const idempotency_key = std.fmt.bytesToHex(raw_key, .lower);
+        var apply_response = self.configCall("config.apply", config_value.*, revision, confirm, &idempotency_key) catch |err|
+            return self.renderInterfacesDraftError(request, csrf[0..], allocator, running, input.value, @errorName(err));
+        defer apply_response.deinit();
+        if (!apply_response.value.ok) {
+            return self.renderInterfacesDraftError(request, csrf[0..], allocator, running, input.value, apply_response.value.message orelse "Config apply failed.");
+        }
+        if (apply_response.value.restart_required orelse false) {
+            self.rememberRestartResponse(&apply_response.value);
+            const notice = if (apply_response.value.restart_token != null)
+                "Interface configuration saved. Restart vrouterd to activate it."
+            else
+                "Interface configuration saved. Run systemctl restart vrouterd to activate it.";
+            return self.renderInterfacesApplied(request, csrf[0..], allocator, notice);
+        }
+        self.clearRestartToken();
+        return self.renderInterfacesApplied(request, csrf[0..], allocator, "Interface configuration applied.");
+    }
+
+    fn listSection(self: *App, allocator: std.mem.Allocator, op: []const u8) !?std.json.Value {
+        var response = try self.call(op, null, null);
+        defer response.deinit();
+        const section = if (std.mem.eql(u8, op, "ports.list"))
+            response.value.ports
+        else if (std.mem.eql(u8, op, "bridges.list"))
+            response.value.bridges
+        else if (std.mem.eql(u8, op, "interfaces.list"))
+            response.value.interfaces
+        else
+            null;
+        const value = section orelse return null;
+        const text = try jsonStringify(allocator, value);
+        return std.json.parseFromSliceLeaky(std.json.Value, allocator, text, .{}) catch return error.InvalidResponse;
+    }
+
+    fn reviewInterfacesSection(self: *App, allocator: std.mem.Allocator, draft_value: std.json.Value) !pages.ConfigReview {
+        var config_response = try self.configGet();
+        defer config_response.deinit();
+        const config_value = if (config_response.value.config) |*value| value else return error.MissingConfig;
+        const root = switch (config_value.*) {
+            .object => |*object| object,
+            else => return error.InvalidConfig,
+        };
+        const config_allocator = config_response.arena.allocator();
+        try installInterfaceSections(config_allocator, root, draft_value);
+        const revision = config_response.value.revision orelse return error.MissingRevision;
+        var diff_response = try self.configCall("config.diff", config_value.*, revision, null, null);
+        defer diff_response.deinit();
+        if (!diff_response.value.ok) {
+            const message = diff_response.value.message orelse "Config diff failed.";
+            return .{ .message = try allocator.dupe(u8, message) };
+        }
+        const diff = diff_response.value.diff orelse "";
+        if (diff.len == 0 or isNoopResult(diff_response.value.result)) {
+            return .{ .message = "No changes to review." };
+        }
+        const affected = diff_response.value.affected orelse &.{};
+        const diff_copy = try allocator.dupe(u8, diff);
+        const affected_copy = try allocator.alloc([]const u8, affected.len);
+        for (affected, 0..) |item, index| {
+            affected_copy[index] = try allocator.dupe(u8, item);
+        }
+        return .{
+            .diff = diff_copy,
+            .affected = affected_copy,
+            .restart_required = diff_response.value.restart_required orelse false,
+        };
+    }
+
+    fn decorateInterfacesView(self: *App, view: *operations.InterfacesView) void {
+        view.restart_pending = self.restart_pending;
+        view.restart_supported = self.restart_supported;
+        view.restart_token = self.restartToken();
+    }
+
+    fn renderInterfacesApplied(self: *App, request: *std.http.Server.Request, csrf: []const u8, allocator: std.mem.Allocator, notice: []const u8) !void {
+        return self.renderInterfacesResult(request, csrf, allocator, null, notice, null);
+    }
+
+    fn renderInterfacesResult(
+        self: *App,
+        request: *std.http.Server.Request,
+        csrf: []const u8,
+        allocator: std.mem.Allocator,
+        draft_override: ?std.json.Value,
+        notice: ?[]const u8,
+        err: ?[]const u8,
+    ) !void {
+        const running = interfaceDraft(
+            allocator,
+            self.listSection(allocator, "ports.list") catch null,
+            self.listSection(allocator, "bridges.list") catch null,
+            self.listSection(allocator, "interfaces.list") catch null,
+        ) catch |err2| return self.renderInterfacesFragmentView(request, .{ .csrf = csrf, .err = @errorName(err2) });
+        const draft = draft_override orelse running;
+        const draft_json = jsonStringify(allocator, draft) catch |err2|
+            return self.renderInterfacesFragmentView(request, .{ .csrf = csrf, .err = @errorName(err2) });
+        var fetch: FetchSet = .{};
+        defer fetch.deinit();
+        _ = self.fetchInto(&fetch.network, "network.status", null);
+        const network = if (fetch.network) |*parsed| parsed.value.network else null;
+        var view = buildInterfacesView(allocator, csrf, network, draft, draft_json, notice, err, null) catch |err2|
+            return self.renderInterfacesFragmentView(request, .{ .csrf = csrf, .network = network, .err = @errorName(err2) });
+        self.decorateInterfacesView(&view);
+        return self.renderInterfacesFragmentView(request, view);
+    }
+
+    fn renderInterfacesDraftError(
+        self: *App,
+        request: *std.http.Server.Request,
+        csrf: []const u8,
+        allocator: std.mem.Allocator,
+        running: ?std.json.Value,
+        value: ?std.json.Value,
+        message: []const u8,
+    ) !void {
+        _ = running;
+        if (value) |draft_value| {
+            var fetch: FetchSet = .{};
+            defer fetch.deinit();
+            _ = self.fetchInto(&fetch.network, "network.status", null);
+            const network = if (fetch.network) |*parsed| parsed.value.network else null;
+            const draft_json = jsonStringify(allocator, draft_value) catch "";
+            const view = buildInterfacesView(allocator, csrf, network, draft_value, draft_json, null, message, null) catch
+                return self.renderInterfacesFragmentView(request, .{ .csrf = csrf, .network = network, .err = message });
+            return self.renderInterfacesFragmentView(request, view);
+        }
+        return self.renderInterfacesFragmentView(request, .{ .csrf = csrf, .err = message });
+    }
+
+    fn renderInterfacesPageView(self: *App, request: *std.http.Server.Request, view: operations.InterfacesView) !void {
+        var out: std.Io.Writer.Allocating = .init(self.gpa);
+        defer out.deinit();
+        try operations.interfacesPage(self.gpa, &out.writer, view);
+        return self.respondHtml(request, .ok, out.written());
+    }
+
+    fn renderInterfacesFragmentView(self: *App, request: *std.http.Server.Request, view: operations.InterfacesView) !void {
+        var out: std.Io.Writer.Allocating = .init(self.gpa);
+        defer out.deinit();
+        try operations.interfacesFragment(&out.writer, view);
+        return self.respondHtml(request, .ok, out.written());
+    }
+
+    fn serveClientsPage(self: *App, request: *std.http.Server.Request) !void {
+        const csrf = (try self.requireSession(request)) orelse return;
+        var fetch: FetchSet = .{};
+        defer fetch.deinit();
+        var err: ?[]const u8 = self.fetchInto(&fetch.network, "network.status", null);
+        if (err == null) err = self.fetchInto(&fetch.leases, "dhcp.leases", 512);
+        if (err == null) err = self.fetchInto(&fetch.dhcp, "dhcp.list", null);
+        var data: operations.PageData = .{
+            .network = if (fetch.network) |*parsed| parsed.value.network else null,
+            .leases = if (fetch.leases) |*parsed| parsed.value.leases else null,
+            .dhcp = if (fetch.dhcp) |*parsed| parsed.value.dhcp else null,
+            .err = err,
+            .csrf = csrf[0..],
+            .now_ms = self.nowMs(),
+        };
+        if (data.leases == null and data.err == null) data.err = "Missing DHCP lease state";
+        return self.renderClientsPage(request, csrf[0..], data);
+    }
+
+    fn serveClientsFragment(self: *App, request: *std.http.Server.Request) !void {
+        const csrf = (try self.requireSessionFragment(request)) orelse return;
+        var fetch: FetchSet = .{};
+        defer fetch.deinit();
+        var err: ?[]const u8 = self.fetchInto(&fetch.network, "network.status", null);
+        if (err == null) err = self.fetchInto(&fetch.leases, "dhcp.leases", 512);
+        if (err == null) err = self.fetchInto(&fetch.dhcp, "dhcp.list", null);
+        var data: operations.PageData = .{
+            .network = if (fetch.network) |*parsed| parsed.value.network else null,
+            .leases = if (fetch.leases) |*parsed| parsed.value.leases else null,
+            .dhcp = if (fetch.dhcp) |*parsed| parsed.value.dhcp else null,
+            .err = err,
+            .csrf = csrf[0..],
+            .now_ms = self.nowMs(),
+        };
+        if (data.leases == null and data.err == null) data.err = "Missing DHCP lease state";
+        return self.renderClientsFragment(request, data);
+    }
+
+    fn serveClientsLease(self: *App, request: *std.http.Server.Request) !void {
+        if (!self.sameOrigin(request)) {
+            return self.respondHtml(request, .forbidden, "<h1>Cross-origin request rejected.</h1>");
+        }
+        const csrf = (try self.requireSessionFragment(request)) orelse return;
+        const body = self.readRequestBody(request) catch |err| {
+            return self.renderClientsActionResult(request, csrf[0..], null, bodyErrorMessage(err));
+        };
+        defer self.gpa.free(body);
+        if (!try self.verifyFormCsrf(request, csrf, body)) return;
+
+        var iface_buf: [16]u8 = undefined;
+        var ip_buf: [16]u8 = undefined;
+        var confirm_buf: [16]u8 = undefined;
+        const iface = formValue(body, "iface", &iface_buf) orelse "";
+        const ip = formValue(body, "ip", &ip_buf) orelse "";
+        const confirm = formValue(body, "confirm", &confirm_buf) orelse "";
+        if (iface.len == 0 or ip.len == 0) {
+            return self.renderClientsActionResult(request, csrf[0..], null, "Missing lease target.");
+        }
+        if (!std.mem.eql(u8, confirm, ip)) {
+            return self.renderClientsActionResult(request, csrf[0..], null, "Type the lease address exactly to confirm.");
+        }
+
+        var response = self.callDhcpLeaseRevoke(iface, ip, confirm) catch |err| {
+            return self.renderClientsActionResult(request, csrf[0..], null, @errorName(err));
+        };
+        defer response.deinit();
+        if (!response.value.ok) {
+            return self.renderClientsActionResult(
+                request,
+                csrf[0..],
+                null,
+                response.value.message orelse "Lease update failed.",
+            );
+        }
+
+        var arena = std.heap.ArenaAllocator.init(self.gpa);
+        defer arena.deinit();
+        const notice = std.fmt.allocPrint(arena.allocator(), "Lease {s} on {s} was forgotten.", .{ ip, iface }) catch
+            "Lease was forgotten.";
+        return self.renderClientsActionResult(request, csrf[0..], notice, null);
+    }
+
+    fn callDhcpLeaseRevoke(self: *App, iface: []const u8, ip: []const u8, confirm: []const u8) !std.json.Parsed(protocol.Response) {
+        var client = try vrouter.control_client.Client.connect(self.io, self.gpa, self.control_path);
+        defer client.deinit();
+        return client.call(.{
+            .version = protocol.version,
+            .op = "dhcp.lease.revoke",
+            .confirm = confirm,
+            .dhcp_lease = .{ .iface = iface, .ip = ip },
+        });
+    }
+
+    fn renderClientsActionResult(
+        self: *App,
+        request: *std.http.Server.Request,
+        csrf: []const u8,
+        notice: ?[]const u8,
+        action_err: ?[]const u8,
+    ) !void {
+        var fetch: FetchSet = .{};
+        defer fetch.deinit();
+        var err: ?[]const u8 = self.fetchInto(&fetch.network, "network.status", null);
+        if (err == null) err = self.fetchInto(&fetch.leases, "dhcp.leases", 512);
+        if (err == null) err = self.fetchInto(&fetch.dhcp, "dhcp.list", null);
+        var data: operations.PageData = .{
+            .network = if (fetch.network) |*parsed| parsed.value.network else null,
+            .leases = if (fetch.leases) |*parsed| parsed.value.leases else null,
+            .dhcp = if (fetch.dhcp) |*parsed| parsed.value.dhcp else null,
+            .err = action_err orelse err,
+            .notice = notice,
+            .csrf = csrf,
+            .now_ms = self.nowMs(),
+        };
+        if (data.leases == null and data.err == null) data.err = "Missing DHCP lease state";
+        return self.renderClientsFragment(request, data);
+    }
+
+    fn serveRoutesPage(self: *App, request: *std.http.Server.Request) !void {
+        const csrf = (try self.requireSession(request)) orelse return;
+        var arena = std.heap.ArenaAllocator.init(self.gpa);
+        defer arena.deinit();
+        const allocator = arena.allocator();
+        var response = self.call("routes.list", null, null) catch |err| {
+            return self.renderRoutesPageView(request, .{ .csrf = csrf[0..], .err = @errorName(err) });
+        };
+        defer response.deinit();
+        const running = response.value.routes orelse
+            return self.renderRoutesPageView(request, .{ .csrf = csrf[0..], .err = "Missing routing table" });
+        const draft_json = jsonStringify(allocator, running) catch |err|
+            return self.renderRoutesPageView(request, .{ .csrf = csrf[0..], .err = @errorName(err) });
+        var view = buildRoutesView(allocator, csrf[0..], running, running, draft_json, null, null, null) catch |err|
+            return self.renderRoutesPageView(request, .{ .csrf = csrf[0..], .err = @errorName(err) });
+        self.decorateRoutesView(&view);
+        return self.renderRoutesPageView(request, view);
+    }
+
+    fn serveRoutesFragment(self: *App, request: *std.http.Server.Request) !void {
+        const csrf = (try self.requireSessionFragment(request)) orelse return;
+        var arena = std.heap.ArenaAllocator.init(self.gpa);
+        defer arena.deinit();
+        const allocator = arena.allocator();
+        var response = self.call("routes.list", null, null) catch |err| {
+            return self.renderRoutesFragmentView(request, .{ .csrf = csrf[0..], .err = @errorName(err) });
+        };
+        defer response.deinit();
+        const running = response.value.routes orelse
+            return self.renderRoutesFragmentView(request, .{ .csrf = csrf[0..], .err = "Missing routing table" });
+        const draft_json = jsonStringify(allocator, running) catch |err|
+            return self.renderRoutesFragmentView(request, .{ .csrf = csrf[0..], .err = @errorName(err) });
+        var view = buildRoutesView(allocator, csrf[0..], running, running, draft_json, null, null, null) catch |err|
+            return self.renderRoutesFragmentView(request, .{ .csrf = csrf[0..], .err = @errorName(err) });
+        self.decorateRoutesView(&view);
+        return self.renderRoutesFragmentView(request, view);
+    }
+
+    fn serveRoutesRules(self: *App, request: *std.http.Server.Request) !void {
+        if (!self.sameOrigin(request)) {
+            return self.respondHtml(request, .forbidden, "<h1>Cross-origin request rejected.</h1>");
+        }
+        const csrf = (try self.requireSessionFragment(request)) orelse return;
+        const body = self.readRequestBody(request) catch |err| {
+            return self.renderRoutesFragmentView(request, .{ .csrf = csrf[0..], .err = bodyErrorMessage(err) });
+        };
+        defer self.gpa.free(body);
+        if (!try self.verifyFormCsrf(request, csrf, body)) return;
+
+        var action_buf: [64]u8 = undefined;
+        const action = formValue(body, "action", &action_buf) orelse
+            return self.renderRoutesFragmentView(request, .{ .csrf = csrf[0..], .err = "Missing route action." });
+
+        var arena = std.heap.ArenaAllocator.init(self.gpa);
+        defer arena.deinit();
+        const allocator = arena.allocator();
+        var running_response = self.call("routes.list", null, null) catch |err|
+            return self.renderRoutesFragmentView(request, .{ .csrf = csrf[0..], .err = @errorName(err) });
+        defer running_response.deinit();
+        const running = running_response.value.routes;
+        var input = readDraftInput(allocator, body) catch |err|
+            return self.renderRoutesDraftError(request, csrf[0..], allocator, running, null, routeFormError(err));
+        const draft_array = switch (input.value) {
+            .array => |*array| array,
+            else => return self.renderRoutesDraftError(request, csrf[0..], allocator, running, null, routeFormError(error.InvalidDraft)),
+        };
+        applyRoutesForm(allocator, draft_array, body, action) catch |err|
+            return self.renderRoutesDraftError(request, csrf[0..], allocator, running, input.value, routeFormError(err));
+        const draft_json = jsonStringify(allocator, input.value) catch |err|
+            return self.renderRoutesDraftError(request, csrf[0..], allocator, running, input.value, @errorName(err));
+        const view = buildRoutesView(allocator, csrf[0..], running, input.value, draft_json, null, null, null) catch |err|
+            return self.renderRoutesFragmentView(request, .{ .csrf = csrf[0..], .err = @errorName(err) });
+        return self.renderRoutesFragmentView(request, view);
+    }
+
+    fn serveRoutesReview(self: *App, request: *std.http.Server.Request) !void {
+        if (!self.sameOrigin(request)) {
+            return self.respondHtml(request, .forbidden, "<h1>Cross-origin request rejected.</h1>");
+        }
+        const csrf = (try self.requireSessionFragment(request)) orelse return;
+        const body = self.readRequestBody(request) catch |err| {
+            return self.renderRoutesFragmentView(request, .{ .csrf = csrf[0..], .err = bodyErrorMessage(err) });
+        };
+        defer self.gpa.free(body);
+        if (!try self.verifyFormCsrf(request, csrf, body)) return;
+
+        var arena = std.heap.ArenaAllocator.init(self.gpa);
+        defer arena.deinit();
+        const allocator = arena.allocator();
+        var running_response = self.call("routes.list", null, null) catch |err|
+            return self.renderRoutesFragmentView(request, .{ .csrf = csrf[0..], .err = @errorName(err) });
+        defer running_response.deinit();
+        const running = running_response.value.routes;
+        const input = readDraftInput(allocator, body) catch |err|
+            return self.renderRoutesDraftError(request, csrf[0..], allocator, running, null, routeFormError(err));
+        if (input.value != .array) return self.renderRoutesDraftError(request, csrf[0..], allocator, running, null, routeFormError(error.InvalidDraft));
+        const draft_json = jsonStringify(allocator, input.value) catch |err|
+            return self.renderRoutesDraftError(request, csrf[0..], allocator, running, input.value, @errorName(err));
+        const review = self.reviewConfigSection(allocator, "routes", input.value) catch |err|
+            return self.renderRoutesDraftError(request, csrf[0..], allocator, running, input.value, @errorName(err));
+        const view = buildRoutesView(allocator, csrf[0..], running, input.value, draft_json, null, null, review) catch |err|
+            return self.renderRoutesFragmentView(request, .{ .csrf = csrf[0..], .err = @errorName(err) });
+        return self.renderRoutesFragmentView(request, view);
+    }
+
+    fn serveRoutesApply(self: *App, request: *std.http.Server.Request) !void {
+        if (!self.sameOrigin(request)) {
+            return self.respondHtml(request, .forbidden, "<h1>Cross-origin request rejected.</h1>");
+        }
+        const csrf = (try self.requireSessionFragment(request)) orelse return;
+        const body = self.readRequestBody(request) catch |err| {
+            return self.renderRoutesFragmentView(request, .{ .csrf = csrf[0..], .err = bodyErrorMessage(err) });
+        };
+        defer self.gpa.free(body);
+        if (!try self.verifyFormCsrf(request, csrf, body)) return;
+
+        var arena = std.heap.ArenaAllocator.init(self.gpa);
+        defer arena.deinit();
+        const allocator = arena.allocator();
+        var running_response = self.call("routes.list", null, null) catch |err|
+            return self.renderRoutesFragmentView(request, .{ .csrf = csrf[0..], .err = @errorName(err) });
+        defer running_response.deinit();
+        const running = running_response.value.routes;
+        const input = readDraftInput(allocator, body) catch |err|
+            return self.renderRoutesDraftError(request, csrf[0..], allocator, running, null, routeFormError(err));
+        if (input.value != .array) return self.renderRoutesDraftError(request, csrf[0..], allocator, running, null, routeFormError(error.InvalidDraft));
+
+        var config_response = self.configGet() catch |err|
+            return self.renderRoutesDraftError(request, csrf[0..], allocator, running, input.value, @errorName(err));
+        defer config_response.deinit();
+        const config_value = if (config_response.value.config) |*value| value else return self.renderRoutesDraftError(request, csrf[0..], allocator, running, input.value, "Missing config from daemon.");
+        const root = switch (config_value.*) {
+            .object => |*object| object,
+            else => return self.renderRoutesDraftError(request, csrf[0..], allocator, running, input.value, "Config is not an object."),
+        };
+        const config_allocator = config_response.arena.allocator();
+        root.put(config_allocator, "routes", input.value) catch |err|
+            return self.renderRoutesDraftError(request, csrf[0..], allocator, running, input.value, @errorName(err));
+        stripNulls(config_value);
+        const revision = config_response.value.revision orelse
+            return self.renderRoutesDraftError(request, csrf[0..], allocator, running, input.value, "Missing config revision.");
+        var diff_response = self.configCall("config.diff", config_value.*, revision, null, null) catch |err|
+            return self.renderRoutesDraftError(request, csrf[0..], allocator, running, input.value, @errorName(err));
+        defer diff_response.deinit();
+        if (!diff_response.value.ok) {
+            return self.renderRoutesDraftError(request, csrf[0..], allocator, running, input.value, diff_response.value.message orelse "Config diff failed.");
+        }
+        const no_affected = if (diff_response.value.affected) |affected| affected.len == 0 else true;
+        if (isNoopResult(diff_response.value.result) or no_affected) {
+            return self.renderRoutesApplied(request, csrf[0..], allocator, "Routes are already up to date.");
+        }
+        const confirm = diff_response.value.confirm orelse
+            return self.renderRoutesDraftError(request, csrf[0..], allocator, running, input.value, "Daemon did not return a confirm token.");
+        var raw_key: [32]u8 = undefined;
+        try self.io.randomSecure(&raw_key);
+        const idempotency_key = std.fmt.bytesToHex(raw_key, .lower);
+        var apply_response = self.configCall("config.apply", config_value.*, revision, confirm, &idempotency_key) catch |err|
+            return self.renderRoutesDraftError(request, csrf[0..], allocator, running, input.value, @errorName(err));
+        defer apply_response.deinit();
+        if (!apply_response.value.ok) {
+            return self.renderRoutesDraftError(request, csrf[0..], allocator, running, input.value, apply_response.value.message orelse "Config apply failed.");
+        }
+        if (apply_response.value.restart_required orelse false) {
+            self.rememberRestartResponse(&apply_response.value);
+            const notice = if (apply_response.value.restart_token != null)
+                "Route configuration saved. Restart vrouterd to activate it."
+            else
+                "Route configuration saved. Run systemctl restart vrouterd to activate it.";
+            return self.renderRoutesApplied(request, csrf[0..], allocator, notice);
+        }
+        self.clearRestartToken();
+        return self.renderRoutesApplied(request, csrf[0..], allocator, "Route configuration applied.");
+    }
+
+    fn decorateRoutesView(self: *App, view: *operations.RoutesView) void {
+        view.restart_pending = self.restart_pending;
+        view.restart_supported = self.restart_supported;
+        view.restart_token = self.restartToken();
+    }
+
+    fn renderRoutesApplied(self: *App, request: *std.http.Server.Request, csrf: []const u8, allocator: std.mem.Allocator, notice: []const u8) !void {
+        var response = self.call("routes.list", null, null) catch |err| {
+            return self.renderRoutesFragmentView(request, .{ .csrf = csrf, .err = @errorName(err) });
+        };
+        defer response.deinit();
+        const running = response.value.routes orelse {
+            return self.renderRoutesFragmentView(request, .{ .csrf = csrf, .err = "Missing routing table after save" });
+        };
+        const draft_json = jsonStringify(allocator, running) catch |err|
+            return self.renderRoutesFragmentView(request, .{ .csrf = csrf, .err = @errorName(err) });
+        var view = buildRoutesView(allocator, csrf, running, running, draft_json, notice, null, null) catch |err|
+            return self.renderRoutesFragmentView(request, .{ .csrf = csrf, .err = @errorName(err) });
+        self.decorateRoutesView(&view);
+        return self.renderRoutesFragmentView(request, view);
+    }
+
+    fn renderRoutesDraftError(
+        self: *App,
+        request: *std.http.Server.Request,
+        csrf: []const u8,
+        allocator: std.mem.Allocator,
+        running: ?std.json.Value,
+        value: ?std.json.Value,
+        message: []const u8,
+    ) !void {
+        if (value) |draft_value| {
+            const draft_json = jsonStringify(allocator, draft_value) catch "";
+            const view = buildRoutesView(allocator, csrf, running, draft_value, draft_json, null, message, null) catch
+                return self.renderRoutesFragmentView(request, .{ .csrf = csrf, .err = message });
+            return self.renderRoutesFragmentView(request, view);
+        }
+        return self.renderRoutesFragmentView(request, .{ .csrf = csrf, .err = message });
+    }
+
+    fn renderRoutesPageView(self: *App, request: *std.http.Server.Request, view: operations.RoutesView) !void {
+        var out: std.Io.Writer.Allocating = .init(self.gpa);
+        defer out.deinit();
+        try operations.routesPage(self.gpa, &out.writer, view);
+        return self.respondHtml(request, .ok, out.written());
+    }
+
+    fn renderRoutesFragmentView(self: *App, request: *std.http.Server.Request, view: operations.RoutesView) !void {
+        var out: std.Io.Writer.Allocating = .init(self.gpa);
+        defer out.deinit();
+        try operations.routesFragment(&out.writer, view);
+        return self.respondHtml(request, .ok, out.written());
+    }
+
+    fn serveFirewallPage(self: *App, request: *std.http.Server.Request) !void {
+        const csrf = (try self.requireSession(request)) orelse return;
+        var arena = std.heap.ArenaAllocator.init(self.gpa);
+        defer arena.deinit();
+        const allocator = arena.allocator();
+        var response = self.call("firewall.list", null, null) catch |err| {
+            return self.renderFirewallPageView(request, .{ .csrf = csrf[0..], .err = @errorName(err) });
+        };
+        defer response.deinit();
+        const running = response.value.firewall orelse
+            return self.renderFirewallPageView(request, .{ .csrf = csrf[0..], .err = "Missing firewall configuration" });
+        var counters_response = self.call("firewall.counters", null, null) catch null;
+        defer if (counters_response) |*parsed| parsed.deinit();
+        const counters = if (counters_response) |*parsed| parsed.value.firewall_counters else null;
+        const draft_json = jsonStringify(allocator, running) catch |err|
+            return self.renderFirewallPageView(request, .{ .csrf = csrf[0..], .err = @errorName(err) });
+        var view = buildFirewallView(allocator, csrf[0..], running, running, draft_json, counters, null, null, null) catch |err|
+            return self.renderFirewallPageView(request, .{ .csrf = csrf[0..], .err = @errorName(err) });
+        self.decorateFirewallView(&view);
+        return self.renderFirewallPageView(request, view);
+    }
+
+    fn serveFirewallFragment(self: *App, request: *std.http.Server.Request) !void {
+        const csrf = (try self.requireSessionFragment(request)) orelse return;
+        var arena = std.heap.ArenaAllocator.init(self.gpa);
+        defer arena.deinit();
+        const allocator = arena.allocator();
+        var response = self.call("firewall.list", null, null) catch |err| {
+            return self.renderFirewallFragmentView(request, .{ .csrf = csrf[0..], .err = @errorName(err) });
+        };
+        defer response.deinit();
+        const running = response.value.firewall orelse
+            return self.renderFirewallFragmentView(request, .{ .csrf = csrf[0..], .err = "Missing firewall configuration" });
+        var counters_response = self.call("firewall.counters", null, null) catch null;
+        defer if (counters_response) |*parsed| parsed.deinit();
+        const counters = if (counters_response) |*parsed| parsed.value.firewall_counters else null;
+        const draft_json = jsonStringify(allocator, running) catch |err|
+            return self.renderFirewallFragmentView(request, .{ .csrf = csrf[0..], .err = @errorName(err) });
+        var view = buildFirewallView(allocator, csrf[0..], running, running, draft_json, counters, null, null, null) catch |err|
+            return self.renderFirewallFragmentView(request, .{ .csrf = csrf[0..], .err = @errorName(err) });
+        self.decorateFirewallView(&view);
+        return self.renderFirewallFragmentView(request, view);
+    }
+
+    fn serveFirewallRules(self: *App, request: *std.http.Server.Request) !void {
+        if (!self.sameOrigin(request)) {
+            return self.respondHtml(request, .forbidden, "<h1>Cross-origin request rejected.</h1>");
+        }
+        const csrf = (try self.requireSessionFragment(request)) orelse return;
+        const body = self.readRequestBody(request) catch |err| {
+            return self.renderFirewallFragmentView(request, .{ .csrf = csrf[0..], .err = bodyErrorMessage(err) });
+        };
+        defer self.gpa.free(body);
+        if (!try self.verifyFormCsrf(request, csrf, body)) return;
+
+        var action_buf: [64]u8 = undefined;
+        const action = formValue(body, "action", &action_buf) orelse
+            return self.renderFirewallFragmentView(request, .{ .csrf = csrf[0..], .err = "Missing firewall action." });
+
+        var arena = std.heap.ArenaAllocator.init(self.gpa);
+        defer arena.deinit();
+        const allocator = arena.allocator();
+        var running_response = self.call("firewall.list", null, null) catch |err|
+            return self.renderFirewallFragmentView(request, .{ .csrf = csrf[0..], .err = @errorName(err) });
+        defer running_response.deinit();
+        const running = running_response.value.firewall;
+        var input = readDraftInput(allocator, body) catch |err|
+            return self.renderFirewallDraftError(request, csrf[0..], allocator, running, null, firewallFormError(err));
+        const draft_object = switch (input.value) {
+            .object => |*object| object,
+            else => return self.renderFirewallDraftError(request, csrf[0..], allocator, running, null, firewallFormError(error.InvalidDraft)),
+        };
+        applyFirewallForm(allocator, draft_object, body, action) catch |err|
+            return self.renderFirewallDraftError(request, csrf[0..], allocator, running, input.value, firewallFormError(err));
+        const draft_json = jsonStringify(allocator, input.value) catch |err|
+            return self.renderFirewallDraftError(request, csrf[0..], allocator, running, input.value, @errorName(err));
+        const view = buildFirewallView(allocator, csrf[0..], running, input.value, draft_json, null, null, null, null) catch |err|
+            return self.renderFirewallFragmentView(request, .{ .csrf = csrf[0..], .err = @errorName(err) });
+        return self.renderFirewallFragmentView(request, view);
+    }
+
+    fn serveFirewallReview(self: *App, request: *std.http.Server.Request) !void {
+        if (!self.sameOrigin(request)) {
+            return self.respondHtml(request, .forbidden, "<h1>Cross-origin request rejected.</h1>");
+        }
+        const csrf = (try self.requireSessionFragment(request)) orelse return;
+        const body = self.readRequestBody(request) catch |err| {
+            return self.renderFirewallFragmentView(request, .{ .csrf = csrf[0..], .err = bodyErrorMessage(err) });
+        };
+        defer self.gpa.free(body);
+        if (!try self.verifyFormCsrf(request, csrf, body)) return;
+
+        var arena = std.heap.ArenaAllocator.init(self.gpa);
+        defer arena.deinit();
+        const allocator = arena.allocator();
+        var running_response = self.call("firewall.list", null, null) catch |err|
+            return self.renderFirewallFragmentView(request, .{ .csrf = csrf[0..], .err = @errorName(err) });
+        defer running_response.deinit();
+        const running = running_response.value.firewall;
+        const input = readDraftInput(allocator, body) catch |err|
+            return self.renderFirewallDraftError(request, csrf[0..], allocator, running, null, firewallFormError(err));
+        if (input.value != .object) return self.renderFirewallDraftError(request, csrf[0..], allocator, running, null, firewallFormError(error.InvalidDraft));
+        const draft_json = jsonStringify(allocator, input.value) catch |err|
+            return self.renderFirewallDraftError(request, csrf[0..], allocator, running, input.value, @errorName(err));
+        const review = self.reviewConfigSection(allocator, "firewall", input.value) catch |err|
+            return self.renderFirewallDraftError(request, csrf[0..], allocator, running, input.value, @errorName(err));
+        const view = buildFirewallView(allocator, csrf[0..], running, input.value, draft_json, null, null, null, review) catch |err|
+            return self.renderFirewallFragmentView(request, .{ .csrf = csrf[0..], .err = @errorName(err) });
+        return self.renderFirewallFragmentView(request, view);
+    }
+
+    fn serveFirewallApply(self: *App, request: *std.http.Server.Request) !void {
+        if (!self.sameOrigin(request)) {
+            return self.respondHtml(request, .forbidden, "<h1>Cross-origin request rejected.</h1>");
+        }
+        const csrf = (try self.requireSessionFragment(request)) orelse return;
+        const body = self.readRequestBody(request) catch |err| {
+            return self.renderFirewallFragmentView(request, .{ .csrf = csrf[0..], .err = bodyErrorMessage(err) });
+        };
+        defer self.gpa.free(body);
+        if (!try self.verifyFormCsrf(request, csrf, body)) return;
+
+        var arena = std.heap.ArenaAllocator.init(self.gpa);
+        defer arena.deinit();
+        const allocator = arena.allocator();
+        var running_response = self.call("firewall.list", null, null) catch |err|
+            return self.renderFirewallFragmentView(request, .{ .csrf = csrf[0..], .err = @errorName(err) });
+        defer running_response.deinit();
+        const running = running_response.value.firewall;
+        const input = readDraftInput(allocator, body) catch |err|
+            return self.renderFirewallDraftError(request, csrf[0..], allocator, running, null, firewallFormError(err));
+        if (input.value != .object) return self.renderFirewallDraftError(request, csrf[0..], allocator, running, null, firewallFormError(error.InvalidDraft));
+
+        var config_response = self.configGet() catch |err|
+            return self.renderFirewallDraftError(request, csrf[0..], allocator, running, input.value, @errorName(err));
+        defer config_response.deinit();
+        const config_value = if (config_response.value.config) |*value| value else return self.renderFirewallDraftError(request, csrf[0..], allocator, running, input.value, "Missing config from daemon.");
+        const root = switch (config_value.*) {
+            .object => |*object| object,
+            else => return self.renderFirewallDraftError(request, csrf[0..], allocator, running, input.value, "Config is not an object."),
+        };
+        const config_allocator = config_response.arena.allocator();
+        root.put(config_allocator, "firewall", input.value) catch |err|
+            return self.renderFirewallDraftError(request, csrf[0..], allocator, running, input.value, @errorName(err));
+        stripNulls(config_value);
+        const revision = config_response.value.revision orelse
+            return self.renderFirewallDraftError(request, csrf[0..], allocator, running, input.value, "Missing config revision.");
+        var diff_response = self.configCall("config.diff", config_value.*, revision, null, null) catch |err|
+            return self.renderFirewallDraftError(request, csrf[0..], allocator, running, input.value, @errorName(err));
+        defer diff_response.deinit();
+        if (!diff_response.value.ok) {
+            return self.renderFirewallDraftError(request, csrf[0..], allocator, running, input.value, diff_response.value.message orelse "Config diff failed.");
+        }
+        const no_affected = if (diff_response.value.affected) |affected| affected.len == 0 else true;
+        if (isNoopResult(diff_response.value.result) or no_affected) {
+            return self.renderFirewallApplied(request, csrf[0..], allocator, "Firewall is already up to date.");
+        }
+        const confirm = diff_response.value.confirm orelse
+            return self.renderFirewallDraftError(request, csrf[0..], allocator, running, input.value, "Daemon did not return a confirm token.");
+        var raw_key: [32]u8 = undefined;
+        try self.io.randomSecure(&raw_key);
+        const idempotency_key = std.fmt.bytesToHex(raw_key, .lower);
+        var apply_response = self.configCall("config.apply", config_value.*, revision, confirm, &idempotency_key) catch |err|
+            return self.renderFirewallDraftError(request, csrf[0..], allocator, running, input.value, @errorName(err));
+        defer apply_response.deinit();
+        if (!apply_response.value.ok) {
+            return self.renderFirewallDraftError(request, csrf[0..], allocator, running, input.value, apply_response.value.message orelse "Config apply failed.");
+        }
+        if (apply_response.value.restart_required orelse false) {
+            self.rememberRestartResponse(&apply_response.value);
+            const notice = if (apply_response.value.restart_token != null)
+                "Firewall configuration saved. Restart vrouterd to activate it."
+            else
+                "Firewall configuration saved. Run systemctl restart vrouterd to activate it.";
+            return self.renderFirewallApplied(request, csrf[0..], allocator, notice);
+        }
+        self.clearRestartToken();
+        return self.renderFirewallApplied(request, csrf[0..], allocator, "Firewall configuration applied.");
+    }
+
+    fn decorateFirewallView(self: *App, view: *operations.FirewallView) void {
+        view.restart_pending = self.restart_pending;
+        view.restart_supported = self.restart_supported;
+        view.restart_token = self.restartToken();
+    }
+
+    fn renderFirewallApplied(self: *App, request: *std.http.Server.Request, csrf: []const u8, allocator: std.mem.Allocator, notice: []const u8) !void {
+        var response = self.call("firewall.list", null, null) catch |err| {
+            return self.renderFirewallFragmentView(request, .{ .csrf = csrf, .err = @errorName(err) });
+        };
+        defer response.deinit();
+        const running = response.value.firewall orelse {
+            return self.renderFirewallFragmentView(request, .{ .csrf = csrf, .err = "Missing firewall configuration after save" });
+        };
+        const draft_json = jsonStringify(allocator, running) catch |err|
+            return self.renderFirewallFragmentView(request, .{ .csrf = csrf, .err = @errorName(err) });
+        var view = buildFirewallView(allocator, csrf, running, running, draft_json, null, notice, null, null) catch |err|
+            return self.renderFirewallFragmentView(request, .{ .csrf = csrf, .err = @errorName(err) });
+        self.decorateFirewallView(&view);
+        return self.renderFirewallFragmentView(request, view);
+    }
+
+    fn renderFirewallDraftError(
+        self: *App,
+        request: *std.http.Server.Request,
+        csrf: []const u8,
+        allocator: std.mem.Allocator,
+        running: ?std.json.Value,
+        value: ?std.json.Value,
+        message: []const u8,
+    ) !void {
+        if (value) |draft_value| {
+            const draft_json = jsonStringify(allocator, draft_value) catch "";
+            const view = buildFirewallView(allocator, csrf, running, draft_value, draft_json, null, null, message, null) catch
+                return self.renderFirewallFragmentView(request, .{ .csrf = csrf, .err = message });
+            return self.renderFirewallFragmentView(request, view);
+        }
+        return self.renderFirewallFragmentView(request, .{ .csrf = csrf, .err = message });
+    }
+
+    fn renderFirewallPageView(self: *App, request: *std.http.Server.Request, view: operations.FirewallView) !void {
+        var out: std.Io.Writer.Allocating = .init(self.gpa);
+        defer out.deinit();
+        try operations.firewallPage(self.gpa, &out.writer, view);
+        return self.respondHtml(request, .ok, out.written());
+    }
+
+    fn renderFirewallFragmentView(self: *App, request: *std.http.Server.Request, view: operations.FirewallView) !void {
+        var out: std.Io.Writer.Allocating = .init(self.gpa);
+        defer out.deinit();
+        try operations.firewallFragment(&out.writer, view);
+        return self.respondHtml(request, .ok, out.written());
+    }
+
+    fn serveDiagnosticsPage(self: *App, request: *std.http.Server.Request) !void {
+        const csrf = (try self.requireSession(request)) orelse return;
+        var fetch: FetchSet = .{};
+        defer fetch.deinit();
+        var err: ?[]const u8 = self.fetchInto(&fetch.network, "network.status", null);
+        if (err == null) err = self.fetchInto(&fetch.status, "status", null);
+        const data: operations.PageData = .{
+            .network = if (fetch.network) |*parsed| parsed.value.network else null,
+            .status = if (fetch.status) |*parsed| parsed.value.status else null,
+            .err = err,
+            .now_ms = self.nowMs(),
+        };
+        return self.renderDiagnosticsPage(request, csrf[0..], data);
+    }
+
+    fn serveDiagnosticsFragment(self: *App, request: *std.http.Server.Request) !void {
+        if ((try self.requireSessionFragment(request)) == null) return;
+        var fetch: FetchSet = .{};
+        defer fetch.deinit();
+        var err: ?[]const u8 = self.fetchInto(&fetch.network, "network.status", null);
+        if (err == null) err = self.fetchInto(&fetch.status, "status", null);
+        const data: operations.PageData = .{
+            .network = if (fetch.network) |*parsed| parsed.value.network else null,
+            .status = if (fetch.status) |*parsed| parsed.value.status else null,
+            .err = err,
+            .now_ms = self.nowMs(),
+        };
+        return self.renderDiagnosticsFragment(request, data);
+    }
+
+    fn serveLogsPage(self: *App, request: *std.http.Server.Request) !void {
+        const csrf = (try self.requireSession(request)) orelse return;
+        var fetch: FetchSet = .{};
+        defer fetch.deinit();
+        const err = self.fetchInto(&fetch.logs, "logs.tail", null);
+        const data: operations.PageData = .{
+            .logs = if (fetch.logs) |*parsed| parsed.value.logs else null,
+            .err = err,
+        };
+        return self.renderLogsPage(request, csrf[0..], data);
+    }
+
+    fn serveLogsFragment(self: *App, request: *std.http.Server.Request) !void {
+        if ((try self.requireSessionFragment(request)) == null) return;
+        var fetch: FetchSet = .{};
+        defer fetch.deinit();
+        const err = self.fetchInto(&fetch.logs, "logs.tail", null);
+        const data: operations.PageData = .{
+            .logs = if (fetch.logs) |*parsed| parsed.value.logs else null,
+            .err = err,
+        };
+        return self.renderLogsFragment(request, data);
+    }
+
+    fn serveConfigPage(self: *App, request: *std.http.Server.Request) !void {
+        const csrf = (try self.requireSession(request)) orelse return;
+        var arena = std.heap.ArenaAllocator.init(self.gpa);
+        defer arena.deinit();
+        const allocator = arena.allocator();
+        var response = self.configGet() catch |err| {
+            const logging = buildLoggingView(allocator, csrf[0..], null, null, null, null, null, null, @errorName(err), null) catch null;
+            return self.renderConfigPage(request, csrf[0..], null, null, null, null, @errorName(err), logging);
+        };
+        defer response.deinit();
+        const config_err: ?[]const u8 = if (response.value.ok) null else (response.value.error_code orelse "config.get failed");
+        const logging = buildLoggingView(allocator, csrf[0..], response.value.config, response.value.revision, null, null, null, null, config_err, null) catch null;
+        return self.renderConfigPage(
+            request,
+            csrf[0..],
+            response.value.config,
+            response.value.revision,
+            response.value.source_path,
+            response.value.writable,
+            config_err,
+            logging,
+        );
+    }
+
+    fn serveLoggingReview(self: *App, request: *std.http.Server.Request) !void {
+        if (!self.sameOrigin(request)) {
+            return self.respondHtml(request, .forbidden, "<h1>Cross-origin request rejected.</h1>");
+        }
+        const csrf = (try self.requireSession(request)) orelse return;
+        const body = self.readRequestBody(request) catch |err| {
+            return self.renderConfigPage(request, csrf[0..], null, null, null, null, bodyErrorMessage(err), null);
+        };
+        defer self.gpa.free(body);
+        if (!try self.verifyFormCsrf(request, csrf, body)) return;
+
+        var arena = std.heap.ArenaAllocator.init(self.gpa);
+        defer arena.deinit();
+        const allocator = arena.allocator();
+        const draft = loggingDraftFromBody(allocator, body) catch |err| {
+            const logging = buildLoggingView(allocator, csrf[0..], null, null, null, null, "", null, loggingDraftError(err), null) catch null;
+            return self.renderConfigPage(request, csrf[0..], null, null, null, null, loggingDraftError(err), logging);
+        };
+        var response = self.configGet() catch |err| {
+            const logging = buildLoggingView(allocator, csrf[0..], null, null, null, null, null, null, @errorName(err), null) catch null;
+            return self.renderConfigPage(request, csrf[0..], null, null, null, null, @errorName(err), logging);
+        };
+        defer response.deinit();
+        const config_err: ?[]const u8 = if (response.value.ok) null else (response.value.error_code orelse "config.get failed");
+        const config_value = if (response.value.config) |*value| value else {
+            const logging = buildLoggingView(allocator, csrf[0..], null, null, draft.level, draft.format, loggingDraftJson(allocator, draft.level, draft.format, draft.revision) catch "", null, config_err orelse "Missing config.", null) catch null;
+            return self.renderConfigPage(request, csrf[0..], null, null, null, null, config_err orelse "Missing config.", logging);
+        };
+        const current_revision = response.value.revision orelse "";
+        if (draft.revision.len != 0 and !std.mem.eql(u8, draft.revision, current_revision)) {
+            const message = "Configuration changed since the page loaded. Reload and review again.";
+            const logging = buildLoggingView(allocator, csrf[0..], config_value.*, current_revision, draft.level, draft.format, loggingDraftJson(allocator, draft.level, draft.format, current_revision) catch "", null, message, null) catch null;
+            return self.renderConfigPage(request, csrf[0..], response.value.config, current_revision, response.value.source_path, response.value.writable, null, logging);
+        }
+        var draft_value = cloneJsonValue(allocator, config_value.*) catch |err| {
+            const logging = buildLoggingView(allocator, csrf[0..], config_value.*, current_revision, draft.level, draft.format, loggingDraftJson(allocator, draft.level, draft.format, current_revision) catch "", null, @errorName(err), null) catch null;
+            return self.renderConfigPage(request, csrf[0..], response.value.config, current_revision, response.value.source_path, response.value.writable, null, logging);
+        };
+        installLog(allocator, &draft_value, draft.level, draft.format) catch |err| {
+            const logging = buildLoggingView(allocator, csrf[0..], config_value.*, current_revision, draft.level, draft.format, loggingDraftJson(allocator, draft.level, draft.format, current_revision) catch "", null, @errorName(err), null) catch null;
+            return self.renderConfigPage(request, csrf[0..], response.value.config, current_revision, response.value.source_path, response.value.writable, null, logging);
+        };
+        const review = self.reviewConfigValue(allocator, draft_value, current_revision) catch |err| {
+            const logging = buildLoggingView(allocator, csrf[0..], config_value.*, current_revision, draft.level, draft.format, loggingDraftJson(allocator, draft.level, draft.format, current_revision) catch "", null, @errorName(err), null) catch null;
+            return self.renderConfigPage(request, csrf[0..], response.value.config, current_revision, response.value.source_path, response.value.writable, null, logging);
+        };
+        const draft_json = loggingDraftJson(allocator, draft.level, draft.format, current_revision) catch "";
+        const logging = buildLoggingView(allocator, csrf[0..], config_value.*, current_revision, draft.level, draft.format, draft_json, null, null, review) catch null;
+        return self.renderConfigPage(request, csrf[0..], response.value.config, current_revision, response.value.source_path, response.value.writable, null, logging);
+    }
+
+    fn serveLoggingApply(self: *App, request: *std.http.Server.Request) !void {
+        if (!self.sameOrigin(request)) {
+            return self.respondHtml(request, .forbidden, "<h1>Cross-origin request rejected.</h1>");
+        }
+        const csrf = (try self.requireSession(request)) orelse return;
+        const body = self.readRequestBody(request) catch |err| {
+            return self.renderConfigPage(request, csrf[0..], null, null, null, null, bodyErrorMessage(err), null);
+        };
+        defer self.gpa.free(body);
+        if (!try self.verifyFormCsrf(request, csrf, body)) return;
+
+        var arena = std.heap.ArenaAllocator.init(self.gpa);
+        defer arena.deinit();
+        const allocator = arena.allocator();
+        const draft = loggingDraftFromBody(allocator, body) catch |err| {
+            const logging = buildLoggingView(allocator, csrf[0..], null, null, null, null, "", null, loggingDraftError(err), null) catch null;
+            return self.renderConfigPage(request, csrf[0..], null, null, null, null, loggingDraftError(err), logging);
+        };
+        var response = self.configGet() catch |err| {
+            const logging = buildLoggingView(allocator, csrf[0..], null, null, draft.level, draft.format, "", null, @errorName(err), null) catch null;
+            return self.renderConfigPage(request, csrf[0..], null, null, null, null, @errorName(err), logging);
+        };
+        defer response.deinit();
+        const config_value = if (response.value.config) |*value| value else {
+            const message = "Missing config from daemon.";
+            const logging = buildLoggingView(allocator, csrf[0..], null, null, draft.level, draft.format, "", null, message, null) catch null;
+            return self.renderConfigPage(request, csrf[0..], null, null, null, null, message, logging);
+        };
+        const revision = response.value.revision orelse {
+            const message = "Missing config revision.";
+            const logging = buildLoggingView(allocator, csrf[0..], config_value.*, null, draft.level, draft.format, "", null, message, null) catch null;
+            return self.renderConfigPage(request, csrf[0..], response.value.config, null, response.value.source_path, response.value.writable, null, logging);
+        };
+        if (draft.revision.len != 0 and !std.mem.eql(u8, draft.revision, revision)) {
+            const message = "Configuration changed since review. Reload and review again.";
+            const logging = buildLoggingView(allocator, csrf[0..], config_value.*, revision, draft.level, draft.format, "", null, message, null) catch null;
+            return self.renderConfigPage(request, csrf[0..], response.value.config, revision, response.value.source_path, response.value.writable, null, logging);
+        }
+        var draft_value = cloneJsonValue(allocator, config_value.*) catch |err| {
+            const logging = buildLoggingView(allocator, csrf[0..], config_value.*, revision, draft.level, draft.format, "", null, @errorName(err), null) catch null;
+            return self.renderConfigPage(request, csrf[0..], response.value.config, revision, response.value.source_path, response.value.writable, null, logging);
+        };
+        installLog(allocator, &draft_value, draft.level, draft.format) catch |err| {
+            const logging = buildLoggingView(allocator, csrf[0..], config_value.*, revision, draft.level, draft.format, "", null, @errorName(err), null) catch null;
+            return self.renderConfigPage(request, csrf[0..], response.value.config, revision, response.value.source_path, response.value.writable, null, logging);
+        };
+        const draft_json = loggingDraftJson(allocator, draft.level, draft.format, revision) catch "";
+        var diff_response = self.configCall("config.diff", draft_value, revision, null, null) catch |err| {
+            const logging = buildLoggingView(allocator, csrf[0..], config_value.*, revision, draft.level, draft.format, draft_json, null, @errorName(err), null) catch null;
+            return self.renderConfigPage(request, csrf[0..], response.value.config, revision, response.value.source_path, response.value.writable, null, logging);
+        };
+        defer diff_response.deinit();
+        if (!diff_response.value.ok) {
+            const message = diff_response.value.message orelse "Config diff failed.";
+            const logging = buildLoggingView(allocator, csrf[0..], config_value.*, revision, draft.level, draft.format, draft_json, null, message, null) catch null;
+            return self.renderConfigPage(request, csrf[0..], response.value.config, revision, response.value.source_path, response.value.writable, null, logging);
+        }
+        const no_affected = if (diff_response.value.affected) |affected| affected.len == 0 else true;
+        if (isNoopResult(diff_response.value.result) or no_affected) {
+            const logging = buildLoggingView(allocator, csrf[0..], config_value.*, revision, draft.level, draft.format, draft_json, "Logging is already up to date.", null, null) catch null;
+            return self.renderConfigPage(request, csrf[0..], response.value.config, revision, response.value.source_path, response.value.writable, null, logging);
+        }
+        const confirm = diff_response.value.confirm orelse {
+            const logging = buildLoggingView(allocator, csrf[0..], config_value.*, revision, draft.level, draft.format, draft_json, "Daemon did not return a confirm token.", null, null) catch null;
+            return self.renderConfigPage(request, csrf[0..], response.value.config, revision, response.value.source_path, response.value.writable, null, logging);
+        };
+        var raw_key: [32]u8 = undefined;
+        try self.io.randomSecure(&raw_key);
+        const idempotency_key = std.fmt.bytesToHex(raw_key, .lower);
+        var apply_response = self.configCall("config.apply", draft_value, revision, confirm, &idempotency_key) catch |err| {
+            const logging = buildLoggingView(allocator, csrf[0..], config_value.*, revision, draft.level, draft.format, draft_json, null, @errorName(err), null) catch null;
+            return self.renderConfigPage(request, csrf[0..], response.value.config, revision, response.value.source_path, response.value.writable, null, logging);
+        };
+        defer apply_response.deinit();
+        if (!apply_response.value.ok) {
+            const message = apply_response.value.message orelse "Config apply failed.";
+            const logging = buildLoggingView(allocator, csrf[0..], config_value.*, revision, draft.level, draft.format, draft_json, null, message, null) catch null;
+            return self.renderConfigPage(request, csrf[0..], response.value.config, revision, response.value.source_path, response.value.writable, null, logging);
+        }
+        var refreshed = self.configGet() catch null;
+        defer if (refreshed) |*item| item.deinit();
+        var final_config: ?std.json.Value = response.value.config;
+        var final_revision: []const u8 = revision;
+        if (refreshed) |*item| {
+            if (item.value.config) |value| final_config = value;
+            if (item.value.revision) |value| final_revision = value;
+        }
+        var notice: []const u8 = "Logging configuration applied.";
+        var restart_pending = false;
+        var restart_supported = self.restart_supported;
+        var restart_token: []const u8 = "";
+        if (apply_response.value.restart_required orelse false) {
+            self.rememberRestartResponse(&apply_response.value);
+            restart_pending = true;
+            restart_supported = self.restart_supported;
+            restart_token = self.restartToken() orelse "";
+            notice = if (apply_response.value.restart_token != null)
+                "Logging configuration saved. Restart vrouterd to activate it."
+            else
+                "Logging configuration saved. Run systemctl restart vrouterd to activate it.";
+        } else {
+            self.clearRestartToken();
+        }
+        const logging = buildLoggingView(allocator, csrf[0..], final_config, final_revision, draft.level, draft.format, draft_json, notice, null, null) catch null;
+        if (logging) |view| {
+            var decorated = view;
+            decorated.restart_pending = restart_pending;
+            decorated.restart_supported = restart_supported;
+            decorated.restart_token = restart_token;
+            return self.renderConfigPage(request, csrf[0..], final_config, final_revision, response.value.source_path, response.value.writable, null, decorated);
+        }
+        return self.renderConfigPage(request, csrf[0..], final_config, final_revision, response.value.source_path, response.value.writable, null, null);
+    }
+
+    fn reviewConfigValue(self: *App, allocator: std.mem.Allocator, draft_value: std.json.Value, revision: []const u8) !pages.ConfigReview {
+        var diff_response = try self.configCall("config.diff", draft_value, revision, null, null);
+        defer diff_response.deinit();
+        if (!diff_response.value.ok) {
+            const message = diff_response.value.message orelse "Config diff failed.";
+            return .{ .message = try allocator.dupe(u8, message) };
+        }
+        const diff = diff_response.value.diff orelse "";
+        if (diff.len == 0 or isNoopResult(diff_response.value.result)) {
+            return .{ .message = "No changes to review." };
+        }
+        const affected = diff_response.value.affected orelse &.{};
+        const diff_copy = try allocator.dupe(u8, diff);
+        const affected_copy = try allocator.alloc([]const u8, affected.len);
+        for (affected, 0..) |item, index| {
+            affected_copy[index] = try allocator.dupe(u8, item);
+        }
+        return .{
+            .diff = diff_copy,
+            .affected = affected_copy,
+            .restart_required = diff_response.value.restart_required orelse false,
+        };
+    }
+
+    fn renderClientsPage(self: *App, request: *std.http.Server.Request, csrf: []const u8, data: operations.PageData) !void {
+        var out: std.Io.Writer.Allocating = .init(self.gpa);
+        defer out.deinit();
+        try operations.clientsPage(self.gpa, &out.writer, csrf, data);
+        return self.respondHtml(request, .ok, out.written());
+    }
+
+    fn renderClientsFragment(self: *App, request: *std.http.Server.Request, data: operations.PageData) !void {
+        var out: std.Io.Writer.Allocating = .init(self.gpa);
+        defer out.deinit();
+        try operations.clientsFragment(&out.writer, data);
+        return self.respondHtml(request, .ok, out.written());
+    }
+
+    fn renderDiagnosticsPage(self: *App, request: *std.http.Server.Request, csrf: []const u8, data: operations.PageData) !void {
+        var out: std.Io.Writer.Allocating = .init(self.gpa);
+        defer out.deinit();
+        try operations.diagnosticsPage(self.gpa, &out.writer, csrf, data);
+        return self.respondHtml(request, .ok, out.written());
+    }
+
+    fn renderDiagnosticsFragment(self: *App, request: *std.http.Server.Request, data: operations.PageData) !void {
+        var out: std.Io.Writer.Allocating = .init(self.gpa);
+        defer out.deinit();
+        try operations.diagnosticsFragment(&out.writer, data);
+        return self.respondHtml(request, .ok, out.written());
+    }
+
+    fn renderLogsPage(self: *App, request: *std.http.Server.Request, csrf: []const u8, data: operations.PageData) !void {
+        var out: std.Io.Writer.Allocating = .init(self.gpa);
+        defer out.deinit();
+        try operations.logsPage(self.gpa, &out.writer, csrf, data);
+        return self.respondHtml(request, .ok, out.written());
+    }
+
+    fn renderLogsFragment(self: *App, request: *std.http.Server.Request, data: operations.PageData) !void {
+        var out: std.Io.Writer.Allocating = .init(self.gpa);
+        defer out.deinit();
+        try operations.logsFragment(&out.writer, data);
+        return self.respondHtml(request, .ok, out.written());
+    }
+
+    fn renderConfigPage(
+        self: *App,
+        request: *std.http.Server.Request,
+        csrf: []const u8,
+        config: ?std.json.Value,
+        revision: ?[]const u8,
+        source_path: ?[]const u8,
+        writable: ?bool,
+        err: ?[]const u8,
+        logging: ?operations.LoggingView,
+    ) !void {
+        var out: std.Io.Writer.Allocating = .init(self.gpa);
+        defer out.deinit();
+        try operations.configPage(self.gpa, &out.writer, csrf, config, revision, source_path, writable, err, logging);
+        return self.respondHtml(request, .ok, out.written());
+    }
+
+    fn fetchInto(
+        self: *App,
+        out: *?std.json.Parsed(protocol.Response),
+        op: []const u8,
+        limit: ?u32,
+    ) ?[]const u8 {
+        const parsed = self.call(op, null, limit) catch |err| return @errorName(err);
+        out.* = parsed;
+        if (!parsed.value.ok) return parsed.value.error_code orelse "control request failed";
+        return null;
     }
 
     fn rememberRestartResponse(self: *App, response: *const protocol.Response) void {
@@ -1514,7 +3087,8 @@ const App = struct {
         if (!try self.verifyFormCsrf(request, csrf, body)) return;
 
         var token_buf: [64]u8 = undefined;
-        const token = formValue(body, "restart_token", &token_buf) orelse "";
+        const token = formValue(body, "restart_token", &token_buf) orelse
+            formValue(body, "token", &token_buf) orelse "";
         var response = self.restartDaemon(token) catch |err| {
             return self.respondRestartResult(request, @errorName(err), true);
         };
@@ -1545,10 +3119,63 @@ const App = struct {
         });
     }
 
+    fn serveStop(self: *App, request: *std.http.Server.Request) !void {
+        if (!self.sameOrigin(request)) {
+            return self.respondHtml(request, .forbidden, "<h1>Cross-origin request rejected.</h1>");
+        }
+        const csrf = (try self.requireSessionFragment(request)) orelse return;
+        const body = self.readRequestBody(request) catch |err| {
+            return self.respondStopResult(request, bodyErrorMessage(err), true);
+        };
+        defer self.gpa.free(body);
+        if (!try self.verifyFormCsrf(request, csrf, body)) return;
+
+        var confirm_buf: [16]u8 = undefined;
+        const confirm = formValue(body, "confirm", &confirm_buf) orelse "";
+        if (!std.mem.eql(u8, confirm, "stop")) {
+            return self.respondStopResult(request, "Type stop to confirm.", true);
+        }
+        var response = self.stopDaemon(confirm) catch |err| {
+            return self.respondStopResult(request, @errorName(err), true);
+        };
+        defer response.deinit();
+        if (!response.value.ok) {
+            return self.respondStopResult(
+                request,
+                response.value.message orelse response.value.error_code orelse "Stop request failed.",
+                true,
+            );
+        }
+        self.clearRestartToken();
+        self.restart_pending = false;
+        return self.respondStopResult(
+            request,
+            "Stop accepted. vrouterd is shutting down; forwarding stops and this page will disconnect. Start it again with your service manager.",
+            false,
+        );
+    }
+
+    fn stopDaemon(self: *App, confirm: []const u8) !std.json.Parsed(protocol.Response) {
+        var client = try vrouter.control_client.Client.connect(self.io, self.gpa, self.control_path);
+        defer client.deinit();
+        return client.call(.{
+            .version = protocol.version,
+            .op = "daemon.stop",
+            .confirm = confirm,
+        });
+    }
+
     fn respondRestartResult(self: *App, request: *std.http.Server.Request, message: []const u8, is_error: bool) !void {
         var out: std.Io.Writer.Allocating = .init(self.gpa);
         defer out.deinit();
         try pages.restartResultDialog(&out.writer, message, is_error);
+        return self.respondHtml(request, .ok, out.written());
+    }
+
+    fn respondStopResult(self: *App, request: *std.http.Server.Request, message: []const u8, is_error: bool) !void {
+        var out: std.Io.Writer.Allocating = .init(self.gpa);
+        defer out.deinit();
+        try pages.stopResultDialog(&out.writer, message, is_error);
         return self.respondHtml(request, .ok, out.written());
     }
 
@@ -1739,6 +3366,60 @@ const App = struct {
         return self.respondJson(request, .ok, NatPayload{ .nat = nat });
     }
 
+    fn serveNetworkApi(self: *App, request: *std.http.Server.Request) !void {
+        if (self.sessionCsrf(request) == null) {
+            return self.apiError(request, .unauthorized, "unauthenticated", "Sign in required.");
+        }
+        var response = self.call("network.status", null, null) catch |err| return self.controlError(request, err);
+        defer response.deinit();
+        const network = response.value.network orelse return self.controlError(request, error.MissingNetwork);
+        return self.respondJson(request, .ok, NetworkPayload{ .network = network });
+    }
+
+    fn serveLeasesApi(self: *App, request: *std.http.Server.Request) !void {
+        if (self.sessionCsrf(request) == null) {
+            return self.apiError(request, .unauthorized, "unauthenticated", "Sign in required.");
+        }
+        var response = self.call("dhcp.leases", null, 512) catch |err| return self.controlError(request, err);
+        defer response.deinit();
+        const leases = response.value.leases orelse return self.controlError(request, error.MissingLeases);
+        return self.respondJson(request, .ok, LeasesPayload{ .leases = leases });
+    }
+
+    fn serveFirewallCountersApi(self: *App, request: *std.http.Server.Request) !void {
+        if (self.sessionCsrf(request) == null) {
+            return self.apiError(request, .unauthorized, "unauthenticated", "Sign in required.");
+        }
+        var response = self.call("firewall.counters", null, null) catch |err| return self.controlError(request, err);
+        defer response.deinit();
+        const counters = response.value.firewall_counters orelse return self.controlError(request, error.MissingCounters);
+        return self.respondJson(request, .ok, FirewallCountersPayload{ .counters = counters });
+    }
+
+    fn serveLogsApi(self: *App, request: *std.http.Server.Request) !void {
+        if (self.sessionCsrf(request) == null) {
+            return self.apiError(request, .unauthorized, "unauthenticated", "Sign in required.");
+        }
+        var response = self.call("logs.tail", null, null) catch |err| return self.controlError(request, err);
+        defer response.deinit();
+        const logs = response.value.logs orelse return self.controlError(request, error.MissingLogs);
+        return self.respondJson(request, .ok, LogsPayload{ .logs = logs });
+    }
+
+    fn serveConfigApi(self: *App, request: *std.http.Server.Request) !void {
+        if (self.sessionCsrf(request) == null) {
+            return self.apiError(request, .unauthorized, "unauthenticated", "Sign in required.");
+        }
+        var response = self.configGet() catch |err| return self.controlError(request, err);
+        defer response.deinit();
+        return self.respondJson(request, .ok, ConfigPayload{
+            .revision = response.value.revision,
+            .source_path = response.value.source_path,
+            .writable = response.value.writable,
+            .config = response.value.config,
+        });
+    }
+
     fn serveConntrack(self: *App, request: *std.http.Server.Request) !void {
         if (self.sessionCsrf(request) == null) {
             return self.apiError(request, .unauthorized, "unauthenticated", "Sign in required.");
@@ -1747,6 +3428,15 @@ const App = struct {
         defer response.deinit();
         const conntrack = response.value.conntrack orelse return self.controlError(request, error.MissingConntrack);
         return self.respondJson(request, .ok, ConntrackPayload{ .conntrack = conntrack });
+    }
+
+    fn callStatus(self: *App) !std.json.Parsed(protocol.Response) {
+        var client = try vrouter.control_client.Client.connect(self.io, self.gpa, self.control_path);
+        defer client.deinit();
+        return v3Status(&client) catch |err| switch (err) {
+            error.ProtocolVersionUnsupported => client.callOpVersion(protocol.v2_version, "status", null, null),
+            else => return err,
+        };
     }
 
     fn call(self: *App, op: []const u8, state_filter: ?[]const u8, limit: ?u32) !std.json.Parsed(protocol.Response) {
@@ -1924,6 +3614,35 @@ const App = struct {
     }
 };
 
+const FetchSet = struct {
+    network: ?std.json.Parsed(protocol.Response) = null,
+    status: ?std.json.Parsed(protocol.Response) = null,
+    leases: ?std.json.Parsed(protocol.Response) = null,
+    counters: ?std.json.Parsed(protocol.Response) = null,
+    logs: ?std.json.Parsed(protocol.Response) = null,
+    ports: ?std.json.Parsed(protocol.Response) = null,
+    bridges: ?std.json.Parsed(protocol.Response) = null,
+    interfaces: ?std.json.Parsed(protocol.Response) = null,
+    routes: ?std.json.Parsed(protocol.Response) = null,
+    dhcp: ?std.json.Parsed(protocol.Response) = null,
+    firewall: ?std.json.Parsed(protocol.Response) = null,
+
+    fn deinit(self: *FetchSet) void {
+        if (self.network) |*parsed| parsed.deinit();
+        if (self.status) |*parsed| parsed.deinit();
+        if (self.leases) |*parsed| parsed.deinit();
+        if (self.counters) |*parsed| parsed.deinit();
+        if (self.logs) |*parsed| parsed.deinit();
+        if (self.ports) |*parsed| parsed.deinit();
+        if (self.bridges) |*parsed| parsed.deinit();
+        if (self.interfaces) |*parsed| parsed.deinit();
+        if (self.routes) |*parsed| parsed.deinit();
+        if (self.dhcp) |*parsed| parsed.deinit();
+        if (self.firewall) |*parsed| parsed.deinit();
+        self.* = .{};
+    }
+};
+
 const NatDraft = struct {
     masquerade: []const NatDraftMasquerade = &.{},
     port_forward: []const NatDraftForward = &.{},
@@ -1948,10 +3667,181 @@ const DraftInput = struct {
     value: std.json.Value,
 };
 
+const LoggingDraft = struct {
+    level: []const u8,
+    format: []const u8,
+    revision: []const u8,
+};
+
+fn buildLoggingView(
+    allocator: std.mem.Allocator,
+    csrf: []const u8,
+    config: ?std.json.Value,
+    revision: ?[]const u8,
+    level_override: ?[]const u8,
+    format_override: ?[]const u8,
+    draft_override: ?[]const u8,
+    notice: ?[]const u8,
+    err: ?[]const u8,
+    review: ?pages.ConfigReview,
+) !operations.LoggingView {
+    var level: []const u8 = "info";
+    var format: []const u8 = "text";
+    if (config) |value| {
+        if (value == .object) {
+            if (value.object.get("log")) |log| {
+                if (log == .object) {
+                    if (log.object.get("level")) |item| {
+                        if (item == .string and item.string.len != 0) level = item.string;
+                    }
+                    if (log.object.get("format")) |item| {
+                        if (item == .string and item.string.len != 0) format = item.string;
+                    }
+                }
+            }
+        }
+    }
+    if (level_override) |value| level = value;
+    if (format_override) |value| format = value;
+    const rev = revision orelse "";
+    const draft_json = if (draft_override) |value|
+        value
+    else
+        try loggingDraftJson(allocator, level, format, rev);
+    return .{
+        .csrf = csrf,
+        .level = level,
+        .format = format,
+        .revision = rev,
+        .draft_json = draft_json,
+        .notice = notice,
+        .err = err,
+        .review = review,
+    };
+}
+
+fn loggingDraftJson(allocator: std.mem.Allocator, level: []const u8, format: []const u8, revision: []const u8) ![]const u8 {
+    var object = try std.json.ObjectMap.init(allocator, &.{}, &.{});
+    try object.put(allocator, "level", .{ .string = level });
+    try object.put(allocator, "format", .{ .string = format });
+    try object.put(allocator, "revision", .{ .string = revision });
+    return jsonStringify(allocator, std.json.Value{ .object = object });
+}
+
+fn loggingDraftFromBody(allocator: std.mem.Allocator, body: []const u8) !LoggingDraft {
+    if (try formValueAlloc(allocator, body, "draft")) |text| {
+        if (text.len != 0) {
+            const value = std.json.parseFromSliceLeaky(std.json.Value, allocator, text, .{}) catch return error.InvalidDraft;
+            return loggingDraftFromValue(value);
+        }
+    }
+    var level_buf: [16]u8 = undefined;
+    var format_buf: [16]u8 = undefined;
+    var revision_buf: [80]u8 = undefined;
+    const level = formValue(body, "level", &level_buf) orelse return error.InvalidLevel;
+    const format = formValue(body, "format", &format_buf) orelse return error.InvalidFormat;
+    const revision = formValue(body, "revision", &revision_buf) orelse "";
+    if (!validLogLevel(level)) return error.InvalidLevel;
+    if (!validLogFormat(format)) return error.InvalidFormat;
+    return .{
+        .level = try allocator.dupe(u8, level),
+        .format = try allocator.dupe(u8, format),
+        .revision = try allocator.dupe(u8, revision),
+    };
+}
+
+fn loggingDraftFromValue(value: std.json.Value) !LoggingDraft {
+    if (value != .object) return error.InvalidDraft;
+    const level_value = value.object.get("level") orelse return error.InvalidLevel;
+    const format_value = value.object.get("format") orelse return error.InvalidFormat;
+    const level = switch (level_value) {
+        .string => |text| text,
+        else => return error.InvalidLevel,
+    };
+    const format = switch (format_value) {
+        .string => |text| text,
+        else => return error.InvalidFormat,
+    };
+    if (!validLogLevel(level)) return error.InvalidLevel;
+    if (!validLogFormat(format)) return error.InvalidFormat;
+    const revision = if (value.object.get("revision")) |item|
+        switch (item) {
+            .string => |text| text,
+            else => "",
+        }
+    else
+        "";
+    return .{ .level = level, .format = format, .revision = revision };
+}
+
+fn validLogLevel(value: []const u8) bool {
+    return std.mem.eql(u8, value, "err") or
+        std.mem.eql(u8, value, "warn") or
+        std.mem.eql(u8, value, "info") or
+        std.mem.eql(u8, value, "debug");
+}
+
+fn validLogFormat(value: []const u8) bool {
+    return std.mem.eql(u8, value, "text") or std.mem.eql(u8, value, "json");
+}
+
+fn loggingDraftError(err: anyerror) []const u8 {
+    return switch (err) {
+        error.InvalidLevel => "Choose a valid log level.",
+        error.InvalidFormat => "Choose a valid log format.",
+        error.InvalidDraft => "The logging draft is invalid. Reload and try again.",
+        error.MissingField => "Logging fields are required.",
+        else => @errorName(err),
+    };
+}
+
+fn stripNulls(value: *std.json.Value) void {
+    switch (value.*) {
+        .object => |*object| {
+            var index: usize = 0;
+            while (index < object.count()) {
+                const key = object.keys()[index];
+                const item = object.getPtr(key).?;
+                if (item.* == .null) {
+                    _ = object.orderedRemove(key);
+                    continue;
+                }
+                stripNulls(item);
+                index += 1;
+            }
+        },
+        .array => |*array| {
+            for (array.items) |*item| stripNulls(item);
+        },
+        else => {},
+    }
+}
+
+fn cloneJsonValue(allocator: std.mem.Allocator, value: std.json.Value) !std.json.Value {
+    const text = try jsonStringify(allocator, value);
+    return std.json.parseFromSliceLeaky(std.json.Value, allocator, text, .{});
+}
+
+fn installLog(allocator: std.mem.Allocator, value: *std.json.Value, level: []const u8, format: []const u8) !void {
+    const root = switch (value.*) {
+        .object => |*object| object,
+        else => return error.InvalidConfig,
+    };
+    var log = try std.json.ObjectMap.init(allocator, &.{}, &.{});
+    try log.put(allocator, "level", .{ .string = try allocator.dupe(u8, level) });
+    try log.put(allocator, "format", .{ .string = try allocator.dupe(u8, format) });
+    try root.put(allocator, "log", .{ .object = log });
+}
+
 fn readDraftInput(allocator: std.mem.Allocator, body: []const u8) !DraftInput {
-    const text = (try formValueAlloc(allocator, body, "draft")) orelse return error.MissingDraft;
-    const value = std.json.parseFromSliceLeaky(std.json.Value, allocator, text, .{}) catch return error.InvalidDraft;
+    const value = (try readOptionalDraft(allocator, body)) orelse return error.MissingDraft;
     return .{ .value = value };
+}
+
+fn readOptionalDraft(allocator: std.mem.Allocator, body: []const u8) !?std.json.Value {
+    const text = (try formValueAlloc(allocator, body, "draft")) orelse return null;
+    if (text.len == 0) return null;
+    return std.json.parseFromSliceLeaky(std.json.Value, allocator, text, .{}) catch error.InvalidDraft;
 }
 
 fn formValueAlloc(allocator: std.mem.Allocator, body: []const u8, name: []const u8) !?[]u8 {
@@ -2273,6 +4163,902 @@ fn dnsFormError(err: anyerror) []const u8 {
         error.InvalidField => "A field has an invalid value. Use IPv4 addresses and a listener when upstreams or zones are set.",
         error.InvalidIndex => "That DNS zone no longer exists.",
         error.InvalidAction => "Unknown DNS action.",
+        error.MissingDraft => "The draft is missing. Reload the page and try again.",
+        error.InvalidDraft => "The draft is invalid. Reload the page and try again.",
+        else => @errorName(err),
+    };
+}
+
+fn interfaceDraft(
+    allocator: std.mem.Allocator,
+    ports: ?std.json.Value,
+    bridges: ?std.json.Value,
+    interfaces: ?std.json.Value,
+) !std.json.Value {
+    var object = try std.json.ObjectMap.init(allocator, &.{}, &.{});
+    try object.put(allocator, "ports", ports orelse .{ .array = std.json.Array.init(allocator) });
+    try object.put(allocator, "bridges", bridges orelse .{ .array = std.json.Array.init(allocator) });
+    try object.put(allocator, "interfaces", interfaces orelse .{ .array = std.json.Array.init(allocator) });
+    return .{ .object = object };
+}
+
+fn buildInterfacesView(
+    allocator: std.mem.Allocator,
+    csrf: []const u8,
+    network: ?protocol.Network,
+    draft: ?std.json.Value,
+    draft_json: []const u8,
+    notice: ?[]const u8,
+    err: ?[]const u8,
+    review: ?pages.ConfigReview,
+) !operations.InterfacesView {
+    var view = operations.InterfacesView{
+        .csrf = csrf,
+        .network = network,
+        .draft_json = draft_json,
+        .notice = notice,
+        .err = err,
+        .review = review,
+    };
+    if (draft) |value| {
+        const object = switch (value) {
+            .object => |object| object,
+            else => return error.InvalidDraft,
+        };
+        view.ports = try interfacePortRows(allocator, object.get("ports"));
+        view.bridges = try interfaceBridgeRows(allocator, object.get("bridges"));
+        view.interfaces = try interfaceRows(allocator, object.get("interfaces"));
+    }
+    return view;
+}
+
+fn interfacePortRows(allocator: std.mem.Allocator, value: ?std.json.Value) ![]operations.PortRow {
+    const field = value orelse return &.{};
+    const array = switch (field) {
+        .array => |array| array,
+        else => return error.InvalidDraft,
+    };
+    const rows = try allocator.alloc(operations.PortRow, array.items.len);
+    for (array.items, 0..) |item, index| {
+        const port = switch (item) {
+            .object => |port| port,
+            else => return error.InvalidDraft,
+        };
+        rows[index] = .{
+            .name = objectString(port, "name") orelse "",
+            .kind = objectString(port, "kind") orelse "l2",
+            .device = objectString(port, "device") orelse "",
+            .create = objectString(port, "create") orelse "",
+            .mtu = objectInteger(port, "mtu"),
+            .pvid = objectInteger(port, "pvid"),
+            .tagged = try joinJsonNumbers(allocator, port.get("tagged")),
+            .storm_control = objectInteger(port, "storm_control") orelse 1000,
+        };
+    }
+    return rows;
+}
+
+fn interfaceBridgeRows(allocator: std.mem.Allocator, value: ?std.json.Value) ![]operations.BridgeRow {
+    const field = value orelse return &.{};
+    const array = switch (field) {
+        .array => |array| array,
+        else => return error.InvalidDraft,
+    };
+    const rows = try allocator.alloc(operations.BridgeRow, array.items.len);
+    for (array.items, 0..) |item, index| {
+        const bridge = switch (item) {
+            .object => |bridge| bridge,
+            else => return error.InvalidDraft,
+        };
+        rows[index] = .{
+            .name = objectString(bridge, "name") orelse "",
+            .ports = try joinJsonStrings(allocator, bridge.get("ports")),
+            .stp = objectBool(bridge, "stp") orelse false,
+            .vlan_aware = objectBool(bridge, "vlan_aware") orelse false,
+            .offload = objectString(bridge, "offload") orelse "none",
+            .svi_count = objectInteger(bridge, "svi_count") orelse 0,
+        };
+    }
+    return rows;
+}
+
+fn interfaceRows(allocator: std.mem.Allocator, value: ?std.json.Value) ![]operations.InterfaceRow {
+    const field = value orelse return &.{};
+    const array = switch (field) {
+        .array => |array| array,
+        else => return error.InvalidDraft,
+    };
+    const rows = try allocator.alloc(operations.InterfaceRow, array.items.len);
+    for (array.items, 0..) |item, index| {
+        const iface = switch (item) {
+            .object => |iface| iface,
+            else => return error.InvalidDraft,
+        };
+        rows[index] = .{
+            .name = objectString(iface, "name") orelse "",
+            .bridge = objectString(iface, "bridge") orelse "",
+            .port = objectString(iface, "port") orelse "",
+            .address = objectString(iface, "address") orelse "",
+            .addresses = try joinJsonStrings(allocator, iface.get("addresses")),
+            .vlan = objectInteger(iface, "vlan"),
+        };
+    }
+    return rows;
+}
+
+fn joinJsonNumbers(allocator: std.mem.Allocator, value: ?std.json.Value) ![]const u8 {
+    const field = value orelse return "";
+    const array = switch (field) {
+        .array => |array| array,
+        else => return error.InvalidDraft,
+    };
+    var out: std.Io.Writer.Allocating = .init(allocator);
+    defer out.deinit();
+    for (array.items, 0..) |item, index| {
+        const number = switch (item) {
+            .integer => |number| number,
+            else => return error.InvalidDraft,
+        };
+        if (index != 0) try out.writer.writeAll(", ");
+        try out.writer.print("{d}", .{number});
+    }
+    return try allocator.dupe(u8, out.written());
+}
+
+fn installInterfaceSections(allocator: std.mem.Allocator, root: *std.json.ObjectMap, draft_value: std.json.Value) !void {
+    const draft = switch (draft_value) {
+        .object => |object| object,
+        else => return error.InvalidDraft,
+    };
+    const ports = try interfaceMapFromRows(allocator, draft.get("ports"), &.{"name"});
+    const bridges = try interfaceMapFromRows(allocator, draft.get("bridges"), &.{ "name", "svi_count" });
+    const interfaces = try interfaceMapFromRows(allocator, draft.get("interfaces"), &.{"name"});
+    try root.put(allocator, "ports", .{ .object = ports });
+    try root.put(allocator, "bridges", .{ .object = bridges });
+    try root.put(allocator, "interfaces", .{ .object = interfaces });
+}
+
+fn interfaceMapFromRows(allocator: std.mem.Allocator, value: ?std.json.Value, drop: []const []const u8) !std.json.ObjectMap {
+    const field = value orelse return std.json.ObjectMap.init(allocator, &.{}, &.{});
+    const array = switch (field) {
+        .array => |array| array,
+        else => return error.InvalidDraft,
+    };
+    var map = try std.json.ObjectMap.init(allocator, &.{}, &.{});
+    for (array.items) |item| {
+        const object = switch (item) {
+            .object => |object| object,
+            else => return error.InvalidDraft,
+        };
+        const name = objectString(object, "name") orelse return error.InvalidDraft;
+        if (name.len == 0) return error.InvalidDraft;
+        var entry = try std.json.ObjectMap.init(allocator, &.{}, &.{});
+        var it = object.iterator();
+        while (it.next()) |pair| {
+            if (std.mem.eql(u8, pair.key_ptr.*, "name")) continue;
+            if (pair.value_ptr.* == .null) continue;
+            var skip = false;
+            for (drop) |field_name| {
+                if (std.mem.eql(u8, pair.key_ptr.*, field_name)) skip = true;
+            }
+            if (skip) continue;
+            try entry.put(allocator, pair.key_ptr.*, pair.value_ptr.*);
+        }
+        try map.put(allocator, name, .{ .object = entry });
+    }
+    return map;
+}
+
+fn applyInterfacesForm(allocator: std.mem.Allocator, draft: *std.json.ObjectMap, body: []const u8, action: []const u8) !void {
+    const original: std.json.Value = .{ .object = draft.* };
+    const text = try jsonStringify(allocator, original);
+    var clone = try std.json.parseFromSliceLeaky(std.json.Value, allocator, text, .{});
+    const candidate = switch (clone) {
+        .object => |*object| object,
+        else => return error.InvalidDraft,
+    };
+    try applyInterfacesFormInner(allocator, candidate, body, action);
+    try validateInterfaceDraft(allocator, candidate);
+    draft.* = candidate.*;
+}
+
+fn applyInterfacesFormInner(allocator: std.mem.Allocator, draft: *std.json.ObjectMap, body: []const u8, action: []const u8) !void {
+    if (std.mem.eql(u8, action, "add_port")) {
+        const ports = try ensureArrayField(allocator, draft, "ports");
+        try ports.append(.{ .object = try portFromForm(allocator, body) });
+        return;
+    }
+    if (std.mem.eql(u8, action, "edit_port")) {
+        const index = try formIndex(body);
+        const ports = try ensureArrayField(allocator, draft, "ports");
+        if (index >= ports.items.len) return error.InvalidIndex;
+        ports.items[index] = .{ .object = try portFromForm(allocator, body) };
+        return;
+    }
+    if (std.mem.eql(u8, action, "remove_port")) {
+        const index = try formIndex(body);
+        const ports = try ensureArrayField(allocator, draft, "ports");
+        if (index >= ports.items.len) return error.InvalidIndex;
+        _ = ports.orderedRemove(index);
+        return;
+    }
+    if (std.mem.eql(u8, action, "add_bridge")) {
+        const bridges = try ensureArrayField(allocator, draft, "bridges");
+        try bridges.append(.{ .object = try bridgeFromForm(allocator, body) });
+        return;
+    }
+    if (std.mem.eql(u8, action, "edit_bridge")) {
+        const index = try formIndex(body);
+        const bridges = try ensureArrayField(allocator, draft, "bridges");
+        if (index >= bridges.items.len) return error.InvalidIndex;
+        bridges.items[index] = .{ .object = try bridgeFromForm(allocator, body) };
+        return;
+    }
+    if (std.mem.eql(u8, action, "remove_bridge")) {
+        const index = try formIndex(body);
+        const bridges = try ensureArrayField(allocator, draft, "bridges");
+        if (index >= bridges.items.len) return error.InvalidIndex;
+        _ = bridges.orderedRemove(index);
+        return;
+    }
+    if (std.mem.eql(u8, action, "add_interface")) {
+        const interfaces = try ensureArrayField(allocator, draft, "interfaces");
+        try interfaces.append(.{ .object = try interfaceFromForm(allocator, body) });
+        return;
+    }
+    if (std.mem.eql(u8, action, "edit_interface")) {
+        const index = try formIndex(body);
+        const interfaces = try ensureArrayField(allocator, draft, "interfaces");
+        if (index >= interfaces.items.len) return error.InvalidIndex;
+        interfaces.items[index] = .{ .object = try interfaceFromForm(allocator, body) };
+        return;
+    }
+    if (std.mem.eql(u8, action, "remove_interface")) {
+        const index = try formIndex(body);
+        const interfaces = try ensureArrayField(allocator, draft, "interfaces");
+        if (index >= interfaces.items.len) return error.InvalidIndex;
+        _ = interfaces.orderedRemove(index);
+        return;
+    }
+    return error.InvalidAction;
+}
+
+fn validateInterfaceDraft(allocator: std.mem.Allocator, draft: *std.json.ObjectMap) !void {
+    _ = allocator;
+    const ports = rowArray(draft.get("ports")) orelse return error.InvalidDraft;
+    const bridges = rowArray(draft.get("bridges")) orelse return error.InvalidDraft;
+    const interfaces = rowArray(draft.get("interfaces")) orelse return error.InvalidDraft;
+
+    for (ports.items, 0..) |item, index| {
+        const name = rowName(item) orelse return error.InvalidField;
+        if (findRow(bridges, name) != null or findRow(interfaces, name) != null) return error.InvalidField;
+        const device = objectString(item.object, "device") orelse return error.InvalidField;
+        if (device.len == 0) return error.InvalidField;
+        const bridged = portBridged(bridges, name);
+        const has_vlan = portHasVlans(item.object);
+        if (!bridged and has_vlan) return error.InvalidField;
+        for (ports.items[0..index]) |previous| {
+            if (std.mem.eql(u8, rowName(previous).?, name)) return error.InvalidField;
+            if (std.mem.eql(u8, objectString(previous.object, "device") orelse "", device)) return error.InvalidField;
+        }
+    }
+
+    for (bridges.items) |item| {
+        const name = rowName(item) orelse return error.InvalidField;
+        if (findRow(ports, name) != null or findRow(interfaces, name) != null) return error.InvalidField;
+        const members_value = item.object.get("ports") orelse return error.InvalidField;
+        const members = switch (members_value) {
+            .array => |array| array,
+            else => return error.InvalidField,
+        };
+        if (members.items.len == 0) return error.InvalidField;
+        const vlan_aware = objectBool(item.object, "vlan_aware") orelse false;
+        const offload = objectString(item.object, "offload") orelse "none";
+        for (members.items, 0..) |member, index| {
+            const member_name = switch (member) {
+                .string => |text| text,
+                else => return error.InvalidField,
+            };
+            const port = findRow(ports, member_name) orelse return error.InvalidField;
+            if (!std.mem.eql(u8, objectString(port.object, "kind") orelse "", "l2")) return error.InvalidField;
+            if (!vlan_aware and portHasVlans(port.object)) return error.InvalidField;
+            if (!std.mem.eql(u8, offload, "none") and
+                (port.object.get("create") != null or port.object.get("mtu") != null)) return error.InvalidField;
+            for (members.items[0..index]) |previous| {
+                if (previous == .string and std.mem.eql(u8, previous.string, member_name)) return error.InvalidField;
+            }
+        }
+    }
+
+    for (interfaces.items) |item| {
+        const name = rowName(item) orelse return error.InvalidField;
+        if (findRow(ports, name) != null or findRow(bridges, name) != null) return error.InvalidField;
+        const bridge = objectString(item.object, "bridge");
+        const port = objectString(item.object, "port");
+        const has_bridge = bridge != null and bridge.?.len != 0;
+        const has_port = port != null and port.?.len != 0;
+        if (has_bridge == has_port) return error.InvalidField;
+        if (has_bridge and findRow(bridges, bridge.?) == null) return error.InvalidField;
+        if (has_port and findRow(ports, port.?) == null) return error.InvalidField;
+        if (has_port and portBridged(bridges, port.?)) return error.InvalidField;
+        const has_vlan = item.object.get("vlan") != null;
+        if (has_port and has_vlan) return error.InvalidField;
+        if (has_bridge) {
+            const bridge_row = findRow(bridges, bridge.?).?;
+            if (has_vlan and !(objectBool(bridge_row.object, "vlan_aware") orelse false)) return error.InvalidField;
+            if (objectString(item.object, "address")) |address| {
+                if (std.mem.eql(u8, address, "dhcp")) return error.InvalidField;
+            }
+        }
+    }
+}
+
+fn rowArray(value: ?std.json.Value) ?std.json.Array {
+    const item = value orelse return null;
+    return switch (item) {
+        .array => |array| array,
+        else => null,
+    };
+}
+
+fn rowName(value: std.json.Value) ?[]const u8 {
+    if (value != .object) return null;
+    return objectString(value.object, "name");
+}
+
+fn findRow(array: std.json.Array, name: []const u8) ?std.json.Value {
+    for (array.items) |item| {
+        const candidate = rowName(item) orelse continue;
+        if (std.mem.eql(u8, candidate, name)) return item;
+    }
+    return null;
+}
+
+fn portBridged(bridges: std.json.Array, name: []const u8) bool {
+    for (bridges.items) |item| {
+        const members_value = item.object.get("ports") orelse continue;
+        const members = switch (members_value) {
+            .array => |array| array,
+            else => continue,
+        };
+        for (members.items) |member| {
+            if (member == .string and std.mem.eql(u8, member.string, name)) return true;
+        }
+    }
+    return false;
+}
+
+fn portHasVlans(object: std.json.ObjectMap) bool {
+    if (object.get("pvid") != null) return true;
+    const tagged = object.get("tagged") orelse return false;
+    return switch (tagged) {
+        .array => |array| array.items.len != 0,
+        else => false,
+    };
+}
+
+fn portFromForm(allocator: std.mem.Allocator, body: []const u8) !std.json.ObjectMap {
+    var name_buf: [64]u8 = undefined;
+    var kind_buf: [16]u8 = undefined;
+    var device_buf: [128]u8 = undefined;
+    var create_buf: [16]u8 = undefined;
+    var mtu_buf: [24]u8 = undefined;
+    var pvid_buf: [24]u8 = undefined;
+    var tagged_buf: [512]u8 = undefined;
+    var storm_buf: [24]u8 = undefined;
+    const name = formValue(body, "name", &name_buf) orelse return error.MissingField;
+    const kind = formValue(body, "kind", &kind_buf) orelse "l2";
+    const device = formValue(body, "device", &device_buf) orelse return error.MissingField;
+    const create = formValue(body, "create", &create_buf) orelse "";
+    const mtu = formValue(body, "mtu", &mtu_buf) orelse "";
+    const pvid = formValue(body, "pvid", &pvid_buf) orelse "";
+    const tagged = formValue(body, "tagged", &tagged_buf) orelse "";
+    const storm = formValue(body, "storm_control", &storm_buf) orelse "1000";
+    if (!validName(name)) return error.InvalidField;
+    if (device.len == 0 or device.len > 15) return error.InvalidField;
+    if (!std.mem.eql(u8, kind, "l2") and !std.mem.eql(u8, kind, "l3")) return error.InvalidField;
+    if (create.len != 0 and !std.mem.eql(u8, create, "tun") and !std.mem.eql(u8, create, "tap")) return error.InvalidField;
+    if (std.mem.eql(u8, create, "tun") and !std.mem.eql(u8, kind, "l3")) return error.InvalidField;
+    if (std.mem.eql(u8, create, "tap") and !std.mem.eql(u8, kind, "l2")) return error.InvalidField;
+
+    var port = try std.json.ObjectMap.init(allocator, &.{}, &.{});
+    try port.put(allocator, "name", .{ .string = try allocator.dupe(u8, name) });
+    try port.put(allocator, "kind", .{ .string = try allocator.dupe(u8, kind) });
+    try port.put(allocator, "device", .{ .string = try allocator.dupe(u8, device) });
+    if (create.len != 0) try port.put(allocator, "create", .{ .string = try allocator.dupe(u8, create) });
+    if (mtu.len != 0) {
+        const value = std.fmt.parseInt(u16, mtu, 10) catch return error.InvalidField;
+        if (value < 576 or value > vrouter.types.max_supported_mtu) return error.InvalidField;
+        try port.put(allocator, "mtu", .{ .integer = value });
+    }
+    if (pvid.len != 0) {
+        const value = std.fmt.parseInt(u16, pvid, 10) catch return error.InvalidField;
+        if (value == 0 or value > 4094) return error.InvalidField;
+        try port.put(allocator, "pvid", .{ .integer = value });
+    }
+    try port.put(allocator, "tagged", .{ .array = try vlanArray(allocator, tagged) });
+    try port.put(allocator, "storm_control", .{ .integer = std.fmt.parseInt(u32, storm, 10) catch return error.InvalidField });
+    return port;
+}
+
+fn vlanArray(allocator: std.mem.Allocator, text: []const u8) !std.json.Array {
+    var array = std.json.Array.init(allocator);
+    var tokens = std.mem.tokenizeAny(u8, text, ", \t\r\n");
+    while (tokens.next()) |token| {
+        const vlan = std.fmt.parseInt(u16, token, 10) catch return error.InvalidField;
+        if (vlan == 0 or vlan > 4094) return error.InvalidField;
+        try array.append(.{ .integer = vlan });
+    }
+    return array;
+}
+
+fn bridgeFromForm(allocator: std.mem.Allocator, body: []const u8) !std.json.ObjectMap {
+    var name_buf: [64]u8 = undefined;
+    var ports_buf: [1024]u8 = undefined;
+    var offload_buf: [16]u8 = undefined;
+    const name = formValue(body, "name", &name_buf) orelse return error.MissingField;
+    const ports_text = formValue(body, "ports", &ports_buf) orelse "";
+    const offload = formValue(body, "offload", &offload_buf) orelse "none";
+    if (!validName(name)) return error.InvalidField;
+    if (!std.mem.eql(u8, offload, "none") and !std.mem.eql(u8, offload, "kernel")) return error.InvalidField;
+    var bridge = try std.json.ObjectMap.init(allocator, &.{}, &.{});
+    try bridge.put(allocator, "name", .{ .string = try allocator.dupe(u8, name) });
+    try bridge.put(allocator, "ports", .{ .array = try nameArray(allocator, ports_text) });
+    try bridge.put(allocator, "stp", .{ .bool = formChecked(body, "stp") });
+    try bridge.put(allocator, "vlan_aware", .{ .bool = formChecked(body, "vlan_aware") });
+    try bridge.put(allocator, "offload", .{ .string = try allocator.dupe(u8, offload) });
+    return bridge;
+}
+
+fn interfaceFromForm(allocator: std.mem.Allocator, body: []const u8) !std.json.ObjectMap {
+    var name_buf: [64]u8 = undefined;
+    var bridge_buf: [64]u8 = undefined;
+    var port_buf: [64]u8 = undefined;
+    var address_buf: [128]u8 = undefined;
+    var addresses_buf: [1024]u8 = undefined;
+    var vlan_buf: [24]u8 = undefined;
+    const name = formValue(body, "name", &name_buf) orelse return error.MissingField;
+    const bridge = formValue(body, "bridge", &bridge_buf) orelse "";
+    const port = formValue(body, "port", &port_buf) orelse "";
+    const address = formValue(body, "address", &address_buf) orelse "";
+    const addresses_text = formValue(body, "addresses", &addresses_buf) orelse "";
+    const vlan = formValue(body, "vlan", &vlan_buf) orelse "";
+    if (!validName(name)) return error.InvalidField;
+    if (bridge.len != 0 and !validName(bridge)) return error.InvalidField;
+    if (port.len != 0 and !validName(port)) return error.InvalidField;
+    if ((bridge.len == 0) == (port.len == 0)) return error.InvalidField;
+    if (address.len != 0 and !std.mem.eql(u8, address, "dhcp") and !validPrefix(address)) return error.InvalidField;
+    var addresses = std.json.Array.init(allocator);
+    var address_tokens = std.mem.tokenizeAny(u8, addresses_text, ", \t\r\n");
+    while (address_tokens.next()) |token| {
+        if (!validPrefix(token)) return error.InvalidField;
+        try addresses.append(.{ .string = try allocator.dupe(u8, token) });
+    }
+    const vlan_value = if (vlan.len != 0) std.fmt.parseInt(u16, vlan, 10) catch return error.InvalidField else 0;
+    if (vlan.len != 0 and (vlan_value == 0 or vlan_value > 4094)) return error.InvalidField;
+    var iface = try std.json.ObjectMap.init(allocator, &.{}, &.{});
+    try iface.put(allocator, "name", .{ .string = try allocator.dupe(u8, name) });
+    if (bridge.len != 0) try iface.put(allocator, "bridge", .{ .string = try allocator.dupe(u8, bridge) });
+    if (port.len != 0) try iface.put(allocator, "port", .{ .string = try allocator.dupe(u8, port) });
+    if (address.len != 0) try iface.put(allocator, "address", .{ .string = try allocator.dupe(u8, address) });
+    try iface.put(allocator, "addresses", .{ .array = addresses });
+    if (vlan.len != 0) try iface.put(allocator, "vlan", .{ .integer = vlan_value });
+    return iface;
+}
+
+fn nameArray(allocator: std.mem.Allocator, text: []const u8) !std.json.Array {
+    var array = std.json.Array.init(allocator);
+    var tokens = std.mem.tokenizeAny(u8, text, ", \t\r\n");
+    while (tokens.next()) |token| {
+        if (!validName(token)) return error.InvalidField;
+        try array.append(.{ .string = try allocator.dupe(u8, token) });
+    }
+    return array;
+}
+
+fn validName(name: []const u8) bool {
+    if (name.len == 0 or name.len > 63) return false;
+    if (!std.ascii.isAlphanumeric(name[0])) return false;
+    for (name) |char| {
+        if (!std.ascii.isAlphanumeric(char) and char != '.' and char != '_' and char != '-') return false;
+    }
+    return true;
+}
+
+fn interfaceFormError(err: anyerror) []const u8 {
+    return switch (err) {
+        error.MissingField => "A required interface field is missing.",
+        error.InvalidField => "An interface field has an invalid value. Check names, devices, VLANs and addresses.",
+        error.InvalidIndex => "That interface object no longer exists.",
+        error.InvalidAction => "Unknown interface action.",
+        error.InvalidDraft => "The draft is invalid. Reload the page and try again.",
+        error.InvalidResponse => "The daemon returned an unexpected response.",
+        error.MissingDraft => "The draft is missing. Reload the page and try again.",
+        else => @errorName(err),
+    };
+}
+
+fn buildRoutesView(
+    allocator: std.mem.Allocator,
+    csrf: []const u8,
+    running: ?std.json.Value,
+    draft: ?std.json.Value,
+    draft_json: []const u8,
+    notice: ?[]const u8,
+    err: ?[]const u8,
+    review: ?pages.ConfigReview,
+) !operations.RoutesView {
+    var view = operations.RoutesView{
+        .csrf = csrf,
+        .draft_json = draft_json,
+        .notice = notice,
+        .err = err,
+        .review = review,
+    };
+    if (draft) |value| view.routes = try routeRowsFromValue(allocator, value);
+    if (draft_json.len != 0) {
+        if (running) |running_value| {
+            if (draft) |draft_value| {
+                if (!try jsonValuesEqual(allocator, running_value, draft_value)) view.pending = 1;
+            }
+        }
+    }
+    return view;
+}
+
+fn routeRowsFromValue(allocator: std.mem.Allocator, value: std.json.Value) ![]operations.RouteRow {
+    const array = switch (value) {
+        .array => |array| array,
+        else => return error.InvalidDraft,
+    };
+    const rows = try allocator.alloc(operations.RouteRow, array.items.len);
+    for (array.items, 0..) |item, index| {
+        const object = switch (item) {
+            .object => |object| object,
+            else => return error.InvalidDraft,
+        };
+        rows[index] = .{
+            .dst = objectString(object, "dst") orelse "",
+            .via = objectString(object, "via") orelse "",
+            .dev = objectString(object, "dev") orelse "",
+            .metric = objectInteger(object, "metric") orelse 0,
+            .table = objectInteger(object, "table") orelse 0,
+        };
+    }
+    return rows;
+}
+
+fn objectInteger(object: std.json.ObjectMap, key: []const u8) ?i64 {
+    const value = object.get(key) orelse return null;
+    return switch (value) {
+        .integer => |number| number,
+        else => null,
+    };
+}
+
+fn objectBool(object: std.json.ObjectMap, key: []const u8) ?bool {
+    const value = object.get(key) orelse return null;
+    return switch (value) {
+        .bool => |flag| flag,
+        else => null,
+    };
+}
+
+fn applyRoutesForm(allocator: std.mem.Allocator, routes: *std.json.Array, body: []const u8, action: []const u8) !void {
+    if (std.mem.eql(u8, action, "add_route")) {
+        try routes.append(.{ .object = try routeFromForm(allocator, body) });
+        return;
+    }
+    if (std.mem.eql(u8, action, "edit_route")) {
+        const index = try formIndex(body);
+        if (index >= routes.items.len) return error.InvalidIndex;
+        routes.items[index] = .{ .object = try routeFromForm(allocator, body) };
+        return;
+    }
+    if (std.mem.eql(u8, action, "remove_route")) {
+        const index = try formIndex(body);
+        if (index >= routes.items.len) return error.InvalidIndex;
+        _ = routes.orderedRemove(index);
+        return;
+    }
+    return error.InvalidAction;
+}
+
+fn validPrefix(text: []const u8) bool {
+    _ = vrouter.types.IpPrefix.parse(text) catch return false;
+    return true;
+}
+
+fn validIp(text: []const u8) bool {
+    _ = vrouter.types.IpAddr.parse(text) catch return false;
+    return true;
+}
+
+fn ruleFamilyAllows(rule_family: []const u8, value_family: vrouter.types.IpFamily) bool {
+    return std.mem.eql(u8, rule_family, "any") or
+        (std.mem.eql(u8, rule_family, "ipv4") and value_family == .ipv4) or
+        (std.mem.eql(u8, rule_family, "ipv6") and value_family == .ipv6);
+}
+
+fn routeFromForm(allocator: std.mem.Allocator, body: []const u8) !std.json.ObjectMap {
+    var dst_buf: [256]u8 = undefined;
+    var via_buf: [128]u8 = undefined;
+    var dev_buf: [128]u8 = undefined;
+    var metric_buf: [24]u8 = undefined;
+    var table_buf: [24]u8 = undefined;
+    const dst = formValue(body, "dst", &dst_buf) orelse return error.MissingField;
+    const via = formValue(body, "via", &via_buf) orelse "";
+    const dev = formValue(body, "dev", &dev_buf) orelse "";
+    const metric_text = formValue(body, "metric", &metric_buf) orelse "0";
+    const table_text = formValue(body, "table", &table_buf) orelse "0";
+    if (dst.len == 0 or dst.len > 255) return error.InvalidField;
+    if (!validPrefix(dst)) return error.InvalidField;
+    if (via.len != 0 and !validIp(via)) return error.InvalidField;
+    if (dev.len == 0 or dev.len > 127) return error.InvalidField;
+    if (std.mem.indexOfAny(u8, dev, " \t\r\n") != null) return error.InvalidField;
+    const dst_prefix = vrouter.types.IpPrefix.parse(dst) catch return error.InvalidField;
+    if (via.len != 0) {
+        const via_addr = vrouter.types.IpAddr.parse(via) catch return error.InvalidField;
+        if (via_addr.family() != dst_prefix.family()) return error.InvalidField;
+    }
+    const metric = std.fmt.parseInt(u32, metric_text, 10) catch return error.InvalidField;
+    const table = std.fmt.parseInt(u32, table_text, 10) catch return error.InvalidField;
+
+    var route = try std.json.ObjectMap.init(allocator, &.{}, &.{});
+    try route.put(allocator, "dst", .{ .string = try allocator.dupe(u8, dst) });
+    if (via.len != 0) try route.put(allocator, "via", .{ .string = try allocator.dupe(u8, via) });
+    if (dev.len != 0) try route.put(allocator, "dev", .{ .string = try allocator.dupe(u8, dev) });
+    try route.put(allocator, "metric", .{ .integer = metric });
+    try route.put(allocator, "table", .{ .integer = table });
+    return route;
+}
+
+fn routeFormError(err: anyerror) []const u8 {
+    return switch (err) {
+        error.MissingField => "A required route field is missing.",
+        error.InvalidField => "A route field has an invalid value. Check the destination, gateway, device, metric and table.",
+        error.InvalidIndex => "That route no longer exists.",
+        error.InvalidAction => "Unknown route action.",
+        error.MissingDraft => "The draft is missing. Reload the page and try again.",
+        error.InvalidDraft => "The draft is invalid. Reload the page and try again.",
+        else => @errorName(err),
+    };
+}
+
+fn buildFirewallView(
+    allocator: std.mem.Allocator,
+    csrf: []const u8,
+    running: ?std.json.Value,
+    draft: ?std.json.Value,
+    draft_json: []const u8,
+    counters: ?protocol.FirewallCounters,
+    notice: ?[]const u8,
+    err: ?[]const u8,
+    review: ?pages.ConfigReview,
+) !operations.FirewallView {
+    var view = operations.FirewallView{
+        .csrf = csrf,
+        .draft_json = draft_json,
+        .counters = counters,
+        .notice = notice,
+        .err = err,
+        .review = review,
+    };
+    if (draft) |value| {
+        const object = switch (value) {
+            .object => |object| object,
+            else => return error.InvalidDraft,
+        };
+        view.default_in = objectString(object, "default_in") orelse "drop";
+        view.default_forward = objectString(object, "default_forward") orelse "drop";
+        view.default_out = objectString(object, "default_out") orelse "accept";
+        view.rp_filter = objectBool(object, "rp_filter") orelse false;
+        if (object.get("rate_limit")) |limits_value| {
+            const limits = switch (limits_value) {
+                .object => |limits_object| limits_object,
+                else => return error.InvalidDraft,
+            };
+            view.rate_icmp = objectInteger(limits, "icmp") orelse 0;
+            view.rate_arp = objectInteger(limits, "arp") orelse 0;
+            view.rate_dhcp = objectInteger(limits, "dhcp") orelse 0;
+            view.rate_ndp = objectInteger(limits, "ndp") orelse 0;
+        }
+        view.rules = try firewallRulesFromValue(allocator, object);
+    }
+    if (draft_json.len != 0) {
+        if (running) |running_value| {
+            if (draft) |draft_value| {
+                if (!try jsonValuesEqual(allocator, running_value, draft_value)) view.pending = 1;
+            }
+        }
+    }
+    return view;
+}
+
+fn firewallRulesFromValue(allocator: std.mem.Allocator, object: std.json.ObjectMap) ![]operations.FirewallRuleRow {
+    const rules_value = object.get("rules") orelse return &.{};
+    const array = switch (rules_value) {
+        .array => |array| array,
+        else => return error.InvalidDraft,
+    };
+    const rows = try allocator.alloc(operations.FirewallRuleRow, array.items.len);
+    for (array.items, 0..) |item, index| {
+        const rule = switch (item) {
+            .object => |rule| rule,
+            else => return error.InvalidDraft,
+        };
+        rows[index] = .{
+            .action = objectString(rule, "action") orelse "drop",
+            .family = objectString(rule, "family") orelse "ipv4",
+            .proto = objectString(rule, "proto") orelse "",
+            .src = objectString(rule, "src") orelse "",
+            .dst = objectString(rule, "dst") orelse "",
+            .sport = objectInteger(rule, "sport"),
+            .dport = objectInteger(rule, "dport"),
+            .iif = objectString(rule, "iif") orelse "",
+            .oif = objectString(rule, "oif") orelse "",
+            .ct_state = try joinJsonStrings(allocator, rule.get("ct_state")),
+        };
+    }
+    return rows;
+}
+
+fn applyFirewallForm(allocator: std.mem.Allocator, object: *std.json.ObjectMap, body: []const u8, action: []const u8) !void {
+    if (std.mem.eql(u8, action, "save_policy")) {
+        var in_buf: [16]u8 = undefined;
+        var forward_buf: [16]u8 = undefined;
+        var out_buf: [16]u8 = undefined;
+        const default_in = formValue(body, "default_in", &in_buf) orelse return error.MissingField;
+        const default_forward = formValue(body, "default_forward", &forward_buf) orelse return error.MissingField;
+        const default_out = formValue(body, "default_out", &out_buf) orelse return error.MissingField;
+        if (!firewallActionValid(default_in) or !firewallActionValid(default_forward) or !firewallActionValid(default_out)) return error.InvalidField;
+        if (!std.mem.eql(u8, default_out, "accept")) return error.InvalidField;
+        try object.put(allocator, "default_in", .{ .string = try allocator.dupe(u8, default_in) });
+        try object.put(allocator, "default_forward", .{ .string = try allocator.dupe(u8, default_forward) });
+        try object.put(allocator, "default_out", .{ .string = try allocator.dupe(u8, default_out) });
+        try object.put(allocator, "rp_filter", .{ .bool = formChecked(body, "rp_filter") });
+        return;
+    }
+    if (std.mem.eql(u8, action, "save_limits")) {
+        const rates = try ensureObjectField(allocator, object, "rate_limit");
+        try rates.put(allocator, "icmp", .{ .integer = try formRate(body, "rate_icmp") });
+        try rates.put(allocator, "arp", .{ .integer = try formRate(body, "rate_arp") });
+        try rates.put(allocator, "dhcp", .{ .integer = try formRate(body, "rate_dhcp") });
+        try rates.put(allocator, "ndp", .{ .integer = try formRate(body, "rate_ndp") });
+        return;
+    }
+    if (std.mem.eql(u8, action, "add_rule")) {
+        const rules = try ensureArrayField(allocator, object, "rules");
+        try rules.append(.{ .object = try firewallRuleFromForm(allocator, body) });
+        return;
+    }
+    if (std.mem.eql(u8, action, "edit_rule")) {
+        const index = try formIndex(body);
+        const rules = try ensureArrayField(allocator, object, "rules");
+        if (index >= rules.items.len) return error.InvalidIndex;
+        rules.items[index] = .{ .object = try firewallRuleFromForm(allocator, body) };
+        return;
+    }
+    if (std.mem.eql(u8, action, "remove_rule")) {
+        const index = try formIndex(body);
+        const rules = try ensureArrayField(allocator, object, "rules");
+        if (index >= rules.items.len) return error.InvalidIndex;
+        _ = rules.orderedRemove(index);
+        return;
+    }
+    return error.InvalidAction;
+}
+
+fn ensureObjectField(allocator: std.mem.Allocator, root: *std.json.ObjectMap, name: []const u8) !*std.json.ObjectMap {
+    if (root.getPtr(name)) |value| {
+        return switch (value.*) {
+            .object => |*object| object,
+            else => error.InvalidConfig,
+        };
+    }
+    try root.put(allocator, name, .{ .object = try std.json.ObjectMap.init(allocator, &.{}, &.{}) });
+    return switch (root.getPtr(name).?.*) {
+        .object => |*object| object,
+        else => unreachable,
+    };
+}
+
+fn formRate(body: []const u8, name: []const u8) !i64 {
+    var buf: [24]u8 = undefined;
+    const text = formValue(body, name, &buf) orelse return error.MissingField;
+    const value = std.fmt.parseInt(u32, text, 10) catch return error.InvalidField;
+    return value;
+}
+
+fn firewallRuleFromForm(allocator: std.mem.Allocator, body: []const u8) !std.json.ObjectMap {
+    var action_buf: [16]u8 = undefined;
+    var family_buf: [16]u8 = undefined;
+    var proto_buf: [16]u8 = undefined;
+    var src_buf: [256]u8 = undefined;
+    var dst_buf: [256]u8 = undefined;
+    var sport_buf: [24]u8 = undefined;
+    var dport_buf: [24]u8 = undefined;
+    var iif_buf: [128]u8 = undefined;
+    var oif_buf: [128]u8 = undefined;
+    var states_buf: [256]u8 = undefined;
+    const action = formValue(body, "rule_action", &action_buf) orelse return error.MissingField;
+    const family = formValue(body, "family", &family_buf) orelse return error.MissingField;
+    const proto = formValue(body, "proto", &proto_buf) orelse "";
+    const src = formValue(body, "src", &src_buf) orelse "";
+    const dst = formValue(body, "dst", &dst_buf) orelse "";
+    const sport = formValue(body, "sport", &sport_buf) orelse "";
+    const dport = formValue(body, "dport", &dport_buf) orelse "";
+    const iif = formValue(body, "iif", &iif_buf) orelse "";
+    const oif = formValue(body, "oif", &oif_buf) orelse "";
+    const states = formValue(body, "ct_state", &states_buf) orelse "";
+    if (!firewallActionValid(action)) return error.InvalidField;
+    if (!std.mem.eql(u8, family, "ipv4") and !std.mem.eql(u8, family, "ipv6") and !std.mem.eql(u8, family, "any")) return error.InvalidField;
+    if (proto.len != 0 and
+        !std.mem.eql(u8, proto, "tcp") and !std.mem.eql(u8, proto, "udp") and
+        !std.mem.eql(u8, proto, "icmp") and !std.mem.eql(u8, proto, "icmpv6")) return error.InvalidField;
+    if (iif.len != 0 and !validName(iif)) return error.InvalidField;
+    if (oif.len != 0 and !validName(oif)) return error.InvalidField;
+    var src_family: ?vrouter.types.IpFamily = null;
+    var dst_family: ?vrouter.types.IpFamily = null;
+    if (src.len != 0) {
+        if (!validPrefix(src)) return error.InvalidField;
+        src_family = (vrouter.types.IpPrefix.parse(src) catch return error.InvalidField).family();
+    }
+    if (dst.len != 0) {
+        if (!validPrefix(dst)) return error.InvalidField;
+        dst_family = (vrouter.types.IpPrefix.parse(dst) catch return error.InvalidField).family();
+    }
+    if (src_family != null and dst_family != null and src_family.? != dst_family.?) return error.InvalidField;
+    if (src_family) |value_family| if (!ruleFamilyAllows(family, value_family)) return error.InvalidField;
+    if (dst_family) |value_family| if (!ruleFamilyAllows(family, value_family)) return error.InvalidField;
+    if (std.mem.eql(u8, proto, "icmp") and !std.mem.eql(u8, family, "ipv4")) return error.InvalidField;
+    if (std.mem.eql(u8, proto, "icmpv6") and std.mem.eql(u8, family, "ipv4")) return error.InvalidField;
+    const sport_value = if (sport.len != 0) std.fmt.parseInt(u16, sport, 10) catch return error.InvalidField else 0;
+    const dport_value = if (dport.len != 0) std.fmt.parseInt(u16, dport, 10) catch return error.InvalidField else 0;
+    const port_proto = std.mem.eql(u8, proto, "tcp") or std.mem.eql(u8, proto, "udp");
+    if (sport.len != 0 and (sport_value == 0 or !port_proto)) return error.InvalidField;
+    if (dport.len != 0 and (dport_value == 0 or !port_proto)) return error.InvalidField;
+    if (states.len != 0 and !std.mem.eql(u8, family, "ipv4")) return error.InvalidField;
+
+    var rule = try std.json.ObjectMap.init(allocator, &.{}, &.{});
+    try rule.put(allocator, "action", .{ .string = try allocator.dupe(u8, action) });
+    try rule.put(allocator, "family", .{ .string = try allocator.dupe(u8, family) });
+    if (proto.len != 0) try rule.put(allocator, "proto", .{ .string = try allocator.dupe(u8, proto) });
+    if (src.len != 0) try rule.put(allocator, "src", .{ .string = try allocator.dupe(u8, src) });
+    if (dst.len != 0) try rule.put(allocator, "dst", .{ .string = try allocator.dupe(u8, dst) });
+    if (sport.len != 0) try rule.put(allocator, "sport", .{ .integer = sport_value });
+    if (dport.len != 0) try rule.put(allocator, "dport", .{ .integer = dport_value });
+    if (iif.len != 0) try rule.put(allocator, "iif", .{ .string = try allocator.dupe(u8, iif) });
+    if (oif.len != 0) try rule.put(allocator, "oif", .{ .string = try allocator.dupe(u8, oif) });
+    var states_array = std.json.Array.init(allocator);
+    var tokens = std.mem.tokenizeAny(u8, states, ", \t\r\n");
+    while (tokens.next()) |token| {
+        if (!firewallStateValid(token)) return error.InvalidField;
+        for (states_array.items) |previous| {
+            if (previous == .string and std.mem.eql(u8, previous.string, token)) return error.InvalidField;
+        }
+        try states_array.append(.{ .string = try allocator.dupe(u8, token) });
+    }
+    try rule.put(allocator, "ct_state", .{ .array = states_array });
+    return rule;
+}
+
+fn firewallActionValid(action: []const u8) bool {
+    return std.mem.eql(u8, action, "accept") or std.mem.eql(u8, action, "drop") or std.mem.eql(u8, action, "reject");
+}
+
+fn firewallStateValid(state: []const u8) bool {
+    return std.mem.eql(u8, state, "new") or std.mem.eql(u8, state, "established") or
+        std.mem.eql(u8, state, "related") or std.mem.eql(u8, state, "invalid");
+}
+
+fn firewallFormError(err: anyerror) []const u8 {
+    return switch (err) {
+        error.MissingField => "A required firewall field is missing.",
+        error.InvalidField => "A firewall field has an invalid value. Check actions, addresses, ports and connection states.",
+        error.InvalidIndex => "That firewall rule no longer exists.",
+        error.InvalidAction => "Unknown firewall action.",
+        error.InvalidConfig => "The firewall configuration has an unexpected shape.",
         error.MissingDraft => "The draft is missing. Reload the page and try again.",
         error.InvalidDraft => "The draft is invalid. Reload the page and try again.",
         else => @errorName(err),
@@ -3147,6 +5933,159 @@ fn getCookie(request: *std.http.Server.Request, name: []const u8) ?[]const u8 {
         }
     }
     return null;
+}
+
+test "route form stages add edit and remove" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var routes = std.json.Array.init(allocator);
+    try applyRoutesForm(allocator, &routes, "action=add_route&dst=198.51.100.0/24&via=203.0.113.1&dev=wan0&metric=50&table=254", "add_route");
+    try std.testing.expectEqual(@as(usize, 1), routes.items.len);
+    try applyRoutesForm(allocator, &routes, "action=edit_route&index=0&dst=198.51.100.0/24&via=203.0.113.2&dev=wan0&metric=51&table=254", "edit_route");
+    const row = try routeRowsFromValue(allocator, .{ .array = routes });
+    try std.testing.expectEqualStrings("203.0.113.2", row[0].via);
+    try std.testing.expectEqual(@as(i64, 51), row[0].metric);
+    try applyRoutesForm(allocator, &routes, "action=remove_route&index=0", "remove_route");
+    try std.testing.expectEqual(@as(usize, 0), routes.items.len);
+}
+
+test "interface draft converts rows to config maps" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const draft = try std.json.parseFromSliceLeaky(
+        std.json.Value,
+        allocator,
+        \\{"ports":[{"name":"lan0","kind":"l2","device":"eth0"}],"bridges":[{"name":"br0","svi_count":1,"stp":true}],"interfaces":[{"name":"br0","address":"10.0.0.1/24"}]}
+    ,
+        .{},
+    );
+    var root = try std.json.parseFromSliceLeaky(std.json.Value, allocator, "{\"ports\":{},\"bridges\":{},\"interfaces\":{}}", .{});
+    try installInterfaceSections(allocator, &root.object, draft);
+    const ports = root.object.get("ports").?.object;
+    try std.testing.expect(ports.get("lan0") != null);
+    try std.testing.expect(ports.get("lan0").?.object.get("name") == null);
+    const bridges = root.object.get("bridges").?.object;
+    try std.testing.expect(bridges.get("br0").?.object.get("svi_count") == null);
+    try std.testing.expect(root.object.get("interfaces").?.object.get("br0") != null);
+}
+
+test "strip nulls removes optional fields recursively" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var value = try std.json.parseFromSliceLeaky(
+        std.json.Value,
+        allocator,
+        \\{"a":null,"b":{"c":null,"d":1},"e":[{"f":null,"g":"x"}]}
+    ,
+        .{},
+    );
+    stripNulls(&value);
+    try std.testing.expect(value.object.get("a") == null);
+    try std.testing.expect(value.object.get("b").?.object.get("c") == null);
+    try std.testing.expect(value.object.get("b").?.object.get("d") != null);
+    try std.testing.expect(value.object.get("e").?.array.items[0].object.get("f") == null);
+    try std.testing.expect(value.object.get("e").?.array.items[0].object.get("g") != null);
+}
+
+test "logging draft validates level and format" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const valid = try std.json.parseFromSliceLeaky(std.json.Value, allocator, "{\"level\":\"debug\",\"format\":\"json\",\"revision\":\"sha256:abc\"}", .{});
+    const draft = try loggingDraftFromValue(valid);
+    try std.testing.expectEqualStrings("debug", draft.level);
+    try std.testing.expectEqualStrings("json", draft.format);
+    try std.testing.expectEqualStrings("sha256:abc", draft.revision);
+    const bad_level = try std.json.parseFromSliceLeaky(std.json.Value, allocator, "{\"level\":\"verbose\",\"format\":\"text\"}", .{});
+    try std.testing.expectError(error.InvalidLevel, loggingDraftFromValue(bad_level));
+    const bad_trace = try std.json.parseFromSliceLeaky(std.json.Value, allocator, "{\"level\":\"trace\",\"format\":\"text\"}", .{});
+    try std.testing.expectError(error.InvalidLevel, loggingDraftFromValue(bad_trace));
+    const bad_format = try std.json.parseFromSliceLeaky(std.json.Value, allocator, "{\"level\":\"info\",\"format\":\"xml\"}", .{});
+    try std.testing.expectError(error.InvalidFormat, loggingDraftFromValue(bad_format));
+
+    var config = try std.json.parseFromSliceLeaky(std.json.Value, allocator, "{\"instance\":\"test\",\"log\":{\"level\":\"info\",\"format\":\"text\"}}", .{});
+    try installLog(allocator, &config, "err", "json");
+    const log = config.object.get("log").?.object;
+    try std.testing.expectEqualStrings("err", log.get("level").?.string);
+    try std.testing.expectEqualStrings("json", log.get("format").?.string);
+}
+
+test "route form rejects malformed prefixes and gateways" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    try std.testing.expectError(error.InvalidField, routeFromForm(allocator, "dst=198.51.100.0&dev=wan0"));
+    try std.testing.expectError(error.InvalidField, routeFromForm(allocator, "dst=198.51.100.0/24&dev="));
+    try std.testing.expectError(error.InvalidField, routeFromForm(allocator, "dst=198.51.100.0/24&via=2001:db8::1&dev=wan0"));
+    try std.testing.expectError(error.InvalidField, routeFromForm(allocator, "dst=198.51.100.0/24&via=not-an-ip&dev=wan0"));
+}
+
+test "firewall form rejects invalid families ports and states" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    try std.testing.expectError(error.InvalidField, firewallRuleFromForm(allocator, "rule_action=accept&family=ipv4&dst=10.0.0.1"));
+    try std.testing.expectError(error.InvalidField, firewallRuleFromForm(allocator, "rule_action=accept&family=ipv6&proto=icmp"));
+    try std.testing.expectError(error.InvalidField, firewallRuleFromForm(allocator, "rule_action=accept&family=ipv6&ct_state=new"));
+    try std.testing.expectError(error.InvalidField, firewallRuleFromForm(allocator, "rule_action=accept&family=ipv4&proto=tcp&dport=0"));
+    try std.testing.expectError(error.InvalidField, firewallRuleFromForm(allocator, "rule_action=accept&family=ipv4&dport=80"));
+    try std.testing.expectError(error.InvalidField, firewallRuleFromForm(allocator, "rule_action=accept&family=ipv4&proto=icmp&src=2001:db8::1/64"));
+}
+
+test "interface form rejects cross-resource names and bridge vlan conflicts" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const input =
+        \\{"ports":[{"name":"lan0","kind":"l2","device":"eth0"}],"bridges":[{"name":"br0","ports":["lan0"],"vlan_aware":false,"offload":"none"}],"interfaces":[]}
+    ;
+    var first = try std.json.parseFromSliceLeaky(std.json.Value, allocator, input, .{});
+    try std.testing.expectError(error.InvalidField, applyInterfacesForm(allocator, &first.object, "action=add_interface&name=lan0&bridge=br0&address=10.0.0.1/24", "add_interface"));
+    var second = try std.json.parseFromSliceLeaky(std.json.Value, allocator, input, .{});
+    try std.testing.expectError(error.InvalidField, applyInterfacesForm(allocator, &second.object, "action=add_interface&name=svi&bridge=br0&address=10.0.0.1/24&vlan=5", "add_interface"));
+    try std.testing.expect(findRow(rowArray(second.object.get("interfaces")).?, "svi") == null);
+    var third = try std.json.parseFromSliceLeaky(std.json.Value, allocator, input, .{});
+    try applyInterfacesForm(allocator, &third.object, "action=add_interface&name=svi&bridge=br0&address=10.0.0.1/24", "add_interface");
+    try std.testing.expect(findRow(rowArray(third.object.get("interfaces")).?, "svi") != null);
+}
+
+test "generated interface route and firewall config passes the real parser" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var ports = std.json.Array.init(allocator);
+    try ports.append(.{ .object = try portFromForm(allocator, "name=lan9&kind=l2&device=eth9&mtu=1500&pvid=1&tagged=10%2C20&storm_control=1000") });
+    var bridges = std.json.Array.init(allocator);
+    try bridges.append(.{ .object = try bridgeFromForm(allocator, "name=br9&ports=lan9&offload=none&stp=1&vlan_aware=1") });
+    var interfaces = std.json.Array.init(allocator);
+    try interfaces.append(.{ .object = try interfaceFromForm(allocator, "name=svi9&bridge=br9&address=10.99.0.1/24&addresses=2001%3Adb8%3A99%3A%3A1/64&vlan=10") });
+    var draft = try std.json.ObjectMap.init(allocator, &.{}, &.{});
+    try draft.put(allocator, "ports", .{ .array = ports });
+    try draft.put(allocator, "bridges", .{ .array = bridges });
+    try draft.put(allocator, "interfaces", .{ .array = interfaces });
+    try validateInterfaceDraft(allocator, &draft);
+
+    var root = try std.json.parseFromSliceLeaky(std.json.Value, allocator, "{\"version\":1,\"instance\":\"web-test\"}", .{});
+    try installInterfaceSections(allocator, &root.object, .{ .object = draft });
+    var routes = std.json.Array.init(allocator);
+    try routes.append(.{ .object = try routeFromForm(allocator, "dst=198.51.100.0/24&via=203.0.113.1&dev=svi9&metric=50&table=254") });
+    try root.object.put(allocator, "routes", .{ .array = routes });
+    var firewall = try std.json.ObjectMap.init(allocator, &.{}, &.{});
+    try firewall.put(allocator, "default_out", .{ .string = "accept" });
+    var rules = std.json.Array.init(allocator);
+    try rules.append(.{ .object = try firewallRuleFromForm(allocator, "rule_action=accept&family=ipv4&proto=tcp&dst=10.99.0.10/32&dport=8080") });
+    try firewall.put(allocator, "rules", .{ .array = rules });
+    try root.object.put(allocator, "firewall", .{ .object = firewall });
+
+    stripNulls(&root);
+    const text = try jsonStringify(allocator, root);
+    var parsed = try vrouter.config_parse.parse(allocator, text);
+    defer parsed.deinit();
+    try vrouter.config_validate.validate(&parsed.config);
 }
 
 test "form and query decoding handles plus and percent escapes" {

@@ -233,6 +233,7 @@ td.mono { font-size: 12px; }
 .badge-info { color: var(--info); background: var(--info-soft); border-color: color-mix(in srgb, var(--info) 30%, var(--border)); }
 .badge-warn { color: var(--warn); background: var(--warn-soft); border-color: color-mix(in srgb, var(--warn) 30%, var(--border)); }
 .badge-muted { color: var(--muted); }
+.badge-danger { color: var(--error); background: var(--error-soft); border-color: color-mix(in srgb, var(--error) 30%, var(--border)); }
 .empty { display: grid; gap: 4px; place-items: center; padding: 34px 18px; text-align: center; color: var(--muted); border: 1px dashed var(--border-strong); border-radius: 10px; background: var(--surface-2); }
 .empty strong { color: var(--text); }
 .alert { display: flex; gap: 8px; align-items: flex-start; margin: 0 0 14px; padding: 11px 13px; border: 1px solid var(--border); border-radius: 10px; font-size: 12.5px; }
@@ -251,6 +252,13 @@ td.mono { font-size: 12px; }
 .review-label { margin: 14px 0 6px; color: var(--muted); font-size: 10px; font-weight: 750; letter-spacing: 0.08em; text-transform: uppercase; }
 .diff { max-height: 42vh; overflow: auto; margin: 10px 0 0; padding: 12px 14px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface-2); font-size: 11.5px; line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere; }
 .refresh-note { margin-top: 12px; color: var(--muted); font-size: 11px; }
+.log-tail {
+  max-height: 62vh; overflow: auto; margin: 0 -18px -18px; padding: 14px 18px;
+  border-top: 1px solid var(--border); background: var(--surface-2);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11.5px; line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere;
+}
+.config-json { max-height: 70vh; }
 .filters { display: flex; align-items: end; gap: 10px; flex-wrap: wrap; margin-bottom: 14px; padding: 13px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); box-shadow: var(--shadow); }
 .field { display: grid; gap: 5px; min-width: 150px; }
 .field-grow { flex: 1 1 240px; }

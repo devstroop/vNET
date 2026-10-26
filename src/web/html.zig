@@ -4,7 +4,7 @@
 const std = @import("std");
 const assets = @import("assets.zig");
 
-pub const Page = enum { overview, nat, dhcp, dns, connections, audit, journal, system };
+pub const Page = enum { overview, interfaces, clients, routes, nat, firewall, dhcp, dns, connections, diagnostics, logs, audit, journal, config, system };
 
 pub const PageOptions = struct {
     title: []const u8,
@@ -114,12 +114,19 @@ pub fn writePage(w: *std.Io.Writer, opts: PageOptions) !void {
 fn writeNav(w: *std.Io.Writer, active: Page) !void {
     const items = [_]struct { page: Page, href: []const u8, label: []const u8 }{
         .{ .page = .overview, .href = "/overview", .label = "Overview" },
+        .{ .page = .interfaces, .href = "/interfaces", .label = "Interfaces" },
+        .{ .page = .clients, .href = "/clients", .label = "Clients" },
+        .{ .page = .routes, .href = "/routes", .label = "Routes" },
         .{ .page = .nat, .href = "/nat", .label = "NAT" },
+        .{ .page = .firewall, .href = "/firewall", .label = "Firewall" },
         .{ .page = .dhcp, .href = "/dhcp", .label = "DHCP" },
         .{ .page = .dns, .href = "/dns", .label = "DNS" },
         .{ .page = .connections, .href = "/connections", .label = "Connections" },
+        .{ .page = .diagnostics, .href = "/diagnostics", .label = "Diagnostics" },
+        .{ .page = .logs, .href = "/logs", .label = "Logs" },
         .{ .page = .audit, .href = "/audit", .label = "Audit" },
         .{ .page = .journal, .href = "/journal", .label = "Journal" },
+        .{ .page = .config, .href = "/config", .label = "Config" },
         .{ .page = .system, .href = "/system", .label = "System" },
     };
     for (items) |item| {
@@ -161,7 +168,7 @@ pub fn writeLoginPage(w: *std.Io.Writer, error_message: ?[]const u8) !void {
         \\    <div class="login-hero-copy">
         \\      <span class="pill">Local control plane</span>
         \\      <h1>Your network,<br>without the noise.</h1>
-        \\      <p>Inspect forwarding, NAT and live connection state from a focused local console. NAT edits are staged and applied explicitly.</p>
+        \\      <p>Inspect and edit forwarding, NAT, services and policy from a focused local console. Every change is staged, reviewed and applied explicitly.</p>
         \\      <ul class="check-list">
         \\        <li>Session-protected, loopback-only access</li>
         \\        <li>State and transactions go through the local Unix socket</li>

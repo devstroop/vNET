@@ -100,7 +100,7 @@ fn run(init: std.process.Init) !void {
 
 fn usage(io: std.Io) !void {
     try std.Io.File.stdout().writeStreamingAll(io,
-        \\vrouterweb — read-only vRouter web admin
+        \\vrouterweb — vRouter web admin
         \\
         \\Usage:
         \\  vrouterweb [options]
@@ -115,8 +115,9 @@ fn usage(io: std.Io) !void {
         \\  -h, --help                    Print this help.
         \\
         \\The password hash is an Argon2id PHC string produced by --hash-password.
-        \\The server is read-only, serves embedded HTMX assets, and obtains all
-        \\state over the control socket.
+        \\The server serves embedded HTMX assets and obtains all state over the
+        \\control socket. Writes are staged and sent to the daemon as control
+        \\requests; the web process never mutates host state directly.
         \\
     );
 }

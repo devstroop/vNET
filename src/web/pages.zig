@@ -430,7 +430,7 @@ fn writeRestartBanner(w: *std.Io.Writer, csrf: []const u8, token: ?[]const u8, s
             try html.writeEscaped(w, csrf);
             try w.writeAll("\"><input type=\"hidden\" name=\"restart_token\" value=\"");
             try html.writeEscaped(w, value);
-            try w.writeAll("\"><button class=\"button button-primary button-inline\" type=\"submit\">Restart daemon</button></form>");
+            try w.writeAll("\"><button class=\"button button-primary button-inline\" type=\"submit\">Restart daemon</button></form><div id=\"restart-result\"></div>");
         }
     } else {
         try w.writeAll("Run <code>systemctl restart vrouterd</code> from a local shell; this deployment did not expose a restart token.");
@@ -440,6 +440,10 @@ fn writeRestartBanner(w: *std.Io.Writer, csrf: []const u8, token: ?[]const u8, s
 
 pub fn restartResultDialog(w: *std.Io.Writer, message: []const u8, is_error: bool) !void {
     try writeMessageDialog(w, "Daemon restart", message, is_error);
+}
+
+pub fn stopResultDialog(w: *std.Io.Writer, message: []const u8, is_error: bool) !void {
+    try writeMessageDialog(w, "Daemon stop", message, is_error);
 }
 
 fn writeMessageDialog(w: *std.Io.Writer, title: []const u8, message: []const u8, is_error: bool) !void {
@@ -844,6 +848,10 @@ pub const DnsView = struct {
     restart_pending: bool = false,
     restart_supported: bool = false,
     restart_token: ?[]const u8 = null,
+    query_name: []const u8 = "",
+    query_type: []const u8 = "A",
+    query_result: ?protocol.DnsQueryResult = null,
+    query_error: ?[]const u8 = null,
 };
 
 pub fn dnsPage(gpa: std.mem.Allocator, w: *std.Io.Writer, view: DnsView) !void {
@@ -951,6 +959,48 @@ pub fn dnsFragment(w: *std.Io.Writer, view: DnsView) !void {
     try w.writeAll("<dialog id=\"dns-confirm\" class=\"dialog dialog-sm\"><div class=\"dialog-card\"><header class=\"dialog-head\"><div><h3>Remove zone?</h3><p>This stages a removal. Nothing changes until Save.</p></div><button class=\"icon-button\" type=\"button\" data-dialog-close aria-label=\"Close\">×</button></header><form class=\"dialog-form\" method=\"post\" action=\"/dns/rules\" hx-post=\"/dns/rules\" hx-target=\"#dns-live\" hx-swap=\"innerHTML\" hx-indicator=\"#refresh-indicator\">");
     try writeStagedFields(w, view.csrf, view.draft_json);
     try w.writeAll("<input type=\"hidden\" name=\"action\" value=\"\" data-confirm-field=\"action\"><input type=\"hidden\" name=\"index\" value=\"\" data-confirm-field=\"index\"><input type=\"hidden\" name=\"res_index\" value=\"\" data-confirm-field=\"resindex\"><p class=\"dialog-copy\" data-confirm-message>Remove this zone?</p><footer class=\"dialog-actions\"><button class=\"button\" type=\"button\" data-dialog-close>Cancel</button><button class=\"button button-danger\" type=\"submit\">Stage removal</button></footer></form></div></dialog>");
+    try w.writeAll("<section class=\"card\"><header class=\"card-head\"><div><h3>Test resolver</h3><p>Send a UDP query to the configured DNS listener and show the answer. This does not change configuration.</p></div></header><form class=\"dialog-form\" method=\"post\" action=\"/dns/query\" hx-post=\"/dns/query\" hx-target=\"#dns-live\" hx-swap=\"innerHTML\" hx-indicator=\"#refresh-indicator\">");
+    try writeStagedFields(w, view.csrf, view.draft_json);
+    try w.writeAll("<div class=\"dialog-grid\"><label class=\"field\"><span>Name</span><input name=\"name\" required placeholder=\"example.com\" value=\"");
+    try html.writeEscaped(w, view.query_name);
+    try w.writeAll("\"></label><label class=\"field\"><span>Type</span><select name=\"type\"><option value=\"A\"");
+    if (std.mem.eql(u8, view.query_type, "A")) try w.writeAll(" selected");
+    try w.writeAll(">A</option><option value=\"AAAA\"");
+    if (std.mem.eql(u8, view.query_type, "AAAA")) try w.writeAll(" selected");
+    try w.writeAll(">AAAA</option></select></label></div>");
+    if (view.query_error) |message| {
+        try w.writeAll("<div class=\"alert alert-error\" role=\"alert\">");
+        try html.writeEscaped(w, message);
+        try w.writeAll("</div>");
+    }
+    if (view.query_result) |result| {
+        try w.writeAll("<div class=\"query-result\"><p class=\"small\"><span class=\"mono\">");
+        try html.writeEscaped(w, result.server);
+        try w.writeAll("</span> · <strong>");
+        try html.writeEscaped(w, result.rcode_text);
+        try w.writeAll("</strong>");
+        if (result.truncated) try w.writeAll(" · truncated");
+        try w.writeAll("</p>");
+        if (result.answers.len == 0) {
+            try html.writeEmpty(w, "No records", "The resolver returned no address records for this name.");
+        } else {
+            try w.writeAll("<div class=\"table-wrap\"><table><thead><tr><th>Owner</th><th>Type</th><th>Value</th><th>TTL</th></tr></thead><tbody>");
+            for (result.answers) |answer| {
+                try w.writeAll("<tr><td class=\"mono\">");
+                try html.writeEscaped(w, answer.owner);
+                try w.writeAll("</td><td class=\"mono\">");
+                try html.writeEscaped(w, answer.qtype);
+                try w.writeAll("</td><td class=\"mono\">");
+                try html.writeEscaped(w, answer.value);
+                try w.writeAll("</td><td class=\"mono\">");
+                try html.writeNumber(w, answer.ttl);
+                try w.writeAll("</td></tr>");
+            }
+            try w.writeAll("</tbody></table></div>");
+        }
+        try w.writeAll("</div>");
+    }
+    try w.writeAll("<footer class=\"dialog-actions\"><button class=\"button button-primary button-inline\" type=\"submit\">Run query</button></footer></form></section>");
     try w.writeAll("<p class=\"refresh-note\">DNS drafts live in this page. Reloading or signing out discards them.</p>");
 }
 
@@ -1638,6 +1688,13 @@ fn writeSystemBody(
         \\  </div>
         \\  <div class="page-actions">
         \\    <button class="button" type="button" hx-get="/partials/system" hx-target="#system-live" hx-swap="innerHTML" hx-indicator="#refresh-indicator">Refresh</button>
+    );
+    if (restart.supported) {
+        try w.writeAll("    <button class=\"button button-danger\" type=\"button\" data-dialog-open=\"daemon-stop\">Stop daemon</button>\n");
+    } else {
+        try w.writeAll("    <button class=\"button button-danger\" type=\"button\" disabled title=\"Stop requires a supervisor (--enable-restart).\">Stop daemon</button>\n");
+    }
+    try w.writeAll(
         \\  </div>
         \\</section>
         \\<div id="system-live" hx-get="/partials/system" hx-trigger="every 10s" hx-target="this" hx-swap="innerHTML">
@@ -1645,6 +1702,12 @@ fn writeSystemBody(
     );
     try systemFragment(w, status, err, now_ms, restart);
     try w.writeAll("</div>\n");
+    if (restart.supported) {
+        try w.writeAll("<dialog id=\"daemon-stop\" class=\"dialog dialog-sm\"><div class=\"dialog-card\"><header class=\"dialog-head\"><div><h3>Stop vrouterd?</h3><p>Forwarding stops immediately and this admin disconnects. The daemon only returns if a supervisor starts it again.</p></div><button class=\"icon-button\" type=\"button\" data-dialog-close aria-label=\"Close\">×</button></header><form class=\"dialog-form\" method=\"post\" action=\"/stop\" hx-post=\"/stop\" hx-target=\"#stop-result\" hx-swap=\"innerHTML\" hx-indicator=\"#refresh-indicator\"><input type=\"hidden\" name=\"csrf\" value=\"");
+        try html.writeEscaped(w, restart.csrf);
+        try w.writeAll("\"><label class=\"field\"><span>Type <code class=\"mono\">stop</code> to confirm</span><input name=\"confirm\" required autocomplete=\"off\" autocapitalize=\"none\" spellcheck=\"false\" placeholder=\"stop\"></label><footer class=\"dialog-actions\"><button class=\"button\" type=\"button\" data-dialog-close>Cancel</button><button class=\"button button-danger\" type=\"submit\">Stop daemon</button></footer></form></div></dialog>");
+    }
+    try w.writeAll("<div id=\"stop-result\"></div>\n");
 }
 
 pub fn systemFragment(
@@ -1710,6 +1773,44 @@ fn metaRowDuration(w: *std.Io.Writer, label: []const u8, value: i64) !void {
     try w.writeAll("</span><strong class=\"small\">");
     try html.writeDuration(w, value);
     try w.writeAll("</strong></div>");
+}
+
+test "DNS query form keeps the staged draft" {
+    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+    try dnsFragment(&out.writer, .{ .csrf = "csrf-value", .draft_json = "{\"upstreams\":[]}" });
+    const text = out.written();
+    const action_at = std.mem.indexOf(u8, text, "action=\"/dns/query\"") orelse return error.TestUnexpectedResult;
+    const draft_at = std.mem.indexOfPos(u8, text, action_at, "name=\"draft\"") orelse return error.TestUnexpectedResult;
+    const name_at = std.mem.indexOfPos(u8, text, action_at, "name=\"name\"") orelse return error.TestUnexpectedResult;
+    try std.testing.expect(draft_at < name_at);
+}
+
+test "system page gates supervised stop and posts typed confirmation" {
+    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+    try systemPage(std.testing.allocator, &out.writer, "csrf-value", null, null, 0, .{
+        .csrf = "csrf-value",
+        .pending = true,
+        .supported = true,
+        .token = "restart-token",
+    });
+    const text = out.written();
+    try std.testing.expect(std.mem.indexOf(u8, text, "action=\"/stop\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "name=\"confirm\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "Type <code class=\"mono\">stop</code>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "hx-target=\"#stop-result\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "id=\"restart-result\"") != null);
+
+    var unsupported: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer unsupported.deinit();
+    try systemPage(std.testing.allocator, &unsupported.writer, "csrf-value", null, null, 0, .{
+        .csrf = "csrf-value",
+        .supported = false,
+    });
+    const gated = unsupported.written();
+    try std.testing.expect(std.mem.indexOf(u8, gated, "disabled title=\"Stop requires a supervisor") != null);
+    try std.testing.expect(std.mem.indexOf(u8, gated, "action=\"/stop\"") == null);
 }
 
 test "connection filters match state and search text" {
