@@ -54,9 +54,9 @@ pub const Affected = struct {
 
     pub fn labelAt(self: Affected, index: usize) ?[]const u8 {
         var seen: usize = 0;
-        inline for (std.meta.fields(Field)) |field| {
-            if (self.contains(@enumFromInt(field.value))) {
-                if (seen == index) return field.name;
+        inline for (std.enums.values(Field)) |field| {
+            if (self.contains(field)) {
+                if (seen == index) return @tagName(field);
                 seen += 1;
             }
         }
@@ -201,9 +201,9 @@ fn compare(
     after: std.json.Value,
 ) !Affected {
     var affected: Affected = .{};
-    inline for (std.meta.fields(Field)) |field| {
-        const same = try jsonFieldEqual(gpa, before, after, field.name);
-        if (!same) affected.add(@enumFromInt(field.value));
+    inline for (std.enums.values(Field)) |field| {
+        const same = try jsonFieldEqual(gpa, before, after, @tagName(field));
+        if (!same) affected.add(field);
     }
     return affected;
 }
@@ -547,8 +547,8 @@ test "analyze reports NAT as live and structural as restart-required" {
 test "restart token is boot bound, expiring and one-shot" {
     var restart: RestartToken = .{};
     const revision = config_store.Revision.compute("{}");
-    const transaction = [_]u8{'a'} ** 64;
-    const boot_id = [_]u8{7} ** boot_id_len;
+    const transaction: [64]u8 = @splat('a');
+    const boot_id: [boot_id_len]u8 = @splat(7);
     const token = try restart.issue(
         std.testing.io,
         transaction,
