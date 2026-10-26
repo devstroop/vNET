@@ -54,9 +54,9 @@ descriptive and fail as command names.
    describe live host state that must be reconciled, not replayed under a new
    name. Pre-rename configs remain valid JSON but must be moved to the new
    default path or passed explicitly.
-8. **Repository hosting is separate.** Renaming the GitHub repository and
-   remote URL is an operational follow-up. Open pull requests remain on the
-   same branch and are not closed by the source rename.
+8. **Repository hosting.** The GitHub repository and local remote were renamed
+   to `devstroop/vnet` after the source rename. Open pull requests remain on the
+   same branch and are not closed by the move.
 9. **Shard split is separate.** The package/module graph, per-shard headers and
    build-time shard selection get their own ADR and incremental PRs.
 
