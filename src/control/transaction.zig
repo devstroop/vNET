@@ -345,8 +345,8 @@ fn encode(io: std.Io, gpa: std.mem.Allocator, entry: Entry) ![]u8 {
 }
 
 fn fieldByName(name: []const u8) ?config_apply.Field {
-    inline for (std.meta.fields(config_apply.Field)) |field| {
-        if (std.mem.eql(u8, field.name, name)) return @enumFromInt(field.value);
+    inline for (std.enums.values(config_apply.Field)) |field| {
+        if (std.mem.eql(u8, @tagName(field), name)) return field;
     }
     return null;
 }
@@ -392,14 +392,16 @@ test "operation audit records accepted daemon actions" {
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
     const dir = try tmp.dir.realPath(std.testing.io, &path_buf);
     const state_dir = path_buf[0..dir];
+    const transaction: [64]u8 = @splat('a');
+    const diff_hash: [64]u8 = @splat('b');
     try appendOperationAudit(
         std.testing.io,
         std.testing.allocator,
         state_dir,
         "daemon.restart",
         "test",
-        "a" ** 64,
-        "b" ** 64,
+        &transaction,
+        &diff_hash,
         .{ .uid = 0, .pid = 42 },
         1000,
     );
