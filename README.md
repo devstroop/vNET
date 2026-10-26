@@ -23,6 +23,8 @@ daemon with a command-line interface and exposes a C ABI for embedded hosts.
 - DNS forwarding with cache, TCP fallback, and split zones
 - Atomic, journaled route/address/link changes with rollback
 - Cross-compilation for Linux and Android targets
+- Compiler-checked `vnet-*` shard modules with per-shard tests
+  ([ADR-018](docs/adr/018-shard-build-graph.md))
 
 ## Requirements
 

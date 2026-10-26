@@ -12,7 +12,7 @@ the contract for any agent working in this repo.
 | Core library | `src/` | Zig, `std.Io`, `std.crypto` |
 | Shard graph | `src/shard_*.zig` | named Zig modules; ADR-018 |
 | Ports / datapath | `src/port/`, `src/l2/`, `src/l3/` | AF_PACKET, TUN/TAP, fd, netlink |
-| NAT / firewall | `src/nat/`, `src/firewall/` | conntrack, SNAT/DNAT, rules |
+| NAT / firewall | `src/nat/`, `src/l3/forward.zig` | conntrack, SNAT/DNAT; `vnet-fw` reserved until the engine split |
 | Services | `src/services/` | DHCPv4, DNS forwarder |
 | CLI / daemon | `src/app/`, `exec/` | Zig |
 | Executables | `exec/` | `vnet`, `vnetd`; `vnetweb` post-v1 |

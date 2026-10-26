@@ -650,7 +650,7 @@ Implemented (R7 control-socket foundation):
   forwards and conntrack responses at 256 entries (the response carries the
   full table count). A write apply is queued to the single-threaded data loop;
   one may be pending at a time and the request limit is 64 KiB.
-- No TCP listener. v1 exposes no HTTP listener. A post-v1 optional `vnet-web`
+- No TCP listener. v1 exposes no HTTP listener. A post-v1 optional `vnetweb`
   adapter may render this API in a browser; it is an unprivileged client and
   never mutates host state directly (ADR-011).
 - Streaming events (planned): `port_up`, `port_down`, `link_change`,

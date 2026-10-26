@@ -31,9 +31,9 @@ descriptive and fail as command names.
 1. **Product and documentation.** The product is vNET; use lowercase `vnet`
    anywhere a machine reads the name.
 2. **Executables and artifacts.** `vrouter`, `vrouterd` and `vrouterweb`
-   become `vnet`, `vnetd` and `vnetweb`. Documentation may call the web
-   adapter `vnet-web`. Build module and package names use `vnet`; libraries
-   are `libvnet` and `libvnet.a`.
+   become `vnet`, `vnetd` and `vnetweb`. The earlier working name `vnet-web`
+   is not a binary or build target. Build module and package names use `vnet`;
+   libraries are `libvnet` and `libvnet.a`.
 3. **C ABI.** `include/vrouter.h` becomes `include/vnet.h`; exported functions,
    types, enum values and macros become `vnet_*` / `VNET_*`. The status struct
    layout and lifecycle semantics are unchanged, but the symbol namespace
@@ -57,8 +57,8 @@ descriptive and fail as command names.
 8. **Repository hosting.** The GitHub repository and local remote were renamed
    to `devstroop/vnet` after the source rename. Open pull requests remain on the
    same branch and are not closed by the move.
-9. **Shard split is separate.** The package/module graph, per-shard headers and
-   build-time shard selection get their own ADR and incremental PRs.
+9. **Shard split is separate.** The shard build graph is defined in ADR-018;
+   per-shard headers and build-time shard selection remain follow-ups.
 
 ## Consequences
 
