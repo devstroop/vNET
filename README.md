@@ -6,11 +6,6 @@ vNET attaches network interfaces, forwards Ethernet, IPv4 and IPv6 traffic,
 and provides NAT, DHCP, DNS, and journal-backed host configuration. It runs as a
 daemon with a command-line interface and exposes a C ABI for embedded hosts.
 
-> **Renamed:** vNET was previously vRouter, and before that vNAT. The
-> pre-1.0 rename changes binary, ABI and default path names; see
-> [ADR-017](docs/adr/017-project-rename-vnet.md) and
-> [ADR-012](docs/adr/012-project-rename.md).
-
 ## Capabilities
 
 - AF_PACKET L2 ports and TUN/TAP L3 ports
