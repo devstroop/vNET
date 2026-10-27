@@ -28,9 +28,10 @@ host B 10.0.2.2/24 -- veth -- vnet wan0 10.0.2.1/24
 
 The script disables TX checksum, GSO, TSO and GRO on the synthetic host veths
 with `scripts/netdev_offload.c`. Without that, veth checksum-partial and GSO
-frames dominate the result and do not represent forwarded Ethernet frames.
-UDP uses `SO_NO_CHECK` because the userspace bridge does not repair
-checksum-partial frames; this isolates forwarding from offload artifacts.
+artifacts dominate the result and do not represent plain forwarded Ethernet
+frames. The datapath now splits TCP GSO and repairs bridge checksums, but the
+workaround keeps this comparison focused on the forwarding budget. UDP uses
+`SO_NO_CHECK` to isolate forwarding from offload artifacts.
 
 `scripts/loadgen.c` generated traffic:
 
@@ -92,16 +93,22 @@ not enough.
 The L2 result is above budget, but these are still synthetic-netns numbers;
 re-run on a quiet, frequency-pinned host before signing off.
 
-## GSO and checksum caveat
+## GSO and checksum behavior
 
-The benchmark workaround masks a real limitation. A local veth peer can emit
-64 KiB GSO frames. vNET's RX buffer is 2048 bytes (`src/app/service.zig`) and
-the forwarder's packet buffer is also 2048 bytes, so those frames are dropped.
-ADR-007 deferred offload-aware input. This does not affect normal Ethernet
-frames from a physical switch, but it affects veth peers, containers and some
-virtualized hosts. The bridge path also does not repair checksum-partial
-frames from an offloading peer. Keep the veth offload workaround in tests and
-treat GSO support as release-blocking for those deployments.
+A local veth peer can emit 64 KiB GSO frames. AF_PACKET RX now uses 65,600-byte
+slots (`src/app/service.zig`) and counts `MSG_TRUNC` frames as drops. IPv4 and
+IPv6 TCP super-frames larger than the ingress MTU are split before
+bridge/L3/NAT to at most the ingress MTU (capped at 1500 bytes); each segment
+gets a fresh TCP sequence number and checksum, and only the final segment keeps
+PSH/FIN. The bridge path repairs IPv4 and IPv6
+checksums, so checksum-partial frames are no longer a blind spot there.
+
+A one-shot 1 MiB TCP check completed without truncation through L3, L2 and NAT,
+and an 8 MiB L3 check transferred all 8,388,608 bytes at both ends. These are
+regression checks, not median throughput results. Segmentation still covers
+TCP only: UDP GSO, other non-TCP super-frames and IPv6 payloads above 65,535
+bytes are dropped. Keep the veth offload workaround in benchmark runs; TCP GSO
+input is no longer release-blocking, but UDP GSO remains open.
 
 ## Next measurements
 

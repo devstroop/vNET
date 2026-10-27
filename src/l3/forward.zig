@@ -48,6 +48,8 @@ const dhcp_failed_retry_ms: i64 = 30_000;
 const dhcp_probe_delay_ms: i64 = 250;
 const dhcp_pending_slots = 32;
 const dhcp_reply_max = 576;
+const gso_segment_max: usize = 1600;
+const gso_ip_limit: usize = 1500;
 
 const PendingPacket = struct {
     used: bool = false,
@@ -1337,6 +1339,17 @@ pub const Forwarder = struct {
             break :blk 0;
         };
 
+        // A veth peer can hand us a GSO super-frame larger than the ingress
+        // MTU. Split TCP super-frames before bridge/L3 so every downstream
+        // path sees wire-sized frames and can repair checksums in software.
+        const ingress_mtu = ingress_entry.port.info().mtu;
+        if (eth.payload.len > ingress_mtu and
+            (eth.ethertype == ethernet.EtherType.ipv4 or
+                eth.ethertype == ethernet.EtherType.ipv6))
+        {
+            if (try self.segmentGsoTcp(io, frame, eth, ingress, now, ingress_mtu)) return;
+        }
+
         if (bridge) |b| {
             if (b.stp) {
                 const state = stpPortState(b, ingress) orelse .blocking;
@@ -1406,6 +1419,146 @@ pub const Forwarder = struct {
                 }
             },
         }
+    }
+
+    fn segmentGsoTcp(
+        self: *Forwarder,
+        io: std.Io,
+        frame: []const u8,
+        eth: ethernet.Header,
+        ingress: types.PortId,
+        now: i64,
+        mtu: u16,
+    ) PortError!bool {
+        const limit = @min(@as(usize, mtu), gso_ip_limit);
+        if (limit <= @as(usize, eth.header_len)) return false;
+        return switch (eth.ethertype) {
+            ethernet.EtherType.ipv4 => self.segmentGsoTcp4(io, frame, eth, ingress, now, limit),
+            ethernet.EtherType.ipv6 => self.segmentGsoTcp6(io, frame, eth, ingress, now, limit),
+            else => false,
+        };
+    }
+
+    fn segmentGsoTcp4(
+        self: *Forwarder,
+        io: std.Io,
+        frame: []const u8,
+        eth: ethernet.Header,
+        ingress: types.PortId,
+        now: i64,
+        limit: usize,
+    ) PortError!bool {
+        const ip = ipv4.parse(eth.payload) catch return false;
+        if (ip.protocol != ipv4.Protocol.tcp or ip.isFragment()) return false;
+
+        const ip_hlen: usize = ip.header_len;
+        const tcp = ip.payload;
+        if (tcp.len < 20) return false;
+        const tcp_hlen: usize = @as(usize, tcp[12] >> 4) * 4;
+        if (tcp_hlen < 20 or tcp_hlen > tcp.len) return false;
+        const payload_len = tcp.len - tcp_hlen;
+        if (payload_len == 0) return false;
+        if (limit <= ip_hlen + tcp_hlen) return false;
+
+        const eth_hlen: usize = eth.header_len;
+        if (eth_hlen + limit > gso_segment_max) return false;
+
+        const chunk_max = limit - ip_hlen - tcp_hlen;
+        const seq = readU32(tcp, 4);
+        var out: [gso_segment_max]u8 = undefined;
+        @memcpy(out[0..eth_hlen], frame[0..eth_hlen]);
+
+        var offset: usize = 0;
+        while (offset < payload_len) {
+            const chunk = @min(chunk_max, payload_len - offset);
+            const ip_total = ip_hlen + tcp_hlen + chunk;
+            const total = eth_hlen + ip_total;
+            const ip_out = out[eth_hlen..][0..ip_total];
+            const tcp_out = ip_out[ip_hlen..][0 .. tcp_hlen + chunk];
+
+            @memcpy(ip_out[0..ip_hlen], eth.payload[0..ip_hlen]);
+            @memcpy(tcp_out[0..tcp_hlen], tcp[0..tcp_hlen]);
+            @memcpy(
+                tcp_out[tcp_hlen..][0..chunk],
+                tcp[tcp_hlen + offset ..][0..chunk],
+            );
+
+            writeU16(ip_out, 2, @intCast(ip_total));
+            writeU16(ip_out, 10, 0);
+            writeU16(ip_out, 10, ipv4.checksum(ip_out[0..ip_hlen]));
+            writeU32(tcp_out, 4, seq +% @as(u32, @intCast(offset)));
+            // A GSO frame can carry FIN on its last byte. Only the final
+            // segment may expose FIN; earlier FINs would close the flow early.
+            if (offset + chunk < payload_len) tcp_out[13] &= ~@as(u8, TCP_PSH | TCP_FIN);
+            writeU16(tcp_out, 16, 0);
+            writeU16(
+                tcp_out,
+                16,
+                transportChecksum(ip.src, ip.dst, ipv4.Protocol.tcp, tcp_out),
+            );
+
+            try self.handleAt(io, out[0..total], ingress, now);
+            offset += chunk;
+        }
+        return true;
+    }
+
+    fn segmentGsoTcp6(
+        self: *Forwarder,
+        io: std.Io,
+        frame: []const u8,
+        eth: ethernet.Header,
+        ingress: types.PortId,
+        now: i64,
+        limit: usize,
+    ) PortError!bool {
+        const ip = ipv6.parse(eth.payload) catch return false;
+        if (ip.protocol != ipv6.Protocol.tcp or ip.isFragment()) return false;
+
+        const ip_hlen: usize = ip.header_len;
+        const tcp = ip.payload;
+        if (tcp.len < 20) return false;
+        const tcp_hlen: usize = @as(usize, tcp[12] >> 4) * 4;
+        if (tcp_hlen < 20 or tcp_hlen > tcp.len) return false;
+        const payload_len = tcp.len - tcp_hlen;
+        if (payload_len == 0) return false;
+        if (limit <= ip_hlen + tcp_hlen) return false;
+
+        const eth_hlen: usize = eth.header_len;
+        if (eth_hlen + limit > gso_segment_max) return false;
+
+        const chunk_max = limit - ip_hlen - tcp_hlen;
+        const seq = readU32(tcp, 4);
+        var out: [gso_segment_max]u8 = undefined;
+        @memcpy(out[0..eth_hlen], frame[0..eth_hlen]);
+
+        var offset: usize = 0;
+        while (offset < payload_len) {
+            const chunk = @min(chunk_max, payload_len - offset);
+            const ip_total = ip_hlen + tcp_hlen + chunk;
+            const total = eth_hlen + ip_total;
+            const ip_out = out[eth_hlen..][0..ip_total];
+            const tcp_out = ip_out[ip_hlen..][0 .. tcp_hlen + chunk];
+
+            @memcpy(ip_out[0..ip_hlen], eth.payload[0..ip_hlen]);
+            @memcpy(tcp_out[0..tcp_hlen], tcp[0..tcp_hlen]);
+            @memcpy(
+                tcp_out[tcp_hlen..][0..chunk],
+                tcp[tcp_hlen + offset ..][0..chunk],
+            );
+
+            writeU16(ip_out, 4, @intCast(ip_total - ip_hlen));
+            writeU32(tcp_out, 4, seq +% @as(u32, @intCast(offset)));
+            if (offset + chunk < payload_len) tcp_out[13] &= ~@as(u8, TCP_PSH | TCP_FIN);
+            writeU16(tcp_out, 16, 0);
+            var sum = ipv6.checksum(ip.src, ip.dst, ip.protocol, tcp_out);
+            if (sum == 0) sum = 0xffff;
+            writeU16(tcp_out, 16, sum);
+
+            try self.handleAt(io, out[0..total], ingress, now);
+            offset += chunk;
+        }
+        return true;
     }
 
     fn ingressVlan(self: *const Forwarder, bridge: Bridge, port: types.PortId, tagged: ?u16) ?u16 {
@@ -1587,6 +1740,11 @@ pub const Forwarder = struct {
         if (eth.payload.len > out.len - hlen) return error.FrameTooLarge;
         if (eth.payload.len > info.mtu) return error.FrameTooLarge;
         @memcpy(out[hlen..][0..eth.payload.len], eth.payload);
+        switch (eth.ethertype) {
+            ethernet.EtherType.ipv4 => fixTransportChecksum(out[hlen..][0..eth.payload.len]),
+            ethernet.EtherType.ipv6 => fixTransportChecksum6(out[hlen..][0..eth.payload.len]),
+            else => {},
+        }
         try entry.port.writeQueued(io, out[0 .. hlen + eth.payload.len]);
         self.counters.bridged += 1;
     }
@@ -4473,9 +4631,23 @@ fn readU16(buf: []const u8, off: usize) u16 {
     return (@as(u16, buf[off]) << 8) | buf[off + 1];
 }
 
+fn readU32(buf: []const u8, off: usize) u32 {
+    return (@as(u32, buf[off]) << 24) |
+        (@as(u32, buf[off + 1]) << 16) |
+        (@as(u32, buf[off + 2]) << 8) |
+        buf[off + 3];
+}
+
 fn writeU16(buf: []u8, off: usize, value: u16) void {
     buf[off] = @truncate(value >> 8);
     buf[off + 1] = @truncate(value);
+}
+
+fn writeU32(buf: []u8, off: usize, value: u32) void {
+    buf[off] = @truncate(value >> 24);
+    buf[off + 1] = @truncate(value >> 16);
+    buf[off + 2] = @truncate(value >> 8);
+    buf[off + 3] = @truncate(value);
 }
 
 const Direction = enum { new, original, reply };
@@ -4483,6 +4655,7 @@ const Direction = enum { new, original, reply };
 const TCP_FIN: u8 = 0x01;
 const TCP_SYN: u8 = 0x02;
 const TCP_RST: u8 = 0x04;
+const TCP_PSH: u8 = 0x08;
 const TCP_ACK: u8 = 0x10;
 
 fn flowKey(ip: ipv4.Header, zone: u32, vlan: u16) ?conntrack_mod.FlowKey {
@@ -6592,6 +6765,254 @@ test "forwarder repairs ipv6 transport checksums" {
         @as(u16, 0),
         ipv6.checksum(src, dst, ipv6.Protocol.udp, packet[40..udp_len]),
     );
+}
+
+fn buildGsoTcpFrame(
+    buf: []u8,
+    eth_dst: types.Mac,
+    eth_src: types.Mac,
+    src: types.Ipv4,
+    dst: types.Ipv4,
+    tcp_flags: u8,
+    payload_len: usize,
+) !usize {
+    var tcp_buf: [4096]u8 = undefined;
+    if (payload_len > tcp_buf.len - 20) return error.NoSpace;
+    const tcp = tcp_buf[0 .. 20 + payload_len];
+    @memset(tcp, 0);
+    writeU16(tcp, 0, 1234);
+    writeU16(tcp, 2, 80);
+    writeU32(tcp, 4, 1000);
+    tcp[12] = 0x50;
+    tcp[13] = tcp_flags;
+    writeU16(tcp, 14, 0xffff);
+    writeU16(tcp, 16, 0xdead);
+    @memset(tcp[20..], 'g');
+
+    var ip_buf: [4120]u8 = undefined;
+    const ip_len = try ipv4.write(&ip_buf, src, dst, ipv4.Protocol.tcp, 64, 0x7777, tcp);
+    const hlen = try ethernet.write(buf, eth_dst, eth_src, ethernet.EtherType.ipv4, null);
+    if (buf.len < hlen + ip_len) return error.NoSpace;
+    @memcpy(buf[hlen..][0..ip_len], ip_buf[0..ip_len]);
+    return hlen + ip_len;
+}
+
+fn expectSegmentedTcp(
+    port: *memory_port.MemoryPort,
+    expected_segments: usize,
+    expected_payload: usize,
+    expected_last_fin: bool,
+) !void {
+    var out: [2048]u8 = undefined;
+    var segments: usize = 0;
+    var payload: usize = 0;
+    var next_seq: u32 = 1000;
+    while (port.queuedTx() != 0) : (segments += 1) {
+        const n = (try port.takeSent(&out)).?;
+        const eth = try ethernet.parse(out[0..n]);
+        const ip = try ipv4.parse(eth.payload);
+        try testing.expect(ip.total_len <= 1500);
+        try testing.expectEqual(@as(u16, 0), ipv4.checksum(ip.packet[0..ip.header_len]));
+        const tcp = ip.payload;
+        try testing.expect(tcp.len >= 20);
+        try testing.expectEqual(next_seq, readU32(tcp, 4));
+        try testing.expectEqual(
+            @as(u16, 0),
+            transportChecksum(ip.src, ip.dst, ipv4.Protocol.tcp, tcp),
+        );
+        if (port.queuedTx() != 0) {
+            try testing.expectEqual(@as(u8, 0), tcp[13] & (TCP_PSH | TCP_FIN));
+        } else {
+            try testing.expect(tcp[13] & TCP_PSH != 0);
+            try testing.expectEqual(expected_last_fin, tcp[13] & TCP_FIN != 0);
+        }
+        const chunk = tcp.len - 20;
+        payload += chunk;
+        next_seq +%= @intCast(chunk);
+    }
+    try testing.expectEqual(expected_segments, segments);
+    try testing.expectEqual(expected_payload, payload);
+}
+
+test "forwarder segments gso tcp before routing" {
+    const MemoryPort = memory_port.MemoryPort;
+    var a: MemoryPort = undefined;
+    var b: MemoryPort = undefined;
+    var entries: [2]PortEntry = undefined;
+    var fwd: Forwarder = undefined;
+    try setup(&a, &b, &entries, &fwd);
+    defer fwd.deinit();
+    defer b.deinit();
+    defer a.deinit();
+    b.mtu = 2048;
+
+    try fwd.arp.put(testing.allocator, testIp("10.0.2.2"), .{
+        .mac = host_b_mac,
+        .port = port_b,
+        .updated_ms = nowMs(testing.io),
+    });
+
+    var frame: [4200]u8 = undefined;
+    const n = try buildGsoTcpFrame(
+        &frame,
+        port_b_mac,
+        host_a_mac,
+        testIp("10.0.1.2"),
+        testIp("10.0.2.2"),
+        0x18,
+        4000,
+    );
+    try fwd.handle(testing.io, frame[0..n], port_a);
+    try expectSegmentedTcp(&b, 3, 4000, false);
+    try testing.expectEqual(@as(u64, 3), fwd.counters.forwarded);
+}
+
+test "gso tcp fin stays on the final segment" {
+    const MemoryPort = memory_port.MemoryPort;
+    var a: MemoryPort = undefined;
+    var b: MemoryPort = undefined;
+    var entries: [2]PortEntry = undefined;
+    var fwd: Forwarder = undefined;
+    try setup(&a, &b, &entries, &fwd);
+    defer fwd.deinit();
+    defer b.deinit();
+    defer a.deinit();
+    b.mtu = 2048;
+
+    try fwd.arp.put(testing.allocator, testIp("10.0.2.2"), .{
+        .mac = host_b_mac,
+        .port = port_b,
+        .updated_ms = nowMs(testing.io),
+    });
+
+    var frame: [4200]u8 = undefined;
+    const n = try buildGsoTcpFrame(
+        &frame,
+        port_b_mac,
+        host_a_mac,
+        testIp("10.0.1.2"),
+        testIp("10.0.2.2"),
+        0x19,
+        4000,
+    );
+    try fwd.handle(testing.io, frame[0..n], port_a);
+    try expectSegmentedTcp(&b, 3, 4000, true);
+}
+
+test "gso tcp6 fin stays on the final segment" {
+    const MemoryPort = memory_port.MemoryPort;
+    var a: MemoryPort = undefined;
+    var b: MemoryPort = undefined;
+    var entries: [2]PortEntry = undefined;
+    var fwd: Forwarder = undefined;
+    try setup6(&a, &b, &entries, &fwd);
+    defer fwd.deinit();
+    defer b.deinit();
+    defer a.deinit();
+    b.mtu = 2048;
+
+    try fwd.ndp.putVlan(testing.allocator, testIp6("2001:db8:2::2"), 0, .{
+        .mac = host_b_mac,
+        .port = port_b,
+        .updated_ms = nowMs(testing.io),
+    });
+
+    var tcp_buf: [4020]u8 = @splat(0);
+    const tcp = tcp_buf[0..];
+    writeU16(tcp, 0, 1234);
+    writeU16(tcp, 2, 80);
+    writeU32(tcp, 4, 1000);
+    tcp[12] = 0x50;
+    tcp[13] = 0x19;
+    writeU16(tcp, 14, 0xffff);
+    writeU16(tcp, 16, 0xdead);
+    @memset(tcp[20..], 'g');
+
+    var packet: [4120]u8 = undefined;
+    const ip_len = try ipv6.write(
+        &packet,
+        testIp6("2001:db8:1::2"),
+        testIp6("2001:db8:2::2"),
+        ipv6.Protocol.tcp,
+        64,
+        tcp,
+    );
+    var frame: [4200]u8 = undefined;
+    const hlen = try ethernet.write(&frame, port_b_mac, host_a_mac, ethernet.EtherType.ipv6, null);
+    @memcpy(frame[hlen..][0..ip_len], packet[0..ip_len]);
+    try fwd.handle(testing.io, frame[0 .. hlen + ip_len], port_a);
+    var out: [2048]u8 = undefined;
+    var segments: usize = 0;
+    var payload: usize = 0;
+    var next_seq: u32 = 1000;
+    while (b.queuedTx() != 0) : (segments += 1) {
+        const n = (try b.takeSent(&out)).?;
+        const eth = try ethernet.parse(out[0..n]);
+        const ip = try ipv6.parse(eth.payload);
+        try testing.expect(ip.total_len <= 1500);
+        const tcp_out = ip.payload;
+        try testing.expect(tcp_out.len >= 20);
+        try testing.expectEqual(next_seq, readU32(tcp_out, 4));
+        try testing.expectEqual(
+            @as(u16, 0),
+            ipv6.checksum(ip.src, ip.dst, ip.protocol, tcp_out),
+        );
+        if (b.queuedTx() != 0) {
+            try testing.expectEqual(@as(u8, 0), tcp_out[13] & (TCP_PSH | TCP_FIN));
+        } else {
+            try testing.expect(tcp_out[13] & TCP_PSH != 0);
+            try testing.expect(tcp_out[13] & TCP_FIN != 0);
+        }
+        const chunk = tcp_out.len - 20;
+        payload += chunk;
+        next_seq +%= @intCast(chunk);
+    }
+    try testing.expectEqual(@as(usize, 3), segments);
+    try testing.expectEqual(@as(usize, 4000), payload);
+}
+
+test "bridge segments gso tcp and repairs checksums" {
+    const MemoryPort = memory_port.MemoryPort;
+    var a = MemoryPort.init(testing.allocator, port_a, "a", 1500);
+    defer a.deinit();
+    a.mac = port_a_mac;
+    var b = MemoryPort.init(testing.allocator, port_b, "b", 2048);
+    defer b.deinit();
+    b.mac = port_b_mac;
+
+    const entries = [2]PortEntry{
+        .{ .id = port_a, .config_name = "a", .port = a.port() },
+        .{ .id = port_b, .config_name = "b", .port = b.port() },
+    };
+    const json =
+        \\{
+        \\  "version": 1,
+        \\  "instance": "bridge-gso",
+        \\  "ports": {
+        \\    "a": { "kind": "l2", "device": "a" },
+        \\    "b": { "kind": "l2", "device": "b" }
+        \\  },
+        \\  "bridges": { "br0": { "ports": ["a", "b"] } }
+        \\}
+    ;
+    var parsed = try config_parse.parse(testing.allocator, json);
+    defer parsed.deinit();
+    var fwd = try Forwarder.fromConfig(testing.allocator, testing.io, &parsed.config, &entries);
+    defer fwd.deinit();
+
+    var frame: [4200]u8 = undefined;
+    const n = try buildGsoTcpFrame(
+        &frame,
+        .{ .bytes = .{ 0x02, 0, 0, 0, 0, 0xee } },
+        host_a_mac,
+        testIp("10.0.1.2"),
+        testIp("10.0.2.2"),
+        0x18,
+        4000,
+    );
+    try fwd.handle(testing.io, frame[0..n], port_a);
+    try expectSegmentedTcp(&b, 3, 4000, false);
+    try testing.expectEqual(@as(u64, 3), fwd.counters.bridged);
 }
 
 test "forwarder announces local addresses with gratuitous arp" {

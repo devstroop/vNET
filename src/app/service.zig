@@ -276,7 +276,9 @@ pub fn run(
     defer gpa.free(apply_buf);
     const poll_fds = try gpa.alloc(std.posix.pollfd, port_entries.len);
     defer gpa.free(poll_fds);
-    const rx_frame_max = 2048;
+    // AF_PACKET can hand us a GSO super-frame up to the IPv4/IPv6 64 KiB
+    // limit; the extra room covers the Ethernet header and a VLAN tag.
+    const rx_frame_max = 65_600;
     const rx_batch_max = 64;
     const rx_storage = try gpa.alloc(u8, rx_batch_max * rx_frame_max);
     defer gpa.free(rx_storage);

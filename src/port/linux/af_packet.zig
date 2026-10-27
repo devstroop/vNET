@@ -128,6 +128,10 @@ pub const AfPacketPort = struct {
             switch (std.posix.errno(rc)) {
                 .SUCCESS => {
                     if (rc == 0) return null;
+                    if (msg.flags & linux.MSG.TRUNC != 0) {
+                        self.stats.drops += 1;
+                        continue;
+                    }
                     if (src.pkttype == linux.PACKET.OUTGOING) {
                         // Fallback for kernels without PACKET_IGNORE_OUTGOING.
                         self.stats.drops += 1;
@@ -203,6 +207,10 @@ pub const AfPacketPort = struct {
             frames[i].len = 0;
             const len: usize = msgs[i].len;
             if (len == 0) continue;
+            if (msgs[i].hdr.flags & linux.MSG.TRUNC != 0) {
+                self.stats.drops += 1;
+                continue;
+            }
             if (addrs[i].pkttype == linux.PACKET.OUTGOING) {
                 // Fallback for kernels without PACKET_IGNORE_OUTGOING.
                 self.stats.drops += 1;

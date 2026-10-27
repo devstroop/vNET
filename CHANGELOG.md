@@ -27,6 +27,16 @@ All notable changes to vNET are documented here. The format follows
   pre-rename daemon with the old `vrouter down` before upgrading; `/run/vrouter`
   state is not migrated.
 
+### Fixed
+
+- **TCP GSO ingress and bridge checksums:** AF_PACKET now accepts full TCP
+  super-frames, splits them to at most the ingress MTU (capped at 1500 bytes)
+  before bridge/L3/NAT, and only the final segment keeps PSH/FIN. The bridge
+  path repairs IPv4/IPv6 transport
+  checksums and `MSG_TRUNC` frames are counted as drops. This fixes truncated
+  1 MiB TCP transfers through veth peers; UDP and other GSO protocols remain
+  unsupported. See ADR-007 and `docs/PERFORMANCE.md`.
+
 ### Added
 
 - **Linux release tooling:** `scripts/package.sh` builds a release tarball, a
