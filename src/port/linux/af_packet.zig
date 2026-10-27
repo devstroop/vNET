@@ -654,13 +654,13 @@ test "finishBatch keeps dropped slots empty without aliasing" {
         .{ .data = &b },
         .{ .data = &c },
     };
-    var msgs = [_]linux.mmsghdr{std.mem.zeroes(linux.mmsghdr)} ** 3;
+    var msgs: [3]linux.mmsghdr = @splat(std.mem.zeroes(linux.mmsghdr));
     msgs[0].len = 14;
     msgs[1].len = 14;
     msgs[2].len = 14;
-    var addrs = [_]linux.sockaddr.ll{std.mem.zeroes(linux.sockaddr.ll)} ** 3;
+    var addrs: [3]linux.sockaddr.ll = @splat(std.mem.zeroes(linux.sockaddr.ll));
     addrs[1].pkttype = linux.PACKET.OUTGOING;
-    var controls = [_][128]u8{[_]u8{0} ** 128} ** 3;
+    var controls: [3][128]u8 = @splat(@as([128]u8, @splat(0)));
     var port = AfPacketPort{ .fd = -1, .id = .invalid, .ifindex = 0 };
 
     const got = port.finishBatch(&frames, &msgs, &addrs, &controls, 3);

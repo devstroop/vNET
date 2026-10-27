@@ -74,6 +74,7 @@ trap 'rm -rf "$WORK"' EXIT INT TERM
 STAGE="$WORK/stage"
 TARROOT="$WORK/tar/vnet-$VERSION"
 mkdir -p "$STAGE/usr" "$TARROOT" "$OUT"
+OUT="$(cd "$OUT" && pwd)"
 
 echo "==> building vNET $VERSION for $ARCH${TARGET:+ ($TARGET)}"
 build_args=(--release=fast --prefix "$STAGE/usr")
