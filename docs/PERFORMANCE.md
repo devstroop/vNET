@@ -52,37 +52,45 @@ Use `--no-build` only after `zig build --release=fast`; a debug `zig-out` gives 
 
 ## Results
 
-Measured 2026-10-26. Throughput is server-received end-to-end traffic.
+Measured 2026-10-27. Median of three runs; throughput is server-received
+end-to-end traffic.
 
 | Scenario | 64 B UDP | 1400 B UDP | 256 MiB TCP | UDP RTT p99 |
 |---|---:|---:|---:|---:|
-| L3 forward | 165,957 pps / 0.085 Gbps | 1.613 Gbps | 1.014 Gbps | 92.9 us |
-| L2 bridge | 199,892 pps / 0.102 Gbps | 2.060 Gbps | 1.338 Gbps | 103.1 us |
-| SNAT (masquerade) | 160,536 pps / 0.082 Gbps | 1.665 Gbps | 0.992 Gbps | 100.7 us |
+| L3 forward | 244,385 pps / 0.125 Gbps | 2.417 Gbps | 1.487 Gbps | 122.9 us |
+| L2 bridge | 258,084 pps / 0.132 Gbps | 2.613 Gbps | 1.856 Gbps | 122.7 us |
+| SNAT (masquerade) | 235,570 pps / 0.121 Gbps | 2.373 Gbps | 1.477 Gbps | 154.0 us |
 
-The sender offered about 391–493 kpps at 64 B, so the receiver is the
-forwarding bottleneck, not the traffic generator. At 1400 B the sender offered
-360–451 kpps.
+The sender offered about 403–412 kpps at 64 B, so the receiver is the
+forwarding bottleneck. At 1400 B the sender offered 368–370 kpps. The same
+generator cannot offer 1 Mpps, so the 64 B gate is not measurable end-to-end
+with this harness yet; use a raw/multi-queue generator before signing it off.
+
+A second three-run set on the same host at a higher CPU frequency measured
+369 kpps / 3.75 Gbps for L3, 392 kpps / 3.91 Gbps for L2 and 349 kpps /
+3.55 Gbps for NAT. The frequency-scaling spread is larger than the code-change
+effect; gate on a pinned-frequency host.
 
 ## Budget status
 
 | CORE-SCOPE §12 budget | Result | Status |
 |---|---|---|
-| L3 forward, 1500 B: >= 1 Gbps | 1.613 Gbps (1400 B payload) | met |
-| L3 forward, 64 B: >= 1 Mpps | 166 kpps | **not met** |
-| L2 bridge: >= 2 Gbps | 2.060 Gbps | met, marginal |
-| SNAT: >= 800 Mbps | 1.665 Gbps | met |
-| Added latency: p99 < 1 ms | 93–103 us | met |
+| L3 forward, 1500 B: >= 1 Gbps | 2.417 Gbps (1400 B payload) | met |
+| L3 forward, 64 B: >= 1 Mpps | 244 kpps | **not met** |
+| L2 bridge: >= 2 Gbps | 2.613 Gbps | met |
+| SNAT: >= 800 Mbps | 2.373 Gbps | met |
+| Added latency: p99 < 1 ms | 123–154 us | met |
 
 The 64 B test uses a 64 B UDP payload, about 106 B on the wire, so it is not a
-smaller workload than the stated budget. The current datapath processes one
-packet per `recvmsg`/`sendmsg` cycle and does not use `recvmmsg`, `sendmmsg`,
-`PACKET_MMAP`/TPACKET_V3 rings or multiple RX queues. Reaching 1 Mpps needs
-those changes, not tuning alone.
+smaller workload than the stated budget. AF_PACKET now uses 64-frame
+`recvmmsg`/`sendmmsg` batches, and the service flushes queued TX frames once
+per loop. That raised the 64 B L3 result from 166 kpps to about 244 kpps, but it
+is still far from 1 Mpps. The remaining work is `PACKET_MMAP`/TPACKET_V3 rings,
+multi-queue veths and a faster raw-packet generator; syscall batching alone is
+not enough.
 
-The 2.060 Gbps L2 result is close enough to the 2 Gbps budget that run-to-run
-variation can move it below the line. Report a median of at least three runs
-before signing off.
+The L2 result is above budget, but these are still synthetic-netns numbers;
+re-run on a quiet, frequency-pinned host before signing off.
 
 ## GSO and checksum caveat
 
@@ -97,8 +105,8 @@ treat GSO support as release-blocking for those deployments.
 
 ## Next measurements
 
-- Three runs per scenario on a fixed-frequency reference host.
-- 64 B with `recvmmsg`/`sendmmsg` batching and multi-queue veths after datapath
-  work.
+- The same three-run matrix on a fixed-frequency, quiet reference host.
+- 64 B with `PACKET_MMAP`/TPACKET_V3 rings, multi-queue veths and a raw-packet
+  generator that can offer at least 1 Mpps.
 - 24 h soak results from `scripts/soak.sh`, including restart and flap counts.
 - Conntrack table pressure and GC behavior at the documented cap.

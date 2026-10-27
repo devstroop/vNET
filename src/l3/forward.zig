@@ -11,6 +11,7 @@ const port_mod = @import("vnet-port").port;
 const schema = @import("vnet-core").config_schema;
 const ethernet = @import("vnet-l2").ethernet;
 const stp = @import("vnet-l2").stp;
+const fdb_mod = @import("vnet-l2").fdb;
 const ipv4 = @import("vnet-l3").ipv4;
 const ipv6 = @import("vnet-l3").ipv6;
 const icmpv6 = @import("vnet-l3").icmpv6;
@@ -188,11 +189,6 @@ pub const Bridge = struct {
         }
         return false;
     }
-};
-
-const FdbEntry = struct {
-    port: types.PortId,
-    updated_ms: i64,
 };
 
 fn stpPortIndex(bridge: Bridge, port: types.PortId) ?usize {
@@ -396,7 +392,7 @@ pub const Forwarder = struct {
     dhcp_pending: [dhcp_pending_slots]PendingDhcpOffer = @splat(.{}),
     storm_limiters: []rate.Limiter = &.{},
     bridges: std.ArrayListUnmanaged(Bridge) = .empty,
-    fdb: std.AutoHashMapUnmanaged(u128, FdbEntry) = .empty,
+    fdb: fdb_mod.Fdb = .{},
     last_maintenance_ms: i64 = 0,
     icmp_limiter: rate.Limiter = .{},
     arp_limiter: rate.Limiter = .{},
@@ -424,6 +420,11 @@ pub const Forwarder = struct {
             .conntrack = try conntrack_mod.Conntrack.init(gpa, conntrack_entries),
         };
         errdefer self.conntrack.deinit();
+        self.fdb = fdb_mod.Fdb.init(gpa, fdb_max_entries) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.InvalidCapacity => return error.InvalidArgument,
+        };
+        errdefer self.fdb.deinit(gpa);
         try self.arp.reserve(gpa, 64);
         errdefer self.arp.deinit(gpa);
         try self.ndp.reserve(gpa, 64);
@@ -703,11 +704,18 @@ pub const Forwarder = struct {
         return .{};
     }
 
-    pub fn tick(self: *Forwarder, io: std.Io) void {
-        const now = nowMs(io);
+    fn gcTables(self: *Forwarder, now: i64) void {
+        self.gcPending(now);
+        self.gcPending6(now);
         if (now - self.conntrack.last_gc_ms >= conntrack_mod.gc_interval_ms) {
             self.conntrack.gc(now);
         }
+    }
+
+    pub fn tick(self: *Forwarder, io: std.Io) void {
+        defer self.flush(io);
+        const now = nowMs(io);
+        self.gcTables(now);
         if (now - self.last_maintenance_ms >= maintenance_interval_ms) {
             self.arp.prune(now, arp_ttl_ms);
             self.ndp.prune(now, ndp_ttl_ms);
@@ -1222,6 +1230,7 @@ pub const Forwarder = struct {
     /// Sends a gratuitous ARP request for every local address so peers refresh
     /// their neighbor caches after an address change or daemon restart.
     pub fn announce(self: *Forwarder, io: std.Io) PortError!void {
+        defer self.flush(io);
         for (self.local.items) |local| {
             const entry = self.portById(local.port) orelse continue;
             const info = entry.port.info();
@@ -1248,16 +1257,31 @@ pub const Forwarder = struct {
         }
     }
 
+    /// Pushes frames queued by `writeQueued` on every port. The service loop
+    /// flushes once after processing a batch; this is for direct callers of
+    /// `handle`, `tick` and `announce`.
+    pub fn flush(self: *Forwarder, io: std.Io) void {
+        for (self.ports) |entry| {
+            entry.port.flush(io) catch {};
+        }
+    }
+
     pub fn handle(
         self: *Forwarder,
         io: std.Io,
         frame: []const u8,
         ingress: types.PortId,
     ) PortError!void {
-        return self.handleAt(io, frame, ingress, nowMs(io));
+        const now = nowMs(io);
+        self.gcTables(now);
+        defer self.flush(io);
+        return self.handleAt(io, frame, ingress, now);
     }
 
-    fn handleAt(
+    /// Hot-path entry point for callers that already have a timestamp and
+    /// flush their ports once per batch (as the service loop does). `handle`,
+    /// `tick` and `announce` flush for standalone callers.
+    pub fn handleAt(
         self: *Forwarder,
         io: std.Io,
         frame: []const u8,
@@ -1265,11 +1289,6 @@ pub const Forwarder = struct {
         now: i64,
     ) PortError!void {
         self.counters.rx_frames += 1;
-        self.gcPending(now);
-        self.gcPending6(now);
-        if (now - self.conntrack.last_gc_ms >= conntrack_mod.gc_interval_ms) {
-            self.conntrack.gc(now);
-        }
 
         const ingress_entry = self.portById(ingress) orelse {
             self.counters.dropped += 1;
@@ -1289,7 +1308,7 @@ pub const Forwarder = struct {
                 self.counters.dropped += 1;
                 return;
             };
-            try self.handleIpv4(io, null, ip, ingress, 0);
+            try self.handleIpv4(io, null, ip, ingress, 0, now);
             return;
         }
 
@@ -1353,7 +1372,7 @@ pub const Forwarder = struct {
                     self.counters.dropped += 1;
                     return;
                 };
-                try self.handleIpv4(io, eth, ip, ingress, vlan);
+                try self.handleIpv4(io, eth, ip, ingress, vlan, now);
                 if (bridge) |b| {
                     if (eth.dst.isMulticast()) {
                         try self.bridgeForward(io, b, frame, eth, ingress, vlan, now);
@@ -1412,23 +1431,7 @@ pub const Forwarder = struct {
 
     fn learnFdb(self: *Forwarder, bridge_id: u32, vlan: u16, mac: types.Mac, port: types.PortId, now: i64) void {
         const key = fdbKey(bridge_id, vlan, mac);
-        if (self.fdb.getPtr(key)) |slot| {
-            slot.* = .{ .port = port, .updated_ms = now };
-            return;
-        }
-        if (self.fdb.count() >= fdb_max_entries) {
-            var oldest_key: u128 = 0;
-            var oldest_ms: i64 = std.math.maxInt(i64);
-            var it = self.fdb.iterator();
-            while (it.next()) |entry| {
-                if (entry.value_ptr.updated_ms < oldest_ms) {
-                    oldest_ms = entry.value_ptr.updated_ms;
-                    oldest_key = entry.key_ptr.*;
-                }
-            }
-            _ = self.fdb.remove(oldest_key);
-        }
-        self.fdb.put(self.gpa, key, .{ .port = port, .updated_ms = now }) catch {};
+        self.fdb.learn(key, .{ .port = port, .updated_ms = now });
     }
 
     fn handleStp(
@@ -1495,7 +1498,7 @@ pub const Forwarder = struct {
             null,
         ) catch return;
         @memcpy(frame[hlen..][0..stp.payload_len], &payload);
-        entry.port.write(io, frame[0 .. hlen + stp.payload_len]) catch {
+        entry.port.writeQueued(io, frame[0 .. hlen + stp.payload_len]) catch {
             self.counters.dropped += 1;
             return;
         };
@@ -1584,15 +1587,12 @@ pub const Forwarder = struct {
         if (eth.payload.len > out.len - hlen) return error.FrameTooLarge;
         if (eth.payload.len > info.mtu) return error.FrameTooLarge;
         @memcpy(out[hlen..][0..eth.payload.len], eth.payload);
-        try entry.port.write(io, out[0 .. hlen + eth.payload.len]);
+        try entry.port.writeQueued(io, out[0 .. hlen + eth.payload.len]);
         self.counters.bridged += 1;
     }
 
     fn pruneFdb(self: *Forwarder, now: i64) void {
-        var it = self.fdb.iterator();
-        while (it.next()) |entry| {
-            if (now - entry.value_ptr.updated_ms > fdb_ttl_ms) self.fdb.removeByPtr(entry.key_ptr);
-        }
+        _ = self.fdb.prune(now, fdb_ttl_ms);
     }
 
     fn handleArp(
@@ -2033,9 +2033,9 @@ pub const Forwarder = struct {
         ip: ipv4.Header,
         ingress: types.PortId,
         vlan: u16,
+        now: i64,
     ) PortError!void {
         const total: usize = ip.total_len;
-        const now = nowMs(io);
         if (try self.handleDhcpClient(io, ip, ingress, now)) return;
         if (try self.handleDhcp(io, ip, ingress, vlan, now)) return;
         if (try self.translateIcmpError(io, eth, ip, ingress, vlan, now)) return;
@@ -2469,7 +2469,7 @@ pub const Forwarder = struct {
                 self.counters.dropped += 1;
                 return;
             };
-            try egress.port.write(io, out[0..total]);
+            try egress.port.writeQueued(io, out[0..total]);
             self.counters.forwarded += 1;
             return;
         }
@@ -2733,7 +2733,7 @@ pub const Forwarder = struct {
                 return;
             };
             fixTransportChecksum6(out[0..total]);
-            egress.port.write(io, out[0..total]) catch {
+            egress.port.writeQueued(io, out[0..total]) catch {
                 self.counters.dropped += 1;
                 self.counters.ipv6_dropped += 1;
                 return;
@@ -3016,7 +3016,7 @@ pub const Forwarder = struct {
     ) PortError!void {
         const entry = self.portById(egress) orelse return error.NotFound;
         if (entry.port.info().kind == .tun) {
-            try entry.port.write(io, packet);
+            try entry.port.writeQueued(io, packet);
             return;
         }
         const l2 = eth orelse return error.Unsupported;
@@ -3705,7 +3705,7 @@ pub const Forwarder = struct {
                 self.counters.dropped += 1;
                 return true;
             };
-            try egress.port.write(io, out[0..total]);
+            try egress.port.writeQueued(io, out[0..total]);
             self.counters.forwarded += 1;
             return true;
         }
@@ -3849,7 +3849,7 @@ pub const Forwarder = struct {
         };
 
         if (info.kind == .tun) {
-            try entry.port.write(io, ip_buf[0..ip_len]);
+            try entry.port.writeQueued(io, ip_buf[0..ip_len]);
             self.counters.local_delivered += 1;
             return;
         }
@@ -3918,7 +3918,7 @@ pub const Forwarder = struct {
         ) catch return;
 
         if (info.kind == .tun) {
-            try entry.port.write(io, ip_buf[0..ip_len]);
+            try entry.port.writeQueued(io, ip_buf[0..ip_len]);
             self.counters.icmp_errors += 1;
             return;
         }
@@ -4111,7 +4111,7 @@ pub const Forwarder = struct {
         if (payload.len > frame.len - hlen) return error.FrameTooLarge;
         if (payload.len > info.mtu) return error.FrameTooLarge;
         @memcpy(frame[hlen..][0..payload.len], payload);
-        try entry.port.write(io, frame[0 .. hlen + payload.len]);
+        try entry.port.writeQueued(io, frame[0 .. hlen + payload.len]);
     }
 
     fn isLocal(self: *const Forwarder, ip: types.Ipv4, vlan: u16) bool {
@@ -4879,6 +4879,135 @@ const port_b_mac: types.Mac = .{ .bytes = .{ 0x02, 0, 0, 0, 0, 0x0b } };
 const host_a_mac: types.Mac = .{ .bytes = .{ 0x02, 0, 0, 0, 0, 0x02 } };
 const host_b_mac: types.Mac = .{ .bytes = .{ 0x02, 0, 0, 0, 0, 0x03 } };
 
+const FlushPort = struct {
+    id: types.PortId,
+    mac: types.Mac,
+    mtu: u16 = 1500,
+    queued: usize = 0,
+    flushed: usize = 0,
+    sync_writes: usize = 0,
+    closed: bool = false,
+
+    fn port(self: *FlushPort) port_mod.Port {
+        return .{ .ctx = self, .vtable = &flush_vtable };
+    }
+
+    fn readImpl(self: *FlushPort, buf: []u8) PortError!?usize {
+        _ = self;
+        _ = buf;
+        return null;
+    }
+
+    fn writeImpl(self: *FlushPort, frame: []const u8) PortError!void {
+        _ = frame;
+        self.sync_writes += 1;
+    }
+
+    fn writeQueuedImpl(self: *FlushPort, frame: []const u8) PortError!void {
+        if (self.closed) return error.Closed;
+        _ = frame;
+        self.queued += 1;
+    }
+
+    fn flushImpl(self: *FlushPort) PortError!void {
+        if (self.closed) return error.Closed;
+        self.flushed += self.queued;
+        self.queued = 0;
+    }
+
+    fn infoImpl(self: *const FlushPort) port_mod.PortInfo {
+        return .{
+            .id = self.id,
+            .name = "flush0",
+            .kind = .ethernet,
+            .mac = self.mac,
+            .mtu = self.mtu,
+            .link = .up,
+            .capabilities = .{ .l2 = true, .can_set_mtu = true },
+        };
+    }
+
+    fn closeImpl(self: *FlushPort) void {
+        self.closed = true;
+    }
+};
+
+const flush_vtable = port_mod.Port.VTable{
+    .read = flushRead,
+    .write = flushWrite,
+    .pollFd = flushPollFd,
+    .info = flushInfo,
+    .stats = flushStats,
+    .refresh = flushRefresh,
+    .setUp = flushSetUp,
+    .setMtu = flushSetMtu,
+    .close = flushClose,
+    .write_queued = flushWriteQueued,
+    .flush = flushFlush,
+};
+
+fn flushRead(ctx: *anyopaque, io: std.Io, buf: []u8) PortError!?usize {
+    _ = io;
+    const self: *FlushPort = @ptrCast(@alignCast(ctx));
+    return self.readImpl(buf);
+}
+
+fn flushWrite(ctx: *anyopaque, io: std.Io, frame: []const u8) PortError!void {
+    _ = io;
+    const self: *FlushPort = @ptrCast(@alignCast(ctx));
+    return self.writeImpl(frame);
+}
+
+fn flushWriteQueued(ctx: *anyopaque, io: std.Io, frame: []const u8) PortError!void {
+    _ = io;
+    const self: *FlushPort = @ptrCast(@alignCast(ctx));
+    return self.writeQueuedImpl(frame);
+}
+
+fn flushFlush(ctx: *anyopaque, io: std.Io) PortError!void {
+    _ = io;
+    const self: *FlushPort = @ptrCast(@alignCast(ctx));
+    return self.flushImpl();
+}
+
+fn flushPollFd(ctx: *anyopaque) ?std.posix.fd_t {
+    _ = ctx;
+    return null;
+}
+
+fn flushInfo(ctx: *anyopaque) port_mod.PortInfo {
+    const self: *FlushPort = @ptrCast(@alignCast(ctx));
+    return self.infoImpl();
+}
+
+fn flushStats(ctx: *anyopaque) port_mod.Stats {
+    _ = ctx;
+    return .{};
+}
+
+fn flushRefresh(ctx: *anyopaque, io: std.Io) PortError!void {
+    _ = ctx;
+    _ = io;
+}
+
+fn flushSetUp(ctx: *anyopaque, io: std.Io, up: bool) PortError!void {
+    _ = ctx;
+    _ = io;
+    _ = up;
+}
+
+fn flushSetMtu(ctx: *anyopaque, io: std.Io, mtu: u16) PortError!void {
+    _ = io;
+    const self: *FlushPort = @ptrCast(@alignCast(ctx));
+    self.mtu = mtu;
+}
+
+fn flushClose(ctx: *anyopaque, io: std.Io) void {
+    _ = io;
+    const self: *FlushPort = @ptrCast(@alignCast(ctx));
+    self.closeImpl();
+}
+
 fn writeStpTestFrame(
     buf: []u8,
     root: u64,
@@ -4950,6 +5079,25 @@ fn setup(
     try fwd.addLocal(testPrefix("10.0.2.1/24"), port_b, 0);
     try fwd.addRoute(.{ .prefix = testNet("10.0.1.0/24"), .port = port_a, .kind = .connected });
     try fwd.addRoute(.{ .prefix = testNet("10.0.2.0/24"), .port = port_b, .kind = .connected });
+}
+
+test "handle flushes queued egress frames for direct callers" {
+    var p = FlushPort{ .id = port_a, .mac = port_a_mac };
+    var entries = [_]PortEntry{
+        .{ .id = port_a, .config_name = "a", .port = p.port() },
+    };
+    var fwd = try Forwarder.init(testing.allocator, &entries);
+    defer fwd.deinit();
+    try fwd.addLocal(testPrefix("10.0.1.1/24"), port_a, 0);
+    try fwd.addRoute(.{ .prefix = testNet("10.0.1.0/24"), .port = port_a, .kind = .connected });
+
+    var frame: [64]u8 = undefined;
+    const n = try buildArpRequest(&frame, host_a_mac, testIp("10.0.1.2"), testIp("10.0.1.1"));
+    try fwd.handle(testing.io, frame[0..n], port_a);
+
+    try testing.expectEqual(@as(usize, 0), p.sync_writes);
+    try testing.expectEqual(@as(usize, 1), p.flushed);
+    try testing.expectEqual(@as(usize, 0), p.queued);
 }
 
 fn flushDhcpOffers(fwd: *Forwarder) void {

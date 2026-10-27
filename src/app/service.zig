@@ -7,6 +7,7 @@ const control_transaction = @import("vnet-ctl").transaction;
 const types = @import("vnet-core").types;
 const log = @import("vnet-core").log;
 const manager_mod = @import("vnet-port").manager;
+const port_mod = @import("vnet-port").port;
 const forward = @import("../l3/forward.zig");
 const dhcp_leases = @import("vnet-dhcp").leases;
 const dhcp_server = @import("vnet-dhcp").server;
@@ -275,7 +276,14 @@ pub fn run(
     defer gpa.free(apply_buf);
     const poll_fds = try gpa.alloc(std.posix.pollfd, port_entries.len);
     defer gpa.free(poll_fds);
-    var buf: [2048]u8 = undefined;
+    const rx_frame_max = 2048;
+    const rx_batch_max = 64;
+    const rx_storage = try gpa.alloc(u8, rx_batch_max * rx_frame_max);
+    defer gpa.free(rx_storage);
+    var rx_frames: [rx_batch_max]port_mod.BatchFrame = undefined;
+    for (&rx_frames, 0..) |*frame, index| {
+        frame.* = .{ .data = rx_storage[index * rx_frame_max ..][0..rx_frame_max] };
+    }
     var netlink_tick: u8 = 0;
     var lease_save_ms = nowMs(io);
     var control_tick_ms = started_ms;
@@ -394,17 +402,26 @@ pub fn run(
         var did_work = false;
         for (port_entries) |entry| {
             var budget: usize = 0;
-            while (budget < port_rx_budget) : (budget += 1) {
-                const maybe_frame = entry.port.read(io, &buf) catch |err| {
+            while (budget < port_rx_budget) {
+                const count = entry.port.readBatch(io, &rx_frames) catch |err| {
                     logger.debug("read {s}: {s}", .{ entry.config_name, @errorName(err) });
                     break;
                 };
-                if (maybe_frame == null) break;
-                did_work = true;
-                forwarder.handle(io, buf[0..maybe_frame.?], entry.id) catch |err| {
-                    logger.debug("forward {s}: {s}", .{ entry.config_name, @errorName(err) });
-                };
+                if (count == 0) break;
+                for (rx_frames[0..count]) |frame| {
+                    if (frame.len == 0) continue;
+                    did_work = true;
+                    forwarder.handleAt(io, frame.data[0..frame.len], entry.id, now) catch |err| {
+                        logger.debug("forward {s}: {s}", .{ entry.config_name, @errorName(err) });
+                    };
+                }
+                budget += count;
             }
+        }
+        for (port_entries) |entry| {
+            entry.port.flush(io) catch |err| {
+                logger.debug("flush {s}: {s}", .{ entry.config_name, @errorName(err) });
+            };
         }
 
         if (!did_work) {

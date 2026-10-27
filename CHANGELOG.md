@@ -8,6 +8,14 @@ All notable changes to vNET are documented here. The format follows
 
 ### Changed
 
+- **Preallocated bridge FDB:** MAC learning now uses a fixed 4096-entry table
+  with FIFO eviction, removing allocation and full-table scans from the frame
+  path.
+- **Batched AF_PACKET datapath:** ports now use 64-frame `recvmmsg`/`sendmmsg`
+  batches and flush TX once per service loop; `handle`, `tick` and `announce`
+  flush immediately for standalone callers. 64 B L3 UDP rose from about 166 to
+  244 kpps; 1400 B L3/L2/NAT is about 2.42/2.61/2.37 Gbps. The 1 Mpps 64 B
+  budget remains open; see `docs/PERFORMANCE.md`.
 - Bump the development version to 0.2.0 for the Linux preview. This is not a
   release tag; see `docs/RELEASE.md` for the remaining gates.
 - **Breaking:** rename the project from vRouter to vNET (ADR-017). Use `vNET`

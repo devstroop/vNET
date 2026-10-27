@@ -20,6 +20,9 @@ const PACKET_IGNORE_OUTGOING: u32 = 23;
 const PACKET_MR_PROMISC: u16 = 1;
 const TP_STATUS_VLAN_VALID: u32 = 1 << 4;
 const TP_STATUS_VLAN_TPID_VALID: u32 = 1 << 6;
+const rx_batch_max = 64;
+const tx_batch_max = 64;
+const frame_max = 2048;
 
 const TpacketAuxdata = extern struct {
     tp_status: u32,
@@ -51,6 +54,9 @@ pub const AfPacketPort = struct {
     ignore_outgoing: bool = true,
     closed: bool = false,
     stats: port_mod.Stats = .{},
+    tx_count: u8 = 0,
+    tx_lens: [tx_batch_max]u16 = @splat(0),
+    tx_storage: [tx_batch_max][frame_max]u8 = undefined,
 
     pub const Config = struct {
         name: []const u8,
@@ -144,13 +150,153 @@ pub const AfPacketPort = struct {
         }
     }
 
+    fn readBatchImpl(self: *AfPacketPort, frames: []port_mod.BatchFrame) PortError!usize {
+        if (self.closed) return error.Closed;
+        if (!self.link_up) return 0;
+        const count = @min(frames.len, rx_batch_max);
+        if (count == 0) return 0;
+
+        var msgs: [rx_batch_max]linux.mmsghdr = undefined;
+        var iovs: [rx_batch_max]std.posix.iovec = undefined;
+        var addrs: [rx_batch_max]linux.sockaddr.ll = undefined;
+        var controls: [rx_batch_max][128]u8 align(@alignOf(usize)) = undefined;
+        for (frames[0..count], 0..) |*frame, i| {
+            iovs[i] = .{ .base = frame.data.ptr, .len = frame.data.len };
+            addrs[i] = std.mem.zeroes(linux.sockaddr.ll);
+            controls[i] = undefined;
+            msgs[i] = .{
+                .hdr = .{
+                    .name = @ptrCast(&addrs[i]),
+                    .namelen = @sizeOf(@TypeOf(addrs[i])),
+                    .iov = @ptrCast(&iovs[i]),
+                    .iovlen = 1,
+                    .control = &controls[i],
+                    .controllen = controls[i].len,
+                    .flags = 0,
+                },
+                .len = 0,
+            };
+        }
+
+        const rc = linux.recvmmsg(self.fd, &msgs, @intCast(count), 0, null);
+        switch (std.posix.errno(rc)) {
+            .SUCCESS => {
+                return self.finishBatch(frames, &msgs, &addrs, &controls, rc);
+            },
+            .AGAIN, .INTR => return 0,
+            else => |e| return sys.mapErr(e),
+        }
+    }
+
+    fn finishBatch(
+        self: *AfPacketPort,
+        frames: []port_mod.BatchFrame,
+        msgs: []const linux.mmsghdr,
+        addrs: []const linux.sockaddr.ll,
+        controls: []const [128]u8,
+        received: usize,
+    ) usize {
+        // Keep every accepted frame in its original slot. The caller reuses
+        // this descriptor array, so compacting would leave duplicate buffer
+        // pointers in the slots after the returned count.
+        for (0..received) |i| {
+            frames[i].len = 0;
+            const len: usize = msgs[i].len;
+            if (len == 0) continue;
+            if (addrs[i].pkttype == linux.PACKET.OUTGOING) {
+                // Fallback for kernels without PACKET_IGNORE_OUTGOING.
+                self.stats.drops += 1;
+                continue;
+            }
+            const frame_len = if (auxVlanTci(controls[i][0..msgs[i].hdr.controllen])) |tci|
+                restoreVlan(frames[i].data, len, tci) orelse {
+                    self.stats.drops += 1;
+                    continue;
+                }
+            else
+                len;
+            frames[i].len = frame_len;
+            self.stats.rx_packets += 1;
+            self.stats.rx_bytes += frame_len;
+        }
+        return received;
+    }
+
     fn writeImpl(self: *AfPacketPort, frame: []const u8) PortError!void {
+        try self.writeQueuedImpl(frame);
+        self.flushImpl() catch |err| {
+            if (err == error.WouldBlock) {
+                // The frame is still queued; remove it so a caller that retries
+                // `write` after `WouldBlock` does not enqueue a duplicate.
+                self.tx_count -= 1;
+            }
+            return err;
+        };
+    }
+
+    fn writeQueuedImpl(self: *AfPacketPort, frame: []const u8) PortError!void {
         if (self.closed) return error.Closed;
         if (!self.link_up) return error.LinkDown;
+        if (frame.len > frame_max) return error.FrameTooLarge;
 
-        try sys.write(self.fd, frame);
-        self.stats.tx_packets += 1;
-        self.stats.tx_bytes += frame.len;
+        if (self.tx_count >= tx_batch_max) {
+            try self.flushImpl();
+        }
+        const index: usize = self.tx_count;
+        @memcpy(self.tx_storage[index][0..frame.len], frame);
+        self.tx_lens[index] = @intCast(frame.len);
+        self.tx_count += 1;
+    }
+
+    fn flushImpl(self: *AfPacketPort) PortError!void {
+        if (self.closed) return error.Closed;
+        if (self.tx_count == 0) return;
+        const count: usize = self.tx_count;
+        var msgs: [tx_batch_max]linux.mmsghdr = undefined;
+        var iovs: [tx_batch_max]std.posix.iovec = undefined;
+        for (0..count) |i| {
+            iovs[i] = .{ .base = self.tx_storage[i][0..].ptr, .len = self.tx_lens[i] };
+            msgs[i] = .{
+                .hdr = .{
+                    .name = null,
+                    .namelen = 0,
+                    .iov = @ptrCast(&iovs[i]),
+                    .iovlen = 1,
+                    .control = null,
+                    .controllen = 0,
+                    .flags = 0,
+                },
+                .len = 0,
+            };
+        }
+
+        const rc = linux.sendmmsg(self.fd, &msgs, @intCast(count), 0);
+        switch (std.posix.errno(rc)) {
+            .SUCCESS => {
+                const sent: usize = rc;
+                if (sent == 0) return error.WouldBlock;
+                for (0..sent) |i| {
+                    self.stats.tx_packets += 1;
+                    self.stats.tx_bytes += self.tx_lens[i];
+                }
+                if (sent < count) {
+                    const remaining = count - sent;
+                    for (0..remaining) |i| {
+                        self.tx_storage[i] = self.tx_storage[sent + i];
+                        self.tx_lens[i] = self.tx_lens[sent + i];
+                    }
+                    self.tx_count = @intCast(remaining);
+                } else {
+                    self.tx_count = 0;
+                }
+            },
+            .AGAIN, .INTR => return error.WouldBlock,
+            else => |e| {
+                self.stats.drops += count;
+                self.tx_count = 0;
+                return sys.mapErr(e);
+            },
+        }
     }
 
     fn infoImpl(self: *AfPacketPort) port_mod.PortInfo {
@@ -212,6 +358,7 @@ pub const AfPacketPort = struct {
 
     fn closeImpl(self: *AfPacketPort) void {
         if (self.closed) return;
+        self.flushImpl() catch {};
         sys.close(self.fd);
         self.closed = true;
     }
@@ -335,6 +482,9 @@ const vtable = port_mod.Port.VTable{
     .setUp = vSetUp,
     .setMtu = vSetMtu,
     .close = vClose,
+    .read_batch = vReadBatch,
+    .write_queued = vWriteQueued,
+    .flush = vFlush,
 };
 
 fn vRead(ctx: *anyopaque, io: std.Io, buf: []u8) PortError!?usize {
@@ -343,10 +493,32 @@ fn vRead(ctx: *anyopaque, io: std.Io, buf: []u8) PortError!?usize {
     return self.readImpl(buf);
 }
 
+fn vReadBatch(
+    ctx: *anyopaque,
+    io: std.Io,
+    frames: []port_mod.BatchFrame,
+) PortError!usize {
+    _ = io;
+    const self: *AfPacketPort = @ptrCast(@alignCast(ctx));
+    return self.readBatchImpl(frames);
+}
+
 fn vWrite(ctx: *anyopaque, io: std.Io, frame: []const u8) PortError!void {
     _ = io;
     const self: *AfPacketPort = @ptrCast(@alignCast(ctx));
     return self.writeImpl(frame);
+}
+
+fn vWriteQueued(ctx: *anyopaque, io: std.Io, frame: []const u8) PortError!void {
+    _ = io;
+    const self: *AfPacketPort = @ptrCast(@alignCast(ctx));
+    return self.writeQueuedImpl(frame);
+}
+
+fn vFlush(ctx: *anyopaque, io: std.Io) PortError!void {
+    _ = io;
+    const self: *AfPacketPort = @ptrCast(@alignCast(ctx));
+    return self.flushImpl();
 }
 
 fn vPollFd(ctx: *anyopaque) ?std.posix.fd_t {
@@ -463,4 +635,51 @@ test "auxVlanTci ignores absent or foreign tags" {
 
     aux.tp_status = 0;
     try testing.expectEqual(@as(?u16, null), auxVlanTci(control[0..hdr.len]));
+}
+
+test "finishBatch keeps dropped slots empty without aliasing" {
+    var a: [64]u8 = @splat(0);
+    var b: [64]u8 = @splat(0);
+    var c: [64]u8 = @splat(0);
+    var frames = [_]port_mod.BatchFrame{
+        .{ .data = &a },
+        .{ .data = &b },
+        .{ .data = &c },
+    };
+    var msgs = [_]linux.mmsghdr{std.mem.zeroes(linux.mmsghdr)} ** 3;
+    msgs[0].len = 14;
+    msgs[1].len = 14;
+    msgs[2].len = 14;
+    var addrs = [_]linux.sockaddr.ll{std.mem.zeroes(linux.sockaddr.ll)} ** 3;
+    addrs[1].pkttype = linux.PACKET.OUTGOING;
+    var controls = [_][128]u8{[_]u8{0} ** 128} ** 3;
+    var port = AfPacketPort{ .fd = -1, .id = .invalid, .ifindex = 0 };
+
+    const got = port.finishBatch(&frames, &msgs, &addrs, &controls, 3);
+
+    try testing.expectEqual(@as(usize, 3), got);
+    try testing.expectEqual(@as(usize, 14), frames[0].len);
+    try testing.expectEqual(@as(usize, 0), frames[1].len);
+    try testing.expectEqual(@as(usize, 14), frames[2].len);
+    try testing.expect(frames[0].data.ptr == &a);
+    try testing.expect(frames[2].data.ptr == &c);
+    try testing.expectEqual(@as(u64, 2), port.stats.rx_packets);
+    try testing.expectEqual(@as(u64, 1), port.stats.drops);
+}
+
+test "flushImpl refuses a closed port" {
+    var port = AfPacketPort{ .fd = -1, .id = .invalid, .ifindex = 0 };
+    port.closed = true;
+    try testing.expectError(error.Closed, port.flushImpl());
+}
+
+test "flushImpl accounts for a whole batch dropped on a hard error" {
+    var port = AfPacketPort{ .fd = -1, .id = .invalid, .ifindex = 0 };
+    port.tx_count = 2;
+    port.tx_lens[0] = 14;
+    port.tx_lens[1] = 14;
+
+    try testing.expectError(error.Io, port.flushImpl());
+    try testing.expectEqual(@as(u64, 2), port.stats.drops);
+    try testing.expectEqual(@as(u8, 0), port.tx_count);
 }

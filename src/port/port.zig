@@ -53,6 +53,11 @@ pub const Stats = struct {
     drops: u64 = 0,
 };
 
+pub const BatchFrame = struct {
+    data: []u8,
+    len: usize = 0,
+};
+
 /// A port handle. The concrete implementation owns `ctx`; `Port` is copied by
 /// value and is only valid while the implementation is alive.
 pub const Port = struct {
@@ -69,6 +74,15 @@ pub const Port = struct {
         setUp: *const fn (ctx: *anyopaque, io: std.Io, up: bool) PortError!void,
         setMtu: *const fn (ctx: *anyopaque, io: std.Io, mtu: u16) PortError!void,
         close: *const fn (ctx: *anyopaque, io: std.Io) void,
+        /// Optional bulk receive. Implementations that can amortize the
+        /// syscall fill `frames[0..n]` and return `n`; the default loops over
+        /// `read`. Each `data` buffer belongs to the caller. Slots with
+        /// `len == 0` are holes and must be skipped by the caller.
+        read_batch: ?*const fn (ctx: *anyopaque, io: std.Io, frames: []BatchFrame) PortError!usize = null,
+        /// Optional queued write for ports that batch `write_queued` calls.
+        write_queued: ?*const fn (ctx: *anyopaque, io: std.Io, frame: []const u8) PortError!void = null,
+        /// Optional flush for ports that batch `write_queued` calls.
+        flush: ?*const fn (ctx: *anyopaque, io: std.Io) PortError!void = null,
     };
 
     /// Returns null when no frame is currently available. Implementations must
@@ -79,6 +93,39 @@ pub const Port = struct {
 
     pub fn write(self: Port, io: std.Io, frame: []const u8) PortError!void {
         return self.vtable.write(self.ctx, io, frame);
+    }
+
+    /// Writes a frame without necessarily pushing it to the device. Call
+    /// `flush` before waiting for input or shutting down.
+    pub fn writeQueued(self: Port, io: std.Io, frame: []const u8) PortError!void {
+        if (self.vtable.write_queued) |write_queued| return write_queued(self.ctx, io, frame);
+        return self.vtable.write(self.ctx, io, frame);
+    }
+
+    /// Receives up to `frames.len` descriptors. Returns the number of slots
+    /// filled, including holes with `len == 0` for frames dropped by the
+    /// implementation; callers must skip those slots. Implementations may cap
+    /// the batch below `frames.len`.
+    pub fn readBatch(self: Port, io: std.Io, frames: []BatchFrame) PortError!usize {
+        if (self.vtable.read_batch) |read_batch| {
+            return read_batch(self.ctx, io, frames);
+        }
+        var count: usize = 0;
+        for (frames) |*frame| {
+            const maybe_len = self.read(io, frame.data) catch |err| {
+                if (count > 0) return count;
+                return err;
+            };
+            const len = maybe_len orelse break;
+            frame.len = len;
+            count += 1;
+        }
+        return count;
+    }
+
+    /// Pushes any frames held by a batching implementation.
+    pub fn flush(self: Port, io: std.Io) PortError!void {
+        if (self.vtable.flush) |flush_fn| return flush_fn(self.ctx, io);
     }
 
     /// Returns a descriptor that becomes readable when `read` may return a
